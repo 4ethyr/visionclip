@@ -107,4 +107,6 @@ Contribuições da comunidade open source são bem-vindas. Issues, revisões té
 
 Se você abrir um PR, priorize mudanças pequenas, testáveis e com contexto técnico claro. O objetivo é fazer do VisionClip uma base sólida para automação local de screenshots com IA no Linux.
 
+Consulte também [CONTRIBUTING.md](CONTRIBUTING.md).
+
 Em nome de R. Rodrigues.
