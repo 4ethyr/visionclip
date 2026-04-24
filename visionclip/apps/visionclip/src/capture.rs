@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::{
+    collections::VecDeque,
     fs,
     path::{Path, PathBuf},
     process::Stdio,
@@ -7,8 +8,9 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,
-    time::{sleep, timeout, Duration},
+    time::{sleep, timeout, timeout_at, Duration, Instant},
 };
+use tracing::{debug, warn};
 use urlencoding::decode;
 use uuid::Uuid;
 use visionclip_common::{
@@ -27,6 +29,65 @@ enum ResolvedCaptureBackend {
     Grim,
     Maim,
     GnomeScreenshot,
+}
+
+#[derive(Debug, Default)]
+struct PortalMonitorTrace {
+    saw_handle_line: bool,
+    saw_response_signal: bool,
+    response_code: Option<u32>,
+    uri: Option<String>,
+    recent_lines: VecDeque<String>,
+}
+
+impl PortalMonitorTrace {
+    fn reset_for_other_request(&mut self) {
+        self.saw_handle_line = false;
+        self.saw_response_signal = false;
+        self.response_code = None;
+        self.uri = None;
+        self.recent_lines.clear();
+    }
+
+    fn record_line(&mut self, line: &str) {
+        const MAX_RECENT_LINES: usize = 4;
+        const MAX_LINE_CHARS: usize = 160;
+
+        let sanitized = if line.chars().count() > MAX_LINE_CHARS {
+            let truncated = line.chars().take(MAX_LINE_CHARS).collect::<String>();
+            format!("{truncated}...")
+        } else {
+            line.to_string()
+        };
+
+        self.recent_lines.push_back(sanitized);
+        while self.recent_lines.len() > MAX_RECENT_LINES {
+            self.recent_lines.pop_front();
+        }
+    }
+
+    fn summary(&self) -> String {
+        let recent_lines = if self.recent_lines.is_empty() {
+            "none".to_string()
+        } else {
+            self.recent_lines
+                .iter()
+                .map(|line| format!("`{line}`"))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+
+        format!(
+            "handle_seen={}, response_seen={}, response_code={}, uri_seen={}, recent_lines={}",
+            yes_no(self.saw_handle_line),
+            yes_no(self.saw_response_signal),
+            self.response_code
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            yes_no(self.uri.is_some()),
+            recent_lines
+        )
+    }
 }
 
 pub async fn load_image_bytes(
@@ -246,19 +307,40 @@ async fn capture_with_portal(timeout_ms: u64) -> Result<Vec<u8>> {
         options,
     ];
 
+    debug!(timeout_ms, handle_token = %handle_token, "starting portal screenshot capture");
     let mut monitor = start_portal_monitor()?;
     sleep(Duration::from_millis(150)).await;
 
     let output = run_command("gdbus", &args, timeout_ms, "portal screenshot request").await?;
+    let request_output = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    debug!(request_output = %request_output, "portal screenshot request completed");
     let handle = parse_object_path(&String::from_utf8_lossy(&output.stdout))
         .context("failed to parse portal request handle")?;
+    debug!(handle = %handle, "parsed portal screenshot request handle");
     let uri = wait_for_portal_response(&mut monitor, &handle, timeout_ms)
         .await
         .map_err(|error| anyhow::anyhow!("{error}. {}", portal_runtime_hint()))?;
+    debug!(handle = %handle, uri = %uri, "portal screenshot returned URI");
     let path = file_uri_to_path(&uri)?;
+    let exists = path.exists();
+    let file_size = fs::metadata(&path).map(|metadata| metadata.len()).ok();
+    debug!(
+        handle = %handle,
+        path = %path.display(),
+        exists,
+        file_size,
+        "resolved portal screenshot file"
+    );
 
-    fs::read(&path)
-        .with_context(|| format!("failed to read portal screenshot at {}", path.display()))
+    let bytes = fs::read(&path)
+        .with_context(|| format!("failed to read portal screenshot at {}", path.display()))?;
+    debug!(
+        handle = %handle,
+        path = %path.display(),
+        bytes = bytes.len(),
+        "read portal screenshot bytes"
+    );
+    Ok(bytes)
 }
 
 async fn wait_for_portal_response(
@@ -271,49 +353,83 @@ async fn wait_for_portal_response(
         .take()
         .context("failed to capture portal monitor stdout")?;
     let mut lines = BufReader::new(stdout).lines();
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let mut transcript = String::new();
+    let mut trace = PortalMonitorTrace::default();
+    let mut tracking_handle = false;
 
-    let response = timeout(Duration::from_millis(timeout_ms), async {
-        let mut transcript = String::new();
-        let mut tracking_handle = false;
+    loop {
+        let maybe_line = timeout_at(deadline, lines.next_line())
+            .await
+            .with_context(|| {
+                format!(
+                    "portal screenshot timed out after {timeout_ms} ms ({})",
+                    trace.summary()
+                )
+            })??;
 
-        while let Some(line) = lines.next_line().await? {
-            if !tracking_handle {
-                if line.contains(handle) {
-                    tracking_handle = true;
-                } else {
-                    continue;
-                }
-            }
+        let Some(line) = maybe_line else {
+            let _ = monitor.kill().await;
+            anyhow::bail!(
+                "portal response monitor exited before returning a screenshot URI ({})",
+                trace.summary()
+            );
+        };
 
-            if line.starts_with("/org/freedesktop/portal/desktop/request/")
-                && !line.contains(handle)
-            {
-                transcript.clear();
-                tracking_handle = false;
+        if !tracking_handle {
+            if line.contains(handle) {
+                tracking_handle = true;
+                trace.saw_handle_line = true;
+                trace.record_line(&line);
+                debug!(handle = %handle, line = %line, "portal monitor observed request handle");
+            } else {
                 continue;
             }
-
-            transcript.push_str(&line);
-            transcript.push('\n');
-
-            if let Some(code) = extract_portal_response_code(&transcript) {
-                if code == 0 {
-                    if let Some(uri) = extract_portal_uri(&transcript) {
-                        return Ok(uri);
-                    }
-                } else {
-                    anyhow::bail!("portal screenshot canceled (response code {code})");
-                }
-            }
+        } else if line.starts_with("/org/freedesktop/portal/desktop/request/")
+            && !line.contains(handle)
+        {
+            debug!(handle = %handle, line = %line, "portal monitor switched to a different request");
+            transcript.clear();
+            tracking_handle = false;
+            trace.reset_for_other_request();
+            continue;
+        } else {
+            trace.record_line(&line);
         }
 
-        anyhow::bail!("portal response monitor exited before returning a screenshot URI")
-    })
-    .await
-    .with_context(|| format!("portal screenshot timed out after {timeout_ms} ms"))??;
+        if line.contains("org.freedesktop.portal.Request.Response") {
+            trace.saw_response_signal = true;
+            debug!(handle = %handle, line = %line, "portal monitor observed response signal");
+        }
 
-    let _ = monitor.kill().await;
-    Ok(response)
+        transcript.push_str(&line);
+        transcript.push('\n');
+
+        if let Some(code) = extract_portal_response_code(&transcript) {
+            trace.response_code = Some(code);
+
+            if code == 0 {
+                if let Some(uri) = extract_portal_uri(&transcript) {
+                    trace.uri = Some(uri.clone());
+                    debug!(handle = %handle, uri = %uri, "portal response included screenshot URI");
+                    let _ = monitor.kill().await;
+                    return Ok(uri);
+                }
+            } else {
+                warn!(
+                    handle = %handle,
+                    response_code = code,
+                    trace = %trace.summary(),
+                    "portal screenshot canceled or failed"
+                );
+                let _ = monitor.kill().await;
+                anyhow::bail!(
+                    "portal screenshot canceled (response code {code}, {})",
+                    trace.summary()
+                );
+            }
+        }
+    }
 }
 
 fn start_portal_monitor() -> Result<tokio::process::Child> {
@@ -441,6 +557,14 @@ fn render_command(program: &str, args: &[String]) -> String {
     }
 }
 
+fn yes_no(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,5 +641,23 @@ mod tests {
     fn decode_file_uri_to_path() {
         let path = file_uri_to_path("file:///tmp/screenshot%20one.png").unwrap();
         assert_eq!(path, PathBuf::from("/tmp/screenshot one.png"));
+    }
+
+    #[test]
+    fn portal_monitor_trace_summary_reports_recent_lines() {
+        let mut trace = PortalMonitorTrace {
+            saw_handle_line: true,
+            saw_response_signal: false,
+            response_code: None,
+            uri: None,
+            recent_lines: VecDeque::new(),
+        };
+        trace.record_line("first line");
+        trace.record_line("second line");
+
+        let summary = trace.summary();
+        assert!(summary.contains("handle_seen=yes"));
+        assert!(summary.contains("response_seen=no"));
+        assert!(summary.contains("`first line` | `second line`"));
     }
 }
