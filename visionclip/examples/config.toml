@@ -1,0 +1,28 @@
+[general]
+default_action = "translate_ptbr"
+log_level = "info"
+
+[capture]
+backend = "auto"
+prefer_portal = true
+capture_timeout_ms = 10000
+
+[infer]
+backend = "ollama"
+base_url = "http://127.0.0.1:11434"
+model = "gemma4:e2b"
+keep_alive = "15m"
+temperature = 0.1
+thinking_default = ""
+
+[audio]
+enabled = true
+backend = "piper_http"
+base_url = "http://127.0.0.1:5000"
+default_voice = ""
+speak_actions = ["TranslatePtBr", "Explain", "SearchWeb"]
+player_command = "paplay"
+
+[ui]
+overlay = "compact"
+show_notification = true

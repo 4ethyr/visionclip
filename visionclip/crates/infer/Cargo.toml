@@ -1,0 +1,18 @@
+[package]
+name = "visionclip-infer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+visionclip-common = { path = "../common" }
+anyhow.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

@@ -1,0 +1,381 @@
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+use reqwest::{Client, StatusCode};
+use serde_json::json;
+use std::env;
+use visionclip_common::AppConfig;
+use visionclip_infer::{list_ollama_models, OllamaModelSummary};
+
+#[derive(Debug, Parser)]
+#[command(name = "visionclip-config")]
+#[command(about = "Ferramenta de configuração e diagnóstico do VisionClip")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    Init,
+    Doctor,
+    Models,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Init => {
+            let path = AppConfig::ensure_default_config()?;
+            println!("Configuração criada em {}", path.display());
+        }
+        Commands::Doctor => run_doctor().await?,
+        Commands::Models => run_models().await?,
+    }
+
+    Ok(())
+}
+
+async fn run_doctor() -> Result<()> {
+    let config = AppConfig::load()?;
+
+    println!("Config path: {}", AppConfig::config_path()?.display());
+    println!("Socket: {}", config.socket_path()?.display());
+    println!("Session: {}", detect_session_type());
+    println!("Default action: {}", config.general.default_action);
+    println!("Configured model: {}", config.infer.model);
+    println!("Ollama URL: {}", config.infer.base_url);
+
+    match list_ollama_models(&config.infer.base_url).await {
+        Ok(models) => {
+            let available = model_available(&models, &config.infer.model);
+            println!("Ollama API: ok");
+            println!("Ollama models: {}", models.len());
+            println!("Configured model available: {}", yes_no(available));
+
+            if available {
+                match probe_ollama_model(
+                    &config.infer.base_url,
+                    &config.infer.model,
+                    &config.infer.thinking_default,
+                )
+                .await
+                {
+                    Ok(()) => println!("Configured model probe: ok"),
+                    Err(error) => println!("Configured model probe: failed ({error})"),
+                }
+            }
+        }
+        Err(error) => {
+            println!("Ollama API: unavailable ({error})");
+        }
+    }
+
+    println!("Piper URL: {}", config.audio.base_url);
+    match probe_http(&config.audio.base_url).await {
+        Ok(status) => println!("Piper endpoint: reachable ({status})"),
+        Err(error) => println!("Piper endpoint: unavailable ({error})"),
+    }
+
+    println!("Desktop integration:");
+    for tool in [
+        "ollama",
+        "notify-send",
+        "xdg-open",
+        "wl-copy",
+        "wl-paste",
+        "xclip",
+        "paplay",
+        "pw-play",
+        "aplay",
+        "grim",
+        "maim",
+        "gnome-screenshot",
+    ] {
+        println!("  {tool}: {}", tool_status(tool));
+    }
+
+    Ok(())
+}
+
+async fn run_models() -> Result<()> {
+    let config = AppConfig::load()?;
+    let models = list_ollama_models(&config.infer.base_url).await?;
+
+    if models.is_empty() {
+        println!("Nenhum modelo encontrado em {}", config.infer.base_url);
+        return Ok(());
+    }
+
+    println!("Modelos disponíveis em {}:", config.infer.base_url);
+    for model in models {
+        println!(
+            "- {} | {} | family={} | format={} | quant={} | modified={}",
+            model.name,
+            human_size(model.size),
+            value_or_dash(&model.details.family),
+            value_or_dash(&model.details.format),
+            value_or_dash(&model.details.quantization_level),
+            value_or_dash(&model.modified_at),
+        );
+    }
+
+    Ok(())
+}
+
+async fn probe_http(base_url: &str) -> Result<reqwest::StatusCode> {
+    let response = Client::new().get(base_url).send().await?;
+    Ok(response.status())
+}
+
+async fn probe_ollama_model(base_url: &str, model: &str, thinking_default: &str) -> Result<()> {
+    let client = Client::new();
+    let url = format!("{}/api/chat", base_url.trim_end_matches('/'));
+    let mut include_thinking = !thinking_default.trim().is_empty();
+
+    loop {
+        let mut payload = json!({
+            "model": model,
+            "stream": false,
+            "keep_alive": "0s",
+            "options": {
+                "temperature": 0.0,
+                "num_predict": 1
+            },
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Reply with OK."
+                }
+            ]
+        });
+
+        if include_thinking {
+            payload["think"] = json!(thinking_default);
+        }
+
+        let response = client.post(&url).json(&payload).send().await?;
+        if response.status().is_success() {
+            return Ok(());
+        }
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let unsupported_thinking = include_thinking
+            && status == StatusCode::BAD_REQUEST
+            && body.contains("does not support thinking");
+
+        if unsupported_thinking {
+            include_thinking = false;
+            continue;
+        }
+
+        let body = body.trim();
+        if body.is_empty() {
+            anyhow::bail!("Ollama returned {}", status);
+        }
+
+        anyhow::bail!("Ollama returned {}: {}", status, body);
+    }
+}
+
+fn model_available(models: &[OllamaModelSummary], configured_model: &str) -> bool {
+    models.iter().any(|model| {
+        model.name.eq_ignore_ascii_case(configured_model)
+            || model.model.eq_ignore_ascii_case(configured_model)
+    })
+}
+
+fn detect_session_type() -> &'static str {
+    match env::var("XDG_SESSION_TYPE") {
+        Ok(value) if value.eq_ignore_ascii_case("wayland") => "wayland",
+        Ok(value) if value.eq_ignore_ascii_case("x11") => "x11",
+        Ok(_) => "other",
+        Err(_) => "unknown",
+    }
+}
+
+fn tool_status(name: &str) -> String {
+    which::which(name)
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "não encontrado".into())
+}
+
+fn human_size(bytes: u64) -> String {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+
+    if bytes >= GIB {
+        format!("{:.2} GiB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.2} MiB", bytes as f64 / MIB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn value_or_dash(value: &str) -> &str {
+    if value.trim().is_empty() {
+        "-"
+    } else {
+        value
+    }
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::mpsc,
+        thread,
+    };
+
+    #[derive(Clone, Copy)]
+    struct TestResponse {
+        status_line: &'static str,
+        body: &'static str,
+    }
+
+    struct TestServer {
+        base_url: String,
+        request_rx: mpsc::Receiver<Vec<(String, String)>>,
+        handle: thread::JoinHandle<()>,
+    }
+
+    impl TestServer {
+        fn spawn_sequence(responses: Vec<TestResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let (request_tx, request_rx) = mpsc::channel();
+
+            let handle = thread::spawn(move || {
+                let mut requests = Vec::new();
+
+                for response in responses {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let mut request = Vec::new();
+                    let mut buffer = [0_u8; 4096];
+
+                    loop {
+                        let read = stream.read(&mut buffer).unwrap();
+                        if read == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&buffer[..read]);
+
+                        if header_end(&request).is_some() {
+                            break;
+                        }
+                    }
+
+                    let header_end = header_end(&request).unwrap();
+                    let headers = String::from_utf8_lossy(&request[..header_end]).to_string();
+                    let content_length = content_length(&headers);
+                    let mut body = request[header_end + 4..].to_vec();
+
+                    while body.len() < content_length {
+                        let read = stream.read(&mut buffer).unwrap();
+                        if read == 0 {
+                            break;
+                        }
+                        body.extend_from_slice(&buffer[..read]);
+                    }
+
+                    requests.push((headers, String::from_utf8(body).unwrap()));
+
+                    let response = format!(
+                        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        response.status_line,
+                        response.body.len(),
+                        response.body
+                    );
+                    stream.write_all(response.as_bytes()).unwrap();
+                    stream.flush().unwrap();
+                }
+
+                request_tx.send(requests).unwrap();
+            });
+
+            Self {
+                base_url: format!("http://{}", address),
+                request_rx,
+                handle,
+            }
+        }
+
+        fn finish(self) -> Vec<(String, String)> {
+            let requests = self.request_rx.recv().unwrap();
+            self.handle.join().unwrap();
+            requests
+        }
+    }
+
+    fn header_end(request: &[u8]) -> Option<usize> {
+        request.windows(4).position(|window| window == b"\r\n\r\n")
+    }
+
+    fn content_length(headers: &str) -> usize {
+        headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                if name.eq_ignore_ascii_case("content-length") {
+                    value.trim().parse().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn probe_ollama_model_retries_without_thinking() {
+        let server = TestServer::spawn_sequence(vec![
+            TestResponse {
+                status_line: "400 Bad Request",
+                body: r#"{"error":"\"gemma4:test\" does not support thinking"}"#,
+            },
+            TestResponse {
+                status_line: "200 OK",
+                body: r#"{"message":{"content":"OK"}}"#,
+            },
+        ]);
+
+        probe_ollama_model(&server.base_url, "gemma4:test", "low")
+            .await
+            .unwrap();
+
+        let requests = server.finish();
+        assert_eq!(requests.len(), 2);
+        let first_json: serde_json::Value = serde_json::from_str(&requests[0].1).unwrap();
+        let second_json: serde_json::Value = serde_json::from_str(&requests[1].1).unwrap();
+        assert_eq!(first_json["think"], "low");
+        assert!(second_json.get("think").is_none());
+    }
+
+    #[tokio::test]
+    async fn probe_ollama_model_surfaces_runtime_error() {
+        let server = TestServer::spawn_sequence(vec![TestResponse {
+            status_line: "500 Internal Server Error",
+            body: r#"{"error":"unable to load model"}"#,
+        }]);
+
+        let error = probe_ollama_model(&server.base_url, "gemma4:test", "")
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("500 Internal Server Error"));
+        assert!(error.to_string().contains("unable to load model"));
+    }
+}

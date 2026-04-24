@@ -1,0 +1,13 @@
+[package]
+name = "visionclip-output"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+visionclip-common = { path = "../common" }
+arboard.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+urlencoding.workspace = true
+which.workspace = true
