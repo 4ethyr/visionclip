@@ -1,10 +1,14 @@
+mod search;
+
+use crate::search::GoogleSearchClient;
 use anyhow::{Context, Result};
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::Instant};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{error, info, warn};
 use visionclip_common::{read_message, write_message, Action, AppConfig, CaptureJob, JobResult};
 use visionclip_infer::{
-    postprocess::sanitize_output, InferenceBackend, InferenceInput, OllamaBackend,
+    postprocess::{sanitize_for_speech, sanitize_output},
+    InferenceBackend, InferenceInput, OllamaBackend,
 };
 use visionclip_output::{notify, open_search_query, ClipboardOwner};
 use visionclip_tts::PiperHttpClient;
@@ -30,6 +34,11 @@ async fn main() -> Result<()> {
         config: config.clone(),
         clipboard: ClipboardOwner::new().context("failed to initialize clipboard owner")?,
         infer: OllamaBackend::new(config.infer.clone()),
+        search: if config.search.enabled {
+            Some(GoogleSearchClient::new(config.search.clone())?)
+        } else {
+            None
+        },
         piper: if config.audio.enabled {
             Some(PiperHttpClient::new(config.audio.clone()))
         } else {
@@ -52,6 +61,7 @@ struct AppState {
     config: AppConfig,
     clipboard: ClipboardOwner,
     infer: OllamaBackend,
+    search: Option<GoogleSearchClient>,
     piper: Option<PiperHttpClient>,
 }
 
@@ -75,61 +85,361 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<AppState>) -> Resu
 }
 
 async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
-    let inference = state
-        .infer
-        .infer(InferenceInput {
-            action: job.action.clone(),
-            image_bytes: job.image_bytes.clone(),
-            mime_type: job.mime_type.clone(),
-        })
-        .await?;
+    let request_id = job.request_id;
+    let action_name = job.action.as_str();
+    let total_started_at = Instant::now();
+    info!(
+        request_id = %request_id,
+        action = action_name,
+        image_bytes = job.image_bytes.len(),
+        speak_requested = job.speak,
+        "processing capture job"
+    );
 
+    let ocr_started_at = Instant::now();
+    let mut ocr_ms = 0_u64;
+    let mut ocr_chars = 0_usize;
+    let mut ocr_text = None;
+    let use_dedicated_ocr = state.infer.has_ocr_model();
+    if use_dedicated_ocr {
+        let ocr_action = match job.action {
+            Action::ExtractCode => Action::ExtractCode,
+            _ => Action::CopyText,
+        };
+
+        match state
+            .infer
+            .infer_with_ocr_model(
+                request_id.to_string(),
+                ocr_action,
+                job.image_bytes.clone(),
+                job.mime_type.clone(),
+            )
+            .await
+        {
+            Ok(output) => {
+                ocr_ms = elapsed_ms(ocr_started_at);
+                let extracted = output.text.trim().to_string();
+                if !extracted.is_empty() {
+                    ocr_chars = extracted.chars().count();
+                    ocr_text = Some(extracted);
+                }
+            }
+            Err(error) => {
+                ocr_ms = elapsed_ms(ocr_started_at);
+                warn!(
+                    ?error,
+                    request_id = %request_id,
+                    action = action_name,
+                    "dedicated OCR stage failed; falling back to primary inference path"
+                );
+            }
+        }
+    }
+
+    let infer_started_at = Instant::now();
+    let mut inference_mode = "primary_image";
+    let inference = match job.action {
+        Action::CopyText | Action::ExtractCode => {
+            if let Some(text) = ocr_text.clone() {
+                inference_mode = "ocr_only";
+                visionclip_infer::backend::InferenceOutput { text }
+            } else {
+                state
+                    .infer
+                    .infer(InferenceInput {
+                        request_id: request_id.to_string(),
+                        action: job.action.clone(),
+                        source_app: job.source_app.clone(),
+                        image_bytes: job.image_bytes.clone(),
+                        mime_type: job.mime_type.clone(),
+                    })
+                    .await?
+            }
+        }
+        _ => {
+            if let Some(text) = ocr_text.clone().filter(|value| value.chars().count() >= 12) {
+                inference_mode = "ocr_text_to_reasoning";
+                match state
+                    .infer
+                    .infer_from_text(
+                        request_id.to_string(),
+                        job.action.clone(),
+                        job.source_app.clone(),
+                        text,
+                    )
+                    .await
+                {
+                    Ok(output) if !output.text.trim().is_empty() => output,
+                    Ok(_) => {
+                        warn!(
+                            request_id = %request_id,
+                            action = action_name,
+                            "OCR text to reasoning returned empty content; falling back to primary image inference"
+                        );
+                        inference_mode = "primary_image_fallback";
+                        state
+                            .infer
+                            .infer(InferenceInput {
+                                request_id: request_id.to_string(),
+                                action: job.action.clone(),
+                                source_app: job.source_app.clone(),
+                                image_bytes: job.image_bytes.clone(),
+                                mime_type: job.mime_type.clone(),
+                            })
+                            .await?
+                    }
+                    Err(error) => {
+                        warn!(
+                            ?error,
+                            request_id = %request_id,
+                            action = action_name,
+                            "OCR text to reasoning failed; falling back to primary image inference"
+                        );
+                        inference_mode = "primary_image_fallback";
+                        state
+                            .infer
+                            .infer(InferenceInput {
+                                request_id: request_id.to_string(),
+                                action: job.action.clone(),
+                                source_app: job.source_app.clone(),
+                                image_bytes: job.image_bytes.clone(),
+                                mime_type: job.mime_type.clone(),
+                            })
+                            .await?
+                    }
+                }
+            } else {
+                state
+                    .infer
+                    .infer(InferenceInput {
+                        request_id: request_id.to_string(),
+                        action: job.action.clone(),
+                        source_app: job.source_app.clone(),
+                        image_bytes: job.image_bytes.clone(),
+                        mime_type: job.mime_type.clone(),
+                    })
+                    .await?
+            }
+        }
+    };
+    let infer_ms = elapsed_ms(infer_started_at);
+
+    let sanitize_started_at = Instant::now();
     let cleaned = sanitize_output(&job.action, &inference.text);
-    let spoken = state
+    let sanitize_ms = elapsed_ms(sanitize_started_at);
+    let output_chars = cleaned.chars().count();
+    let speak_requested = state
         .config
         .action_should_speak(job.action.as_str(), job.speak);
 
     match job.action {
         Action::SearchWeb => {
-            open_search_query(&cleaned)?;
-            let _ = notify("VisionClip", "Consulta aberta no navegador.");
+            let mut search_fetch_ms = 0_u64;
+            let mut search_summary = None;
+            let mut search_spoken_text = None;
+            let mut search_result_count = 0_usize;
+            let mut ai_overview_chars = 0_usize;
 
-            if spoken {
-                if let Some(piper) = &state.piper {
-                    let wav = piper.synthesize(&cleaned, None).await?;
-                    if let Err(error) = piper.play_wav(&wav) {
-                        warn!(?error, "failed to play synthesized audio");
+            if let Some(search) = &state.search {
+                let search_started_at = Instant::now();
+                match search.search(&cleaned).await {
+                    Ok(enrichment) => {
+                        search_fetch_ms = elapsed_ms(search_started_at);
+                        search_result_count = enrichment.snippets.len();
+                        ai_overview_chars = enrichment
+                            .ai_overview
+                            .as_ref()
+                            .map(|value| value.chars().count())
+                            .unwrap_or_default();
+                        search_spoken_text = enrichment.spoken_text(&cleaned);
+                        search_summary = enrichment.clipboard_text(&cleaned);
+                    }
+                    Err(error) => {
+                        search_fetch_ms = elapsed_ms(search_started_at);
+                        warn!(?error, request_id = %request_id, query = %cleaned, search_fetch_ms, "failed to enrich search query");
                     }
                 }
             }
 
+            let output_started_at = Instant::now();
+            if let Some(summary) = &search_summary {
+                state.clipboard.set_text(summary)?;
+            }
+            if state.config.search.open_browser {
+                open_search_query(&cleaned)?;
+            }
+            let _ = notify(
+                "VisionClip",
+                if search_summary.is_some() {
+                    "Pesquisa aberta e resumo inicial copiado."
+                } else {
+                    "Consulta aberta no navegador."
+                },
+            );
+            let output_ms = elapsed_ms(output_started_at);
+            let tts_text = sanitize_for_speech(
+                &job.action,
+                search_spoken_text
+                    .as_deref()
+                    .unwrap_or("Pesquisa aberta no navegador para aprofundar o tema."),
+            );
+            let (tts_enqueue_ms, spoken) = enqueue_tts(
+                state.piper.as_ref(),
+                request_id,
+                action_name,
+                &tts_text,
+                None,
+                speak_requested,
+            );
+
+            info!(
+                request_id = %request_id,
+                action = action_name,
+                inference_mode,
+                ocr_ms,
+                ocr_chars,
+                infer_ms,
+                sanitize_ms,
+                output_chars,
+                search_fetch_ms,
+                search_result_count,
+                ai_overview_chars,
+                search_summary_chars = search_summary
+                    .as_ref()
+                    .map(|value| value.chars().count())
+                    .unwrap_or_default(),
+                output_ms,
+                speak_requested,
+                spoken,
+                tts_enqueue_ms,
+                total_ms = elapsed_ms(total_started_at),
+                "capture job completed"
+            );
+
             Ok(JobResult::BrowserQuery {
-                request_id: job.request_id,
+                request_id,
                 query: cleaned,
+                summary: search_summary,
+                spoken,
             })
         }
         _ => {
-            state.clipboard.set_text(&cleaned)?;
-            let _ = notify(
-                "VisionClip",
-                "Resultado copiado para a área de transferência.",
+            let output_started_at = Instant::now();
+            if cleaned.trim().is_empty() {
+                let _ = notify(
+                    "VisionClip",
+                    "Nenhum resultado textual útil foi retornado para esta captura.",
+                );
+            } else {
+                state.clipboard.set_text(&cleaned)?;
+                let _ = notify(
+                    "VisionClip",
+                    "Resultado copiado para a área de transferência.",
+                );
+            }
+            let output_ms = elapsed_ms(output_started_at);
+            let speech_text = sanitize_for_speech(&job.action, &cleaned);
+            let (tts_enqueue_ms, spoken) = enqueue_tts(
+                state.piper.as_ref(),
+                request_id,
+                action_name,
+                &speech_text,
+                Some(tts_fallback_message(&job.action)),
+                speak_requested,
             );
 
-            if spoken {
-                if let Some(piper) = &state.piper {
-                    let wav = piper.synthesize(&cleaned, None).await?;
-                    if let Err(error) = piper.play_wav(&wav) {
-                        warn!(?error, "failed to play synthesized audio");
-                    }
-                }
-            }
+            info!(
+                request_id = %request_id,
+                action = action_name,
+                inference_mode,
+                ocr_ms,
+                ocr_chars,
+                infer_ms,
+                sanitize_ms,
+                output_chars,
+                output_ms,
+                speak_requested,
+                spoken,
+                tts_enqueue_ms,
+                total_ms = elapsed_ms(total_started_at),
+                "capture job completed"
+            );
 
             Ok(JobResult::ClipboardText {
-                request_id: job.request_id,
+                request_id,
                 text: cleaned,
                 spoken,
             })
         }
+    }
+}
+
+fn enqueue_tts(
+    piper: Option<&PiperHttpClient>,
+    request_id: uuid::Uuid,
+    action_name: &str,
+    text: &str,
+    fallback_text: Option<&str>,
+    requested: bool,
+) -> (u64, bool) {
+    if !requested {
+        return (0, false);
+    }
+
+    let Some(piper) = piper.cloned() else {
+        return (0, false);
+    };
+
+    let text = if text.trim().is_empty() {
+        let Some(fallback) = fallback_text.filter(|value| !value.trim().is_empty()) else {
+            warn!(request_id = %request_id, action = %action_name, "skipping TTS for empty text");
+            return (0, false);
+        };
+        fallback.trim().to_string()
+    } else {
+        text.trim().to_string()
+    };
+
+    let enqueue_started_at = Instant::now();
+    let action_name = action_name.to_string();
+
+    tokio::spawn(async move {
+        let tts_started_at = Instant::now();
+        match piper.synthesize(&text, None).await {
+            Ok(wav) => {
+                let tts_synthesize_ms = elapsed_ms(tts_started_at);
+                let dispatch_started_at = Instant::now();
+                if let Err(error) = piper.play_wav_detached(&wav) {
+                    warn!(?error, request_id = %request_id, action = %action_name, "failed to dispatch synthesized audio");
+                    return;
+                }
+
+                info!(
+                    request_id = %request_id,
+                    action = %action_name,
+                    output_chars = text.chars().count(),
+                    tts_synthesize_ms,
+                    tts_dispatch_ms = elapsed_ms(dispatch_started_at),
+                    "background TTS dispatched"
+                );
+            }
+            Err(error) => {
+                warn!(?error, request_id = %request_id, action = %action_name, "failed to synthesize audio");
+            }
+        }
+    });
+
+    (elapsed_ms(enqueue_started_at), true)
+}
+
+fn tts_fallback_message(action: &Action) -> &'static str {
+    match action {
+        Action::TranslatePtBr => "Não foi possível realizar a tradução para esta captura.",
+        Action::Explain => "Não foi possível gerar uma explicação útil para esta captura.",
+        Action::CopyText => "Não foi possível extrair texto desta captura.",
+        Action::ExtractCode => "Não foi possível extrair código desta captura.",
+        Action::SearchWeb => "Pesquisa aberta no navegador para aprofundar o tema.",
     }
 }
 
@@ -139,4 +449,8 @@ fn cleanup_existing_socket(socket_path: &PathBuf) -> Result<()> {
             .with_context(|| format!("failed to remove stale socket {}", socket_path.display()))?;
     }
     Ok(())
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    started_at.elapsed().as_millis() as u64
 }

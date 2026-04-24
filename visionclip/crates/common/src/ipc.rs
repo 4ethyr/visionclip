@@ -67,6 +67,8 @@ pub enum JobResult {
     BrowserQuery {
         request_id: Uuid,
         query: String,
+        summary: Option<String>,
+        spoken: bool,
     },
     Error {
         request_id: Uuid,

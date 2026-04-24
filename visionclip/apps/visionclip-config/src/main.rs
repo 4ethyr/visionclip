@@ -58,14 +58,24 @@ async fn run_doctor() -> Result<()> {
         summarize_portal_backends(&screenshot_portal_backends_for_current_desktop())
     );
     println!("Configured model: {}", config.infer.model);
+    if config.infer.ocr_model.trim().is_empty() {
+        println!("Configured OCR model: disabled");
+    } else {
+        println!("Configured OCR model: {}", config.infer.ocr_model);
+    }
     println!("Ollama URL: {}", config.infer.base_url);
 
     match list_ollama_models(&config.infer.base_url).await {
         Ok(models) => {
             let available = model_available(&models, &config.infer.model);
+            let ocr_available = !config.infer.ocr_model.trim().is_empty()
+                && model_available(&models, &config.infer.ocr_model);
             println!("Ollama API: ok");
             println!("Ollama models: {}", models.len());
             println!("Configured model available: {}", yes_no(available));
+            if !config.infer.ocr_model.trim().is_empty() {
+                println!("Configured OCR model available: {}", yes_no(ocr_available));
+            }
 
             if available {
                 match probe_ollama_model_with_timeout(
@@ -78,6 +88,19 @@ async fn run_doctor() -> Result<()> {
                 {
                     Ok(()) => println!("Configured model probe: ok"),
                     Err(error) => println!("Configured model probe: failed ({error})"),
+                }
+            }
+            if ocr_available {
+                match probe_ollama_model_with_timeout(
+                    &config.infer.base_url,
+                    &config.infer.ocr_model,
+                    "",
+                    OLLAMA_PROBE_TIMEOUT_MS,
+                )
+                .await
+                {
+                    Ok(()) => println!("Configured OCR model probe: ok"),
+                    Err(error) => println!("Configured OCR model probe: failed ({error})"),
                 }
             }
         }

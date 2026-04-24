@@ -11,9 +11,17 @@ capture_timeout_ms = 30000
 backend = "ollama"
 base_url = "http://127.0.0.1:11434"
 model = "gemma4:e2b"
+ocr_model = "glm-ocr:latest"
 keep_alive = "15m"
 temperature = 0.1
 thinking_default = ""
+
+[search]
+enabled = true
+base_url = "https://www.google.com/search"
+request_timeout_ms = 10000
+max_results = 3
+open_browser = true
 
 [audio]
 enabled = true
@@ -21,7 +29,7 @@ backend = "piper_http"
 base_url = "http://127.0.0.1:5000"
 default_voice = ""
 speak_actions = ["TranslatePtBr", "Explain", "SearchWeb"]
-player_command = "paplay"
+player_command = "pw-play"
 
 [ui]
 overlay = "compact"

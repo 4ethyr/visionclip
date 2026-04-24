@@ -12,6 +12,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub infer: InferConfig,
     #[serde(default)]
+    pub search: SearchConfig,
+    #[serde(default)]
     pub audio: AudioConfig,
     #[serde(default)]
     pub ui: UiConfig,
@@ -43,12 +45,28 @@ pub struct InferConfig {
     pub base_url: String,
     #[serde(default = "default_ollama_model")]
     pub model: String,
+    #[serde(default = "default_ollama_ocr_model")]
+    pub ocr_model: String,
     #[serde(default = "default_keep_alive")]
     pub keep_alive: String,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
     #[serde(default = "default_thinking")]
     pub thinking_default: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_search_base_url")]
+    pub base_url: String,
+    #[serde(default = "default_search_request_timeout_ms")]
+    pub request_timeout_ms: u64,
+    #[serde(default = "default_search_max_results")]
+    pub max_results: usize,
+    #[serde(default = "default_true")]
+    pub open_browser: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +172,7 @@ impl Default for AppConfig {
             general: GeneralConfig::default(),
             capture: CaptureConfig::default(),
             infer: InferConfig::default(),
+            search: SearchConfig::default(),
             audio: AudioConfig::default(),
             ui: UiConfig::default(),
         }
@@ -185,6 +204,7 @@ impl Default for InferConfig {
             backend: default_infer_backend(),
             base_url: default_ollama_base_url(),
             model: default_ollama_model(),
+            ocr_model: default_ollama_ocr_model(),
             keep_alive: default_keep_alive(),
             temperature: default_temperature(),
             thinking_default: default_thinking(),
@@ -201,6 +221,18 @@ impl Default for AudioConfig {
             default_voice: String::new(),
             speak_actions: default_speak_actions(),
             player_command: default_player_command(),
+        }
+    }
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            base_url: default_search_base_url(),
+            request_timeout_ms: default_search_request_timeout_ms(),
+            max_results: default_search_max_results(),
+            open_browser: default_true(),
         }
     }
 }
@@ -246,6 +278,10 @@ fn default_ollama_model() -> String {
     "gemma4:e2b".to_string()
 }
 
+fn default_ollama_ocr_model() -> String {
+    "glm-ocr:latest".to_string()
+}
+
 fn default_keep_alive() -> String {
     "15m".to_string()
 }
@@ -256,6 +292,18 @@ fn default_temperature() -> f32 {
 
 fn default_thinking() -> String {
     String::new()
+}
+
+fn default_search_base_url() -> String {
+    "https://www.google.com/search".to_string()
+}
+
+fn default_search_request_timeout_ms() -> u64 {
+    10_000
+}
+
+fn default_search_max_results() -> usize {
+    3
 }
 
 fn default_audio_backend() -> String {
@@ -333,6 +381,7 @@ mod tests {
     fn default_config_has_expected_model() {
         let cfg = AppConfig::default();
         assert_eq!(cfg.infer.model, "gemma4:e2b");
+        assert_eq!(cfg.infer.ocr_model, "glm-ocr:latest");
         assert!(cfg.infer.thinking_default.is_empty());
         assert!(cfg.audio.enabled);
     }
@@ -349,8 +398,8 @@ mod tests {
     #[test]
     fn explicit_config_path_supports_legacy_override() {
         assert_eq!(
-            explicit_config_path(None, Some("/tmp/legacy-ai-snap.toml".into())),
-            Some(PathBuf::from("/tmp/legacy-ai-snap.toml"))
+            explicit_config_path(None, Some("/home/demo/.config/ai-snap/config.toml".into())),
+            Some(PathBuf::from("/home/demo/.config/ai-snap/config.toml"))
         );
     }
 
@@ -358,10 +407,10 @@ mod tests {
     fn explicit_config_path_prefers_visionclip_override() {
         assert_eq!(
             explicit_config_path(
-                Some("/tmp/visionclip.toml".into()),
-                Some("/tmp/legacy-ai-snap.toml".into())
+                Some("/home/demo/.config/visionclip/config.toml".into()),
+                Some("/home/demo/.config/ai-snap/config.toml".into())
             ),
-            Some(PathBuf::from("/tmp/visionclip.toml"))
+            Some(PathBuf::from("/home/demo/.config/visionclip/config.toml"))
         );
     }
 }

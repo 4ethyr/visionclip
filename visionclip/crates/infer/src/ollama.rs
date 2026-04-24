@@ -1,11 +1,13 @@
 use crate::backend::{InferenceBackend, InferenceInput, InferenceOutput};
-use crate::prompts::{policy_for_action, system_prompt, user_prompt};
+use crate::prompts::{policy_for_action, system_prompt, user_prompt, user_prompt_from_text};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use serde_json::json;
+use std::time::Instant;
+use tracing::info;
 use visionclip_common::config::InferConfig;
 
 #[derive(Debug, Clone)]
@@ -22,15 +24,56 @@ impl OllamaBackend {
         }
     }
 
-    fn chat_payload(&self, input: &InferenceInput, include_thinking: bool) -> serde_json::Value {
+    pub fn has_ocr_model(&self) -> bool {
+        !self.config.ocr_model.trim().is_empty()
+    }
+
+    pub async fn infer_with_ocr_model(
+        &self,
+        request_id: String,
+        action: visionclip_common::ipc::Action,
+        image_bytes: Vec<u8>,
+        mime_type: String,
+    ) -> Result<InferenceOutput> {
+        let input = InferenceInput {
+            request_id,
+            action,
+            source_app: None,
+            image_bytes,
+            mime_type,
+        };
+        let model = if self.has_ocr_model() {
+            self.config.ocr_model.as_str()
+        } else {
+            self.config.model.as_str()
+        };
+
+        self.infer_image_with_model(&input, model).await
+    }
+
+    pub async fn infer_from_text(
+        &self,
+        request_id: String,
+        action: visionclip_common::ipc::Action,
+        source_app: Option<String>,
+        ocr_text: String,
+    ) -> Result<InferenceOutput> {
+        let model = self.config.model.as_str();
+        let payload = self.text_chat_payload(model, &action, source_app.as_deref(), &ocr_text);
+        self.send_chat_request(&request_id, &action, model, "text", payload)
+            .await
+    }
+
+    fn image_chat_payload(&self, model: &str, input: &InferenceInput) -> serde_json::Value {
         let policy = policy_for_action(&input.action);
         let image_b64 = STANDARD.encode(&input.image_bytes);
-        let mut payload = json!({
-            "model": self.config.model,
+        json!({
+            "model": model,
             "stream": false,
             "keep_alive": self.config.keep_alive,
             "options": {
-                "temperature": self.config.temperature
+                "temperature": self.config.temperature,
+                "num_predict": num_predict_for_action(&input.action, "image")
             },
             "messages": [
                 {
@@ -39,17 +82,145 @@ impl OllamaBackend {
                 },
                 {
                     "role": "user",
-                    "content": user_prompt(&input.action),
+                    "content": user_prompt(&input.action, input.source_app.as_deref()),
                     "images": [image_b64]
                 }
             ]
-        });
+        })
+    }
 
-        if include_thinking && !self.config.thinking_default.trim().is_empty() {
-            payload["think"] = json!(self.config.thinking_default);
-        }
+    fn text_chat_payload(
+        &self,
+        model: &str,
+        action: &visionclip_common::ipc::Action,
+        source_app: Option<&str>,
+        ocr_text: &str,
+    ) -> serde_json::Value {
+        let policy = policy_for_action(action);
 
-        payload
+        json!({
+            "model": model,
+            "stream": false,
+            "keep_alive": self.config.keep_alive,
+            "options": {
+                "temperature": self.config.temperature,
+                "num_predict": num_predict_for_action(action, "text")
+            },
+            "messages": [
+                {
+                    "role": "system",
+                    "content": system_prompt(policy)
+                },
+                {
+                    "role": "user",
+                    "content": user_prompt_from_text(action, source_app, ocr_text)
+                }
+            ]
+        })
+    }
+
+    async fn infer_image_with_model(
+        &self,
+        input: &InferenceInput,
+        model: &str,
+    ) -> Result<InferenceOutput> {
+        let payload = self.image_chat_payload(model, input);
+        self.send_chat_request(&input.request_id, &input.action, model, "image", payload)
+            .await
+    }
+
+    async fn send_chat_request(
+        &self,
+        request_id: &str,
+        action: &visionclip_common::ipc::Action,
+        model: &str,
+        input_mode: &str,
+        payload_template: serde_json::Value,
+    ) -> Result<InferenceOutput> {
+        let url = format!("{}/api/chat", self.config.base_url.trim_end_matches('/'));
+        let mut think_value = default_think_value(&self.config.thinking_default);
+        let request_started_at = Instant::now();
+        let mut attempts = 0_u32;
+
+        let response = loop {
+            attempts += 1;
+            let mut payload = payload_template.clone();
+            if let Some(value) = think_value.clone() {
+                payload["think"] = value;
+            }
+
+            let response = self
+                .client
+                .post(&url)
+                .json(&payload)
+                .send()
+                .await
+                .context("failed to call Ollama")?;
+
+            if response.status().is_success() {
+                break response;
+            }
+
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "failed to read Ollama error body".to_string());
+
+            let thinking_unsupported = think_value.is_some()
+                && status == StatusCode::BAD_REQUEST
+                && body.to_ascii_lowercase().contains("think");
+
+            if thinking_unsupported {
+                think_value = None;
+                continue;
+            }
+
+            let body = body.trim();
+            if body.is_empty() {
+                return Err(anyhow!("Ollama returned {}", status));
+            }
+
+            return Err(anyhow!("Ollama returned {}: {}", status, body));
+        };
+
+        let decoded: OllamaResponse = response
+            .json()
+            .await
+            .context("failed to parse Ollama response")?;
+        let request_ms = elapsed_ms(request_started_at);
+
+        let thinking_chars = decoded
+            .message
+            .as_ref()
+            .map(|message| message.thinking.chars().count())
+            .unwrap_or_default();
+
+        let content = decoded
+            .message
+            .map(|message| message.content)
+            .or(decoded.response)
+            .ok_or_else(|| anyhow!("Ollama response did not contain text content"))?;
+
+        info!(
+            request_id = %request_id,
+            action = action.as_str(),
+            model,
+            input_mode,
+            attempts,
+            request_ms,
+            content_chars = content.chars().count(),
+            thinking_chars,
+            ollama_total_ms = duration_ms(decoded.total_duration),
+            ollama_load_ms = duration_ms(decoded.load_duration),
+            prompt_eval_count = decoded.prompt_eval_count.unwrap_or_default(),
+            prompt_eval_ms = duration_ms(decoded.prompt_eval_duration),
+            eval_count = decoded.eval_count.unwrap_or_default(),
+            eval_ms = duration_ms(decoded.eval_duration),
+            "ollama inference completed"
+        );
+
+        Ok(InferenceOutput { text: content })
     }
 }
 
@@ -57,11 +228,25 @@ impl OllamaBackend {
 struct OllamaResponse {
     message: Option<OllamaMessage>,
     response: Option<String>,
+    #[serde(default)]
+    total_duration: Option<u64>,
+    #[serde(default)]
+    load_duration: Option<u64>,
+    #[serde(default)]
+    prompt_eval_count: Option<u32>,
+    #[serde(default)]
+    prompt_eval_duration: Option<u64>,
+    #[serde(default)]
+    eval_count: Option<u32>,
+    #[serde(default)]
+    eval_duration: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
 struct OllamaMessage {
     content: String,
+    #[serde(default)]
+    thinking: String,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -103,58 +288,39 @@ struct OllamaTagsResponse {
 #[async_trait]
 impl InferenceBackend for OllamaBackend {
     async fn infer(&self, input: InferenceInput) -> Result<InferenceOutput> {
-        let url = format!("{}/api/chat", self.config.base_url.trim_end_matches('/'));
-        let mut include_thinking = !self.config.thinking_default.trim().is_empty();
-
-        let response = loop {
-            let payload = self.chat_payload(&input, include_thinking);
-            let response = self
-                .client
-                .post(&url)
-                .json(&payload)
-                .send()
-                .await
-                .context("failed to call Ollama")?;
-
-            if response.status().is_success() {
-                break response;
-            }
-
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "failed to read Ollama error body".to_string());
-
-            let thinking_unsupported = include_thinking
-                && status == StatusCode::BAD_REQUEST
-                && body.contains("does not support thinking");
-
-            if thinking_unsupported {
-                include_thinking = false;
-                continue;
-            }
-
-            let body = body.trim();
-            if body.is_empty() {
-                return Err(anyhow!("Ollama returned {}", status));
-            }
-
-            return Err(anyhow!("Ollama returned {}: {}", status, body));
-        };
-
-        let decoded: OllamaResponse = response
-            .json()
+        self.infer_image_with_model(&input, &self.config.model)
             .await
-            .context("failed to parse Ollama response")?;
+    }
+}
 
-        let content = decoded
-            .message
-            .map(|message| message.content)
-            .or(decoded.response)
-            .ok_or_else(|| anyhow!("Ollama response did not contain text content"))?;
+fn elapsed_ms(started_at: Instant) -> u64 {
+    started_at.elapsed().as_millis() as u64
+}
 
-        Ok(InferenceOutput { text: content })
+fn duration_ms(duration_ns: Option<u64>) -> u64 {
+    duration_ns
+        .map(|value| value / 1_000_000)
+        .unwrap_or_default()
+}
+
+fn default_think_value(thinking_default: &str) -> Option<serde_json::Value> {
+    let trimmed = thinking_default.trim();
+    if trimmed.is_empty() {
+        Some(json!(false))
+    } else {
+        Some(json!(trimmed))
+    }
+}
+
+fn num_predict_for_action(action: &visionclip_common::ipc::Action, input_mode: &str) -> u32 {
+    match (action, input_mode) {
+        (visionclip_common::ipc::Action::SearchWeb, _) => 32,
+        (visionclip_common::ipc::Action::Explain, "text") => 160,
+        (visionclip_common::ipc::Action::Explain, _) => 220,
+        (visionclip_common::ipc::Action::TranslatePtBr, "text") => 180,
+        (visionclip_common::ipc::Action::TranslatePtBr, _) => 240,
+        (visionclip_common::ipc::Action::CopyText, _) => 1024,
+        (visionclip_common::ipc::Action::ExtractCode, _) => 1024,
     }
 }
 
@@ -307,7 +473,9 @@ mod tests {
 
         let output = backend
             .infer(InferenceInput {
+                request_id: "req-1".into(),
                 action: Action::Explain,
+                source_app: None,
                 image_bytes: b"PNG".to_vec(),
                 mime_type: "image/png".into(),
             })
@@ -324,7 +492,7 @@ mod tests {
         assert_eq!(json["messages"][1]["images"][0], "UE5H");
         assert_eq!(
             json["messages"][1]["content"],
-            "Explique tecnicamente o conteúdo desta captura."
+            "Explique tecnicamente o que aparece nesta captura, destacando contexto, ponto principal e proxima acao util."
         );
     }
 
@@ -349,7 +517,9 @@ mod tests {
 
         let output = backend
             .infer(InferenceInput {
+                request_id: "req-2".into(),
                 action: Action::Explain,
+                source_app: None,
                 image_bytes: b"PNG".to_vec(),
                 mime_type: "image/png".into(),
             })
@@ -367,6 +537,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn infer_disables_thinking_by_default() {
+        let server = TestServer::spawn(
+            r#"{"message":{"content":"resposta final","thinking":"rascunho interno"}}"#,
+        );
+        let backend = OllamaBackend::new(InferConfig {
+            base_url: server.base_url.clone(),
+            model: "gemma4:test".into(),
+            thinking_default: String::new(),
+            ..InferConfig::default()
+        });
+
+        let output = backend
+            .infer(InferenceInput {
+                request_id: "req-3".into(),
+                action: Action::TranslatePtBr,
+                source_app: None,
+                image_bytes: b"PNG".to_vec(),
+                mime_type: "image/png".into(),
+            })
+            .await
+            .unwrap();
+
+        let requests = server.finish();
+        let request_json: serde_json::Value = serde_json::from_str(&requests[0].1).unwrap();
+
+        assert_eq!(request_json["think"], json!(false));
+        assert_eq!(output.text, "resposta final");
+    }
+
+    #[tokio::test]
     async fn list_models_reads_tags_endpoint() {
         let server = TestServer::spawn(
             r#"{"models":[{"name":"gemma4:test","model":"gemma4:test","modified_at":"2026-04-23T22:34:41-03:00","size":42,"digest":"abc","details":{"format":"gguf","family":"gemma4","families":["gemma4"],"parameter_size":"4.65B","quantization_level":"Q6_K_P"}}]}"#,
@@ -380,5 +580,31 @@ mod tests {
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].name, "gemma4:test");
         assert_eq!(models[0].details.family, "gemma4");
+    }
+
+    #[test]
+    fn payload_sets_action_specific_num_predict() {
+        let backend = OllamaBackend::new(InferConfig::default());
+        let image_payload = backend.image_chat_payload(
+            "gemma4:e2b",
+            &InferenceInput {
+                request_id: "req-3".into(),
+                action: Action::SearchWeb,
+                source_app: None,
+                image_bytes: b"PNG".to_vec(),
+                mime_type: "image/png".into(),
+            },
+        );
+        let text_payload =
+            backend.text_chat_payload("gemma4:e2b", &Action::Explain, None, "erro ao abrir");
+
+        assert_eq!(image_payload["options"]["num_predict"], json!(32));
+        assert_eq!(text_payload["options"]["num_predict"], json!(160));
+    }
+
+    #[test]
+    fn default_think_value_uses_false_when_not_configured() {
+        assert_eq!(default_think_value(""), Some(json!(false)));
+        assert_eq!(default_think_value("low"), Some(json!("low")));
     }
 }

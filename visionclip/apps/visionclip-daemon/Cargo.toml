@@ -10,9 +10,12 @@ visionclip-infer = { path = "../../crates/infer" }
 visionclip-output = { path = "../../crates/output" }
 visionclip-tts = { path = "../../crates/tts" }
 anyhow.workspace = true
+reqwest.workspace = true
+scraper.workspace = true
 serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+urlencoding.workspace = true
 which.workspace = true
 uuid.workspace = true
