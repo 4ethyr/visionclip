@@ -9,7 +9,7 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,
-    time::{sleep, timeout, timeout_at, Duration, Instant},
+    time::{sleep, timeout, Duration, Instant},
 };
 use tracing::{debug, warn};
 use urlencoding::decode;
@@ -89,6 +89,11 @@ impl PortalMonitorTrace {
             recent_lines
         )
     }
+}
+
+enum PortalResponseOutcome {
+    Uri(String),
+    Fallback(PathBuf),
 }
 
 pub async fn load_image_bytes(
@@ -291,6 +296,7 @@ async fn capture_with_gnome_screenshot(timeout_ms: u64) -> Result<Vec<u8>> {
 
 async fn capture_with_portal(timeout_ms: u64) -> Result<Vec<u8>> {
     let capture_started_at = SystemTime::now();
+    let wait_started_at = Instant::now();
     let handle_token = format!("visionclip_{}", Uuid::new_v4().simple());
     let options = format!(
         "{{'handle_token': <'{}'>, 'interactive': <true>, 'modal': <true>}}",
@@ -319,10 +325,33 @@ async fn capture_with_portal(timeout_ms: u64) -> Result<Vec<u8>> {
     let handle = parse_object_path(&String::from_utf8_lossy(&output.stdout))
         .context("failed to parse portal request handle")?;
     debug!(handle = %handle, "parsed portal screenshot request handle");
-    let uri = match wait_for_portal_response(&mut monitor, &handle, timeout_ms).await {
-        Ok(uri) => uri,
+    let uri = match wait_for_portal_response(&mut monitor, &handle, timeout_ms, capture_started_at)
+        .await
+    {
+        Ok(PortalResponseOutcome::Uri(uri)) => uri,
+        Ok(PortalResponseOutcome::Fallback(path)) => {
+            warn!(
+                handle = %handle,
+                path = %path.display(),
+                fallback_wait_ms = elapsed_ms(wait_started_at),
+                "portal response not observed; using recently created screenshot file fallback"
+            );
+            let bytes = fs::read(&path).with_context(|| {
+                format!(
+                    "failed to read fallback screenshot file {} after portal fallback",
+                    path.display()
+                )
+            })?;
+            debug!(
+                handle = %handle,
+                path = %path.display(),
+                bytes = bytes.len(),
+                "read fallback screenshot bytes"
+            );
+            return Ok(bytes);
+        }
         Err(error) => {
-            if let Some(path) = find_recent_screenshot_file(capture_started_at) {
+            if let Some(path) = find_ready_recent_screenshot_file(capture_started_at).await {
                 warn!(
                     handle = %handle,
                     path = %path.display(),
@@ -374,7 +403,8 @@ async fn wait_for_portal_response(
     monitor: &mut tokio::process::Child,
     handle: &str,
     timeout_ms: u64,
-) -> Result<String> {
+    capture_started_at: SystemTime,
+) -> Result<PortalResponseOutcome> {
     let stdout = monitor
         .stdout
         .take()
@@ -386,14 +416,26 @@ async fn wait_for_portal_response(
     let mut tracking_handle = false;
 
     loop {
-        let maybe_line = timeout_at(deadline, lines.next_line())
-            .await
-            .with_context(|| {
-                format!(
-                    "portal screenshot timed out after {timeout_ms} ms ({})",
-                    trace.summary()
-                )
-            })??;
+        let now = Instant::now();
+        if now >= deadline {
+            let _ = monitor.kill().await;
+            anyhow::bail!(
+                "portal screenshot timed out after {timeout_ms} ms ({})",
+                trace.summary()
+            );
+        }
+
+        let wait_for = std::cmp::min(deadline - now, Duration::from_millis(250));
+        let maybe_line = match timeout(wait_for, lines.next_line()).await {
+            Ok(line) => line?,
+            Err(_) => {
+                if let Some(path) = find_ready_recent_screenshot_file(capture_started_at).await {
+                    let _ = monitor.kill().await;
+                    return Ok(PortalResponseOutcome::Fallback(path));
+                }
+                continue;
+            }
+        };
 
         let Some(line) = maybe_line else {
             let _ = monitor.kill().await;
@@ -440,7 +482,7 @@ async fn wait_for_portal_response(
                     trace.uri = Some(uri.clone());
                     debug!(handle = %handle, uri = %uri, "portal response included screenshot URI");
                     let _ = monitor.kill().await;
-                    return Ok(uri);
+                    return Ok(PortalResponseOutcome::Uri(uri));
                 }
             } else {
                 warn!(
@@ -565,12 +607,20 @@ fn file_uri_to_path(uri: &str) -> Result<PathBuf> {
     Ok(Path::new(decoded.as_ref()).to_path_buf())
 }
 
-fn find_recent_screenshot_file(started_at: SystemTime) -> Option<PathBuf> {
-    let cutoff = started_at
-        .checked_sub(Duration::from_secs(2))
-        .unwrap_or(SystemTime::UNIX_EPOCH);
+async fn find_ready_recent_screenshot_file(started_at: SystemTime) -> Option<PathBuf> {
+    find_ready_recent_screenshot_file_in_dirs(&screenshot_candidate_dirs(), started_at).await
+}
 
-    find_recent_screenshot_file_in_dirs(&screenshot_candidate_dirs(), cutoff)
+async fn find_ready_recent_screenshot_file_in_dirs(
+    candidate_dirs: &[PathBuf],
+    cutoff: SystemTime,
+) -> Option<PathBuf> {
+    let path = find_recent_screenshot_file_in_dirs(candidate_dirs, cutoff)?;
+    if screenshot_file_ready(&path).await {
+        Some(path)
+    } else {
+        None
+    }
 }
 
 fn find_recent_screenshot_file_in_dirs(
@@ -630,6 +680,23 @@ fn find_recent_screenshot_file_in_dirs(
     } else {
         None
     }
+}
+
+async fn screenshot_file_ready(path: &Path) -> bool {
+    let Some(initial_size) = file_size(path) else {
+        return false;
+    };
+
+    if initial_size == 0 {
+        return false;
+    }
+
+    sleep(Duration::from_millis(150)).await;
+    matches!(file_size(path), Some(final_size) if final_size == initial_size && final_size > 0)
+}
+
+fn file_size(path: &Path) -> Option<u64> {
+    fs::metadata(path).ok().map(|metadata| metadata.len())
 }
 
 fn screenshot_candidate_dirs() -> Vec<PathBuf> {
@@ -733,6 +800,10 @@ fn yes_no(value: bool) -> &'static str {
     }
 }
 
+fn elapsed_ms(started_at: Instant) -> u64 {
+    started_at.elapsed().as_millis() as u64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -797,18 +868,21 @@ mod tests {
 
     #[test]
     fn parse_portal_response_line() {
-        let text = "/org/freedesktop/portal/desktop/request/1_341/visionclip_token: org.freedesktop.portal.Request.Response (uint32 0, {'uri': <'file:///tmp/screenshot%20one.png'>})";
+        let text = "/org/freedesktop/portal/desktop/request/1_341/visionclip_token: org.freedesktop.portal.Request.Response (uint32 0, {'uri': <'file:///home/demo/Pictures/screenshot%20one.png'>})";
         assert_eq!(extract_portal_response_code(text), Some(0));
         assert_eq!(
             extract_portal_uri(text),
-            Some("file:///tmp/screenshot%20one.png".into())
+            Some("file:///home/demo/Pictures/screenshot%20one.png".into())
         );
     }
 
     #[test]
     fn decode_file_uri_to_path() {
-        let path = file_uri_to_path("file:///tmp/screenshot%20one.png").unwrap();
-        assert_eq!(path, PathBuf::from("/tmp/screenshot one.png"));
+        let path = file_uri_to_path("file:///home/demo/Pictures/screenshot%20one.png").unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from("/home/demo/Pictures/screenshot one.png")
+        );
     }
 
     #[test]
@@ -846,10 +920,28 @@ mod tests {
 
         let mut found = Vec::new();
         append_screenshot_candidate_dirs(&mut found, &base);
-        let cutoff = started_at
-            .checked_sub(Duration::from_secs(2))
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-        let selected = find_recent_screenshot_file_in_dirs(&found, cutoff);
+        let selected = find_recent_screenshot_file_in_dirs(&found, started_at);
+
+        assert_eq!(selected, Some(new_file));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn find_ready_recent_screenshot_file_waits_for_new_file() {
+        let base = std::env::temp_dir().join(format!("visionclip-test-{}", Uuid::new_v4()));
+        let screenshots = base.join("Screenshots");
+        fs::create_dir_all(&screenshots).unwrap();
+
+        let started_at = SystemTime::now();
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        let new_file = screenshots.join("fresh.png");
+        fs::write(&new_file, b"png-bytes").unwrap();
+
+        let mut found = Vec::new();
+        append_screenshot_candidate_dirs(&mut found, &base);
+        let selected = find_ready_recent_screenshot_file_in_dirs(&found, started_at).await;
 
         assert_eq!(selected, Some(new_file));
 

@@ -5,6 +5,7 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Command,
+    thread,
 };
 use tracing::warn;
 use uuid::Uuid;
@@ -73,6 +74,32 @@ impl PiperHttpClient {
         }
 
         let _ = fs::remove_file(&temp_path);
+        Ok(())
+    }
+
+    pub fn play_wav_detached(&self, wav_bytes: &[u8]) -> Result<()> {
+        let temp_path = temp_wav_path()?;
+        fs::write(&temp_path, wav_bytes).context("failed to write temporary WAV file")?;
+
+        let player = preferred_player(&self.config);
+        thread::spawn(move || {
+            match Command::new(&player).arg(&temp_path).status() {
+                Ok(status) if !status.success() => {
+                    warn!(
+                        player,
+                        ?status,
+                        "audio player exited with non-success status"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    warn!(player, ?error, "failed to execute audio player");
+                }
+            }
+
+            let _ = fs::remove_file(&temp_path);
+        });
+
         Ok(())
     }
 }
@@ -249,6 +276,60 @@ mod tests {
         });
 
         client.play_wav(b"RIFF....WAVE").unwrap();
+    }
+
+    #[test]
+    fn play_wav_detached_returns_before_playback_finishes_and_cleans_up() {
+        let base = std::env::temp_dir().join(format!("visionclip-tts-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&base).unwrap();
+
+        let record_path = base.join("input-path.txt");
+        let copied_path = base.join("copied.wav");
+        let script_path = base.join("player.sh");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s' \"$1\" > \"{}\"\ncp \"$1\" \"{}\"\nsleep 0.2\n",
+            record_path.display(),
+            copied_path.display()
+        );
+        fs::write(&script_path, script).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&script_path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script_path, permissions).unwrap();
+        }
+
+        let client = PiperHttpClient::new(AudioConfig {
+            player_command: script_path.display().to_string(),
+            ..AudioConfig::default()
+        });
+
+        client.play_wav_detached(b"RIFF....WAVE").unwrap();
+
+        let started_at = std::time::Instant::now();
+        while !record_path.exists() && started_at.elapsed() < Duration::from_secs(2) {
+            thread::sleep(Duration::from_millis(25));
+        }
+
+        assert!(record_path.exists());
+        while !copied_path.exists() && started_at.elapsed() < Duration::from_secs(2) {
+            thread::sleep(Duration::from_millis(25));
+        }
+
+        assert!(copied_path.exists());
+        assert_eq!(fs::read(&copied_path).unwrap(), b"RIFF....WAVE");
+
+        let source_path = PathBuf::from(fs::read_to_string(&record_path).unwrap());
+        let cleanup_started_at = std::time::Instant::now();
+        while source_path.exists() && cleanup_started_at.elapsed() < Duration::from_secs(2) {
+            thread::sleep(Duration::from_millis(25));
+        }
+
+        assert!(!source_path.exists());
+
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
