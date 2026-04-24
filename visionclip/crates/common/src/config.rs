@@ -88,23 +88,43 @@ impl AppConfig {
     }
 
     pub fn config_path() -> AppResult<PathBuf> {
-        if let Ok(path) = env::var("VISIONCLIP_CONFIG") {
-            return Ok(PathBuf::from(path));
+        if let Some(path) = explicit_config_path_from_env() {
+            return Ok(path);
         }
 
-        let dirs = ProjectDirs::from("io", "4ethyr", "visionclip")
-            .ok_or_else(|| AppError::Config("failed to resolve config directory".into()))?;
-        Ok(dirs.config_dir().join("config.toml"))
+        let visionclip_path = visionclip_config_path()?;
+        let legacy_path = legacy_config_path()?;
+
+        if visionclip_path.exists() {
+            Ok(visionclip_path)
+        } else if legacy_path.exists() {
+            Ok(legacy_path)
+        } else {
+            Ok(visionclip_path)
+        }
     }
 
     pub fn ensure_default_config() -> AppResult<PathBuf> {
-        let path = Self::config_path()?;
+        if let Some(path) = explicit_config_path_from_env() {
+            return ensure_config_file(path);
+        }
+
+        let path = visionclip_config_path()?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        if !path.exists() {
-            fs::write(&path, toml::to_string_pretty(&Self::default())?)?;
+
+        if path.exists() {
+            return Ok(path);
         }
+
+        let legacy_path = legacy_config_path()?;
+        if legacy_path.exists() {
+            fs::copy(&legacy_path, &path)?;
+            return Ok(path);
+        }
+
+        fs::write(&path, toml::to_string_pretty(&Self::default())?)?;
         Ok(path)
     }
 
@@ -262,10 +282,53 @@ fn default_overlay() -> String {
     "compact".to_string()
 }
 
+fn explicit_config_path_from_env() -> Option<PathBuf> {
+    explicit_config_path(
+        env::var("VISIONCLIP_CONFIG").ok(),
+        env::var("AI_SNAP_CONFIG").ok(),
+    )
+}
+
+fn explicit_config_path(
+    visionclip_path: Option<String>,
+    legacy_path: Option<String>,
+) -> Option<PathBuf> {
+    visionclip_path.or(legacy_path).map(PathBuf::from)
+}
+
+fn visionclip_config_path() -> AppResult<PathBuf> {
+    project_config_path("io", "4ethyr", "visionclip")
+}
+
+fn legacy_config_path() -> AppResult<PathBuf> {
+    project_config_path("io", "openai", "ai-snap")
+}
+
+fn project_config_path(
+    qualifier: &str,
+    organization: &str,
+    application: &str,
+) -> AppResult<PathBuf> {
+    let dirs = ProjectDirs::from(qualifier, organization, application)
+        .ok_or_else(|| AppError::Config("failed to resolve config directory".into()))?;
+    Ok(dirs.config_dir().join("config.toml"))
+}
+
+fn ensure_config_file(path: PathBuf) -> AppResult<PathBuf> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    if !path.exists() {
+        fs::write(&path, toml::to_string_pretty(&AppConfig::default())?)?;
+    }
+
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn default_config_has_expected_model() {
         let cfg = AppConfig::default();
@@ -281,5 +344,24 @@ mod tests {
         assert!(cfg.action_should_speak("SearchWeb", true));
         assert!(!cfg.action_should_speak("CopyText", true));
         assert!(!cfg.action_should_speak("Explain", false));
+    }
+
+    #[test]
+    fn explicit_config_path_supports_legacy_override() {
+        assert_eq!(
+            explicit_config_path(None, Some("/tmp/legacy-ai-snap.toml".into())),
+            Some(PathBuf::from("/tmp/legacy-ai-snap.toml"))
+        );
+    }
+
+    #[test]
+    fn explicit_config_path_prefers_visionclip_override() {
+        assert_eq!(
+            explicit_config_path(
+                Some("/tmp/visionclip.toml".into()),
+                Some("/tmp/legacy-ai-snap.toml".into())
+            ),
+            Some(PathBuf::from("/tmp/visionclip.toml"))
+        );
     }
 }
