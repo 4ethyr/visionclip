@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use std::{
     collections::VecDeque,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     process::Stdio,
+    time::SystemTime,
 };
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
@@ -289,6 +290,7 @@ async fn capture_with_gnome_screenshot(timeout_ms: u64) -> Result<Vec<u8>> {
 }
 
 async fn capture_with_portal(timeout_ms: u64) -> Result<Vec<u8>> {
+    let capture_started_at = SystemTime::now();
     let handle_token = format!("visionclip_{}", Uuid::new_v4().simple());
     let options = format!(
         "{{'handle_token': <'{}'>, 'interactive': <true>, 'modal': <true>}}",
@@ -317,9 +319,34 @@ async fn capture_with_portal(timeout_ms: u64) -> Result<Vec<u8>> {
     let handle = parse_object_path(&String::from_utf8_lossy(&output.stdout))
         .context("failed to parse portal request handle")?;
     debug!(handle = %handle, "parsed portal screenshot request handle");
-    let uri = wait_for_portal_response(&mut monitor, &handle, timeout_ms)
-        .await
-        .map_err(|error| anyhow::anyhow!("{error}. {}", portal_runtime_hint()))?;
+    let uri = match wait_for_portal_response(&mut monitor, &handle, timeout_ms).await {
+        Ok(uri) => uri,
+        Err(error) => {
+            if let Some(path) = find_recent_screenshot_file(capture_started_at) {
+                warn!(
+                    handle = %handle,
+                    path = %path.display(),
+                    error = %error,
+                    "portal returned no response; using recently created screenshot file fallback"
+                );
+                let bytes = fs::read(&path).with_context(|| {
+                    format!(
+                        "failed to read fallback screenshot file {} after portal timeout",
+                        path.display()
+                    )
+                })?;
+                debug!(
+                    handle = %handle,
+                    path = %path.display(),
+                    bytes = bytes.len(),
+                    "read fallback screenshot bytes after portal timeout"
+                );
+                return Ok(bytes);
+            }
+
+            return Err(anyhow::anyhow!("{error}. {}", portal_runtime_hint()));
+        }
+    };
     debug!(handle = %handle, uri = %uri, "portal screenshot returned URI");
     let path = file_uri_to_path(&uri)?;
     let exists = path.exists();
@@ -538,6 +565,147 @@ fn file_uri_to_path(uri: &str) -> Result<PathBuf> {
     Ok(Path::new(decoded.as_ref()).to_path_buf())
 }
 
+fn find_recent_screenshot_file(started_at: SystemTime) -> Option<PathBuf> {
+    let cutoff = started_at
+        .checked_sub(Duration::from_secs(2))
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+
+    find_recent_screenshot_file_in_dirs(&screenshot_candidate_dirs(), cutoff)
+}
+
+fn find_recent_screenshot_file_in_dirs(
+    candidate_dirs: &[PathBuf],
+    cutoff: SystemTime,
+) -> Option<PathBuf> {
+    let mut newest: Option<(SystemTime, PathBuf)> = None;
+
+    for dir in candidate_dirs {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                debug!(
+                    path = %dir.display(),
+                    error = %error,
+                    "skipping screenshot recovery directory"
+                );
+                continue;
+            }
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !is_supported_screenshot_path(&path) {
+                continue;
+            }
+
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            let Ok(modified_at) = metadata.modified() else {
+                continue;
+            };
+
+            if modified_at < cutoff {
+                continue;
+            }
+
+            let replace = newest
+                .as_ref()
+                .map(|(current_modified_at, _)| modified_at > *current_modified_at)
+                .unwrap_or(true);
+
+            if replace {
+                newest = Some((modified_at, path));
+            }
+        }
+    }
+
+    if let Some((modified_at, path)) = newest {
+        debug!(
+            path = %path.display(),
+            modified_at = ?modified_at,
+            "found recent screenshot recovery candidate"
+        );
+        Some(path)
+    } else {
+        None
+    }
+}
+
+fn screenshot_candidate_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    if let Some(pictures_dir) = pictures_dir() {
+        append_screenshot_candidate_dirs(&mut dirs, &pictures_dir);
+    }
+
+    dirs
+}
+
+fn append_screenshot_candidate_dirs(paths: &mut Vec<PathBuf>, pictures_dir: &Path) {
+    push_unique_path(paths, pictures_dir.join("Screenshots"));
+    push_unique_path(paths, pictures_dir.to_path_buf());
+}
+
+fn pictures_dir() -> Option<PathBuf> {
+    env::var("XDG_PICTURES_DIR")
+        .ok()
+        .and_then(|value| expand_home_path(&value))
+        .or_else(read_pictures_dir_from_user_dirs)
+        .or_else(|| {
+            env::var("HOME")
+                .ok()
+                .map(|home| PathBuf::from(home).join("Pictures"))
+        })
+}
+
+fn read_pictures_dir_from_user_dirs() -> Option<PathBuf> {
+    let home = env::var("HOME").ok()?;
+    let user_dirs_path = PathBuf::from(home).join(".config/user-dirs.dirs");
+    let contents = fs::read_to_string(user_dirs_path).ok()?;
+
+    contents.lines().find_map(|line| {
+        let line = line.trim();
+        if !line.starts_with("XDG_PICTURES_DIR=") {
+            return None;
+        }
+
+        let (_, value) = line.split_once('=')?;
+        expand_home_path(value)
+    })
+}
+
+fn expand_home_path(value: &str) -> Option<PathBuf> {
+    let trimmed = value.trim().trim_matches('"');
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(stripped) = trimmed.strip_prefix("$HOME/") {
+        let home = env::var("HOME").ok()?;
+        return Some(PathBuf::from(home).join(stripped));
+    }
+
+    if trimmed == "$HOME" {
+        return env::var("HOME").ok().map(PathBuf::from);
+    }
+
+    Some(PathBuf::from(trimmed))
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if paths.iter().all(|existing| existing != &path) {
+        paths.push(path);
+    }
+}
+
+fn is_supported_screenshot_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg"))
+        .unwrap_or(false)
+}
+
 fn temp_png_path() -> PathBuf {
     let base = std::env::var("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -659,5 +827,39 @@ mod tests {
         assert!(summary.contains("handle_seen=yes"));
         assert!(summary.contains("response_seen=no"));
         assert!(summary.contains("`first line` | `second line`"));
+    }
+
+    #[test]
+    fn find_recent_screenshot_file_prefers_newest_candidate() {
+        let base = std::env::temp_dir().join(format!("visionclip-test-{}", Uuid::new_v4()));
+        let screenshots = base.join("Screenshots");
+        fs::create_dir_all(&screenshots).unwrap();
+
+        let old_file = screenshots.join("old.png");
+        fs::write(&old_file, b"old").unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let started_at = SystemTime::now();
+        std::thread::sleep(Duration::from_millis(20));
+
+        let new_file = screenshots.join("new.png");
+        fs::write(&new_file, b"new").unwrap();
+
+        let mut found = Vec::new();
+        append_screenshot_candidate_dirs(&mut found, &base);
+        let cutoff = started_at
+            .checked_sub(Duration::from_secs(2))
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let selected = find_recent_screenshot_file_in_dirs(&found, cutoff);
+
+        assert_eq!(selected, Some(new_file));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn expand_home_path_supports_home_variable() {
+        let home = env::var("HOME").unwrap();
+        let path = expand_home_path("$HOME/Pictures/Screenshots").unwrap();
+        assert_eq!(path, PathBuf::from(home).join("Pictures/Screenshots"));
     }
 }
