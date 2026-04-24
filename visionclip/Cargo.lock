@@ -1904,8 +1904,10 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "urlencoding",
  "uuid",
  "visionclip-common",
+ "which",
 ]
 
 [[package]]

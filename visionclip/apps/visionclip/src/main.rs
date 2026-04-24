@@ -1,6 +1,8 @@
+mod capture;
+
 use anyhow::{Context, Result};
 use clap::Parser;
-use std::{fs, path::PathBuf, process::Command};
+use std::path::PathBuf;
 use tokio::net::UnixStream;
 use tracing::info;
 use uuid::Uuid;
@@ -44,14 +46,15 @@ async fn main() -> Result<()> {
         .clone()
         .unwrap_or_else(|| config.general.default_action.clone());
     let action: Action = action_string.parse().map_err(anyhow::Error::msg)?;
+    let session_type = detect_session_type();
 
-    let image_bytes = if let Some(path) = cli.image.as_ref() {
-        fs::read(path).with_context(|| format!("failed to read image at {}", path.display()))?
-    } else if let Some(command) = cli.capture_command.as_ref() {
-        capture_from_command(command)?
-    } else {
-        anyhow::bail!("provide --image <path> or --capture-command <command>");
-    };
+    let image_bytes = capture::load_image_bytes(
+        cli.image.as_ref(),
+        cli.capture_command.as_deref(),
+        &config,
+        session_type.clone(),
+    )
+    .await?;
 
     let socket_path = config.socket_path()?;
     let mut stream = UnixStream::connect(&socket_path).await.with_context(|| {
@@ -66,7 +69,7 @@ async fn main() -> Result<()> {
         action,
         mime_type: "image/png".to_string(),
         image_bytes,
-        session_type: detect_session_type(),
+        session_type,
         speak: cli.speak,
         source_app: cli.source_app,
     };
@@ -88,23 +91,6 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-fn capture_from_command(command: &str) -> Result<Vec<u8>> {
-    let output = Command::new("sh")
-        .arg("-lc")
-        .arg(command)
-        .output()
-        .with_context(|| format!("failed to run capture command `{command}`"))?;
-
-    if !output.status.success() {
-        anyhow::bail!(
-            "capture command failed with status {}",
-            output.status.code().unwrap_or_default()
-        );
-    }
-
-    Ok(output.stdout)
 }
 
 fn detect_session_type() -> SessionType {

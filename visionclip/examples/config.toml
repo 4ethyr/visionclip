@@ -5,7 +5,7 @@ log_level = "info"
 [capture]
 backend = "auto"
 prefer_portal = true
-capture_timeout_ms = 10000
+capture_timeout_ms = 30000
 
 [infer]
 backend = "ollama"

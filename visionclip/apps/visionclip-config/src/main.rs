@@ -3,8 +3,14 @@ use clap::{Parser, Subcommand};
 use reqwest::{Client, StatusCode};
 use serde_json::json;
 use std::env;
-use visionclip_common::AppConfig;
+use tokio::time::{timeout, Duration};
+use visionclip_common::{
+    current_desktops, screenshot_portal_backends_for_current_desktop, summarize_portal_backends,
+    AppConfig,
+};
 use visionclip_infer::{list_ollama_models, OllamaModelSummary};
+
+const OLLAMA_PROBE_TIMEOUT_MS: u64 = 180_000;
 
 #[derive(Debug, Parser)]
 #[command(name = "visionclip-config")]
@@ -43,7 +49,14 @@ async fn run_doctor() -> Result<()> {
     println!("Config path: {}", AppConfig::config_path()?.display());
     println!("Socket: {}", config.socket_path()?.display());
     println!("Session: {}", detect_session_type());
+    println!("Desktop: {}", detect_desktop_environment());
     println!("Default action: {}", config.general.default_action);
+    println!("Capture backend: {}", config.capture.backend);
+    println!("Capture timeout: {} ms", config.capture.capture_timeout_ms);
+    println!(
+        "Portal screenshot backends: {}",
+        summarize_portal_backends(&screenshot_portal_backends_for_current_desktop())
+    );
     println!("Configured model: {}", config.infer.model);
     println!("Ollama URL: {}", config.infer.base_url);
 
@@ -55,10 +68,11 @@ async fn run_doctor() -> Result<()> {
             println!("Configured model available: {}", yes_no(available));
 
             if available {
-                match probe_ollama_model(
+                match probe_ollama_model_with_timeout(
                     &config.infer.base_url,
                     &config.infer.model,
                     &config.infer.thinking_default,
+                    OLLAMA_PROBE_TIMEOUT_MS,
                 )
                 .await
                 {
@@ -83,6 +97,8 @@ async fn run_doctor() -> Result<()> {
         "ollama",
         "notify-send",
         "xdg-open",
+        "gdbus",
+        "busctl",
         "wl-copy",
         "wl-paste",
         "xclip",
@@ -90,6 +106,7 @@ async fn run_doctor() -> Result<()> {
         "pw-play",
         "aplay",
         "grim",
+        "slurp",
         "maim",
         "gnome-screenshot",
     ] {
@@ -129,7 +146,25 @@ async fn probe_http(base_url: &str) -> Result<reqwest::StatusCode> {
     Ok(response.status())
 }
 
-async fn probe_ollama_model(base_url: &str, model: &str, thinking_default: &str) -> Result<()> {
+async fn probe_ollama_model_with_timeout(
+    base_url: &str,
+    model: &str,
+    thinking_default: &str,
+    timeout_ms: u64,
+) -> Result<()> {
+    timeout(
+        Duration::from_millis(timeout_ms),
+        probe_ollama_model_request(base_url, model, thinking_default),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("timed out after {timeout_ms} ms"))?
+}
+
+async fn probe_ollama_model_request(
+    base_url: &str,
+    model: &str,
+    thinking_default: &str,
+) -> Result<()> {
     let client = Client::new();
     let url = format!("{}/api/chat", base_url.trim_end_matches('/'));
     let mut include_thinking = !thinking_default.trim().is_empty();
@@ -193,6 +228,15 @@ fn detect_session_type() -> &'static str {
         Ok(value) if value.eq_ignore_ascii_case("x11") => "x11",
         Ok(_) => "other",
         Err(_) => "unknown",
+    }
+}
+
+fn detect_desktop_environment() -> String {
+    let desktops = current_desktops();
+    if desktops.is_empty() {
+        "unknown".into()
+    } else {
+        desktops.join(":")
     }
 }
 
@@ -319,6 +363,54 @@ mod tests {
             self.handle.join().unwrap();
             requests
         }
+
+        fn spawn_hanging() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let (request_tx, request_rx) = mpsc::channel();
+
+            let handle = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+
+                loop {
+                    let read = stream.read(&mut buffer).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+
+                    if header_end(&request).is_some() {
+                        break;
+                    }
+                }
+
+                let header_end = header_end(&request).unwrap();
+                let headers = String::from_utf8_lossy(&request[..header_end]).to_string();
+                let content_length = content_length(&headers);
+                let mut body = request[header_end + 4..].to_vec();
+
+                while body.len() < content_length {
+                    let read = stream.read(&mut buffer).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    body.extend_from_slice(&buffer[..read]);
+                }
+
+                request_tx
+                    .send(vec![(headers, String::from_utf8(body).unwrap())])
+                    .unwrap();
+                thread::sleep(std::time::Duration::from_millis(200));
+            });
+
+            Self {
+                base_url: format!("http://{}", address),
+                request_rx,
+                handle,
+            }
+        }
     }
 
     fn header_end(request: &[u8]) -> Option<usize> {
@@ -352,7 +444,7 @@ mod tests {
             },
         ]);
 
-        probe_ollama_model(&server.base_url, "gemma4:test", "low")
+        probe_ollama_model_with_timeout(&server.base_url, "gemma4:test", "low", 1_000)
             .await
             .unwrap();
 
@@ -371,11 +463,23 @@ mod tests {
             body: r#"{"error":"unable to load model"}"#,
         }]);
 
-        let error = probe_ollama_model(&server.base_url, "gemma4:test", "")
+        let error = probe_ollama_model_with_timeout(&server.base_url, "gemma4:test", "", 1_000)
             .await
             .unwrap_err();
 
         assert!(error.to_string().contains("500 Internal Server Error"));
         assert!(error.to_string().contains("unable to load model"));
+    }
+
+    #[tokio::test]
+    async fn probe_ollama_model_times_out() {
+        let server = TestServer::spawn_hanging();
+
+        let error = probe_ollama_model_with_timeout(&server.base_url, "gemma4:test", "", 20)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("timed out"));
+        let _ = server.finish();
     }
 }

@@ -26,10 +26,11 @@ Serviço local para Linux que recebe uma captura de tela, executa uma ação de 
 - Inferência via `POST /api/chat` do Ollama.
 - TTS via Piper HTTP.
 - Playback local via comando configurável.
+- Captura via arquivo, comando externo ou backend nativo resolvido localmente.
 
 ## Decisões de arquitetura
 
 - Clipboard mantido no daemon.
-- Wayland deve ser `portal-first` em evolução futura.
-- X11 pode usar captura por comando externo no MVP.
+- Wayland deve ser `portal-first`, com fallback para backends nativos disponíveis no host.
+- X11 pode usar `maim` ou `gnome-screenshot`, além de comando externo explícito.
 - TTS desacoplado do core por HTTP.

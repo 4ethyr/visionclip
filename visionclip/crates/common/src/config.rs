@@ -231,7 +231,7 @@ fn default_true() -> bool {
 }
 
 fn default_capture_timeout_ms() -> u64 {
-    10_000
+    30_000
 }
 
 fn default_infer_backend() -> String {

@@ -4,17 +4,18 @@ VisionClip é um serviço local para Linux que transforma screenshots em ações
 
 ## O que o projeto entrega hoje
 
-- `visionclip`: cliente curto para enviar uma imagem ao daemon por `--image` ou `--capture-command`.
+- `visionclip`: cliente curto para enviar uma imagem ao daemon por `--image`, `--capture-command` ou captura nativa automática.
 - `visionclip-daemon`: serviço residente com socket Unix, integração com Ollama, clipboard e TTS.
 - `visionclip-config`: utilitário de bootstrap, diagnóstico do host e listagem de modelos locais.
 - Suporte a ações de `CopyText`, `ExtractCode`, `TranslatePtBr`, `Explain` e `SearchWeb`.
 - Integração com Ollama via `/api/chat`, com retry automático quando o modelo não suporta `think`.
 - Integração com Piper HTTP, com fallback de playback entre `paplay`, `pw-play` e `aplay`.
+- Captura automática com resolução de backend via config: portal com `gdbus`, `gnome-screenshot`, `grim` e `maim`.
 - Configuração local em `~/.config/visionclip/config.toml`.
 
 ## Arquitetura resumida
 
-1. `visionclip` recebe uma captura já existente ou executa um comando externo de screenshot.
+1. `visionclip` recebe uma captura já existente, executa um comando externo ou resolve automaticamente um backend nativo de screenshot.
 2. A imagem é enviada por socket Unix ao `visionclip-daemon`.
 3. O daemon consulta o modelo local configurado no Ollama.
 4. O resultado é pós-processado conforme a ação pedida.
@@ -22,7 +23,7 @@ VisionClip é um serviço local para Linux que transforma screenshots em ações
 
 ## Status atual
 
-O projeto já valida o fluxo principal de inferência local com `gemma4:e2b`, incluindo diagnóstico do runtime, fallback de áudio e testes automatizados do workspace. O backend Wayland portal-first ainda não foi implementado; no momento, a captura é feita por arquivo ou por comando externo.
+O projeto já valida o fluxo principal de inferência local com `gemma4:e2b`, incluindo diagnóstico do runtime, fallback de áudio, testes automatizados do workspace e captura automática por backend nativo. Em Wayland, o launcher tenta primeiro o portal de screenshot quando `prefer_portal = true`; se isso não estiver disponível, ele pode cair para outros backends compatíveis instalados no host.
 
 ## Requisitos do host
 
@@ -32,6 +33,7 @@ O projeto já valida o fluxo principal de inferência local com `gemma4:e2b`, in
 - Um modelo local compatível com visão, como `gemma4:e2b`
 - Piper HTTP para áudio real, se você quiser TTS fora dos mocks de teste
 - Ferramentas nativas de desktop como `xdg-open`, `notify-send` e algum player de áudio suportado
+- Para captura automática: `gdbus`, `gnome-screenshot`, `grim` ou `maim`
 
 ## Quick Start
 
@@ -49,6 +51,9 @@ visionclip-daemon
 # Traduzir uma captura já salva
 visionclip --action translate_ptbr --image /caminho/captura.png --speak
 
+# Captura nativa automática conforme o backend configurado
+visionclip --action explain
+
 # Explicar uma captura gerada por um backend externo
 visionclip --action explain --capture-command 'maim -s -u'
 ```
@@ -60,6 +65,9 @@ Use `visionclip-config doctor` para verificar:
 - caminho da configuração ativa
 - socket do daemon
 - sessão gráfica atual
+- desktop atual
+- backend e timeout de captura
+- backends de screenshot expostos pelo `xdg-desktop-portal`
 - disponibilidade do Ollama
 - modelos locais expostos pelo runtime
 - probe real de carregamento do modelo configurado
@@ -67,6 +75,10 @@ Use `visionclip-config doctor` para verificar:
 - ferramentas nativas do host usadas pelo fluxo
 
 Use `visionclip-config models` para listar os modelos disponíveis no Ollama e ajustar `infer.model` com o nome exato do runtime. O default atual do projeto usa `gemma4:e2b` com `thinking_default = ""`.
+
+Quando nenhum `--image` ou `--capture-command` é informado, o launcher usa `capture.backend`. Em `auto`, o fluxo tenta portal com `gdbus` quando `prefer_portal = true` e, se necessário, cai para `gnome-screenshot`, `grim` ou `maim`, conforme a sessão e os binários disponíveis.
+
+Em desktops Wayland via portal, a captura pode depender de uma confirmação explícita do usuário na janela do `xdg-desktop-portal`. Se esse diálogo não for concluído dentro do timeout configurado, o launcher retorna erro com o resumo dos backends de screenshot detectados para a sessão atual.
 
 ## TTS
 
@@ -90,7 +102,8 @@ systemctl --user enable --now visionclip-daemon.service
 
 ## Limites atuais
 
-- Captura Wayland via portal ainda não implementada
+- A captura via portal ainda precisa de validação manual ampla em diferentes desktops Wayland
+- Em algumas sessões Wayland, o portal pode abrir ou aguardar confirmação do usuário antes de devolver a captura
 - Overlay/UI compacta ainda não implementada
 - OCR dedicado como fallback ainda não implementado
 - O fluxo de áudio real depende de um Piper HTTP ativo no host
