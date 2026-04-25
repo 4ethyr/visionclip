@@ -31,6 +31,20 @@ const AI_OVERVIEW_STOP_MARKERS: [&str; 14] = [
     "Pesquisas relacionadas",
     "Related searches",
 ];
+const AI_OVERVIEW_NOISE_LINES: [&str; 12] = [
+    "Mostrar mais",
+    "Show more",
+    "Saiba mais",
+    "Learn more",
+    "Fontes",
+    "Sources",
+    "Feedback",
+    "Exportar",
+    "Compartilhar",
+    "Ouvir",
+    "AI responses may include mistakes",
+    "A IA generativa e experimental",
+];
 const RELATED_QUESTIONS_LABELS: [&str; 4] = [
     "As pessoas tambem perguntam",
     "People also ask",
@@ -89,7 +103,7 @@ impl SearchEnrichment {
     }
 
     pub fn clipboard_text(&self, query: &str) -> Option<String> {
-        let summary = self.summary_text();
+        let summary = self.summary_text(query);
         let supporting_points = self.supporting_points();
         if summary.is_none()
             && self.snippets.is_empty()
@@ -102,12 +116,24 @@ impl SearchEnrichment {
         let mut sections = vec![format!("Pesquisa: {query}")];
 
         if let Some(summary) = summary {
-            sections.push(format!("Leitura inicial:\n{summary}"));
+            let title = if self.ai_overview.is_some() {
+                "Síntese do VisionClip"
+            } else {
+                "Leitura inicial"
+            };
+            sections.push(format!("{title}:\n{summary}"));
+        }
+
+        if let Some(overview) = self.ai_overview.as_ref() {
+            sections.push(format!(
+                "Contexto capturado da visão geral criada por IA:\n{}",
+                truncate_chars(&clean_ai_overview_context(overview), 520)
+            ));
         }
 
         if self.ai_overview.is_some() && !supporting_points.is_empty() {
             sections.push(format!(
-                "Pistas iniciais:\n{}",
+                "Fontes iniciais para validar:\n{}",
                 supporting_points
                     .iter()
                     .take(3)
@@ -161,8 +187,16 @@ impl SearchEnrichment {
     }
 
     pub fn spoken_text(&self, query: &str) -> Option<String> {
-        if let Some(summary) = self.summary_text() {
-            let summary = truncate_chars(&summary, 280);
+        if let Some(answer) = self.ai_overview_spoken_text(query) {
+            return Some(answer);
+        }
+
+        if let Some(answer) = self.spoken_answer_text(query) {
+            return Some(answer);
+        }
+
+        if let Some(summary) = self.summary_text(query) {
+            let summary = truncate_chars(&summary, 180);
             if let Some(follow_up) = self
                 .related_questions
                 .first()
@@ -172,7 +206,7 @@ impl SearchEnrichment {
                 return Some(format!(
                     "{} Para aprofundar, considere: {}",
                     summary,
-                    truncate_chars(follow_up, 96)
+                    truncate_chars(follow_up, 72)
                 ));
             }
             return Some(summary);
@@ -209,9 +243,41 @@ impl SearchEnrichment {
         Some(truncate_chars(&combined, 280))
     }
 
-    fn summary_text(&self) -> Option<String> {
+    fn ai_overview_spoken_text(&self, query: &str) -> Option<String> {
+        let overview = self.ai_overview.as_ref()?;
+        let synthesis = synthesize_ai_overview(query, overview, 220)?;
+        Some(format!(
+            "Pela visão geral criada por IA do Google: {}",
+            normalize_spoken_answer(&synthesis)
+        ))
+    }
+
+    fn spoken_answer_text(&self, query: &str) -> Option<String> {
+        let mut best = None;
+        let mut best_score = 0_i32;
+
+        for snippet in &self.snippets {
+            for sentence in split_sentences(&snippet.snippet) {
+                let score = score_spoken_sentence(query, &sentence);
+                if score > best_score {
+                    best_score = score;
+                    best = Some(sentence);
+                }
+            }
+        }
+
+        let answer = best.filter(|_| best_score >= 2)?;
+        Some(truncate_chars(&normalize_spoken_answer(&answer), 180))
+    }
+
+    fn summary_text(&self, query: &str) -> Option<String> {
         if let Some(overview) = &self.ai_overview {
-            return Some(truncate_chars(overview, 420));
+            let mut summary = synthesize_ai_overview(query, overview, 520)?;
+            if let Some(validation) = self.supporting_points().first() {
+                summary.push_str(" Validação inicial: ");
+                summary.push_str(&ensure_sentence(validation));
+            }
+            return Some(truncate_chars(&summary, 700));
         }
 
         let points = self.supporting_points();
@@ -592,6 +658,9 @@ fn extract_ai_overview(lines: &[String]) -> Option<String> {
             if is_ai_overview_stop_marker(candidate) {
                 break;
             }
+            if is_ai_overview_noise_line(candidate) {
+                continue;
+            }
 
             chars += candidate.chars().count();
             collected.push(candidate.clone());
@@ -601,7 +670,7 @@ fn extract_ai_overview(lines: &[String]) -> Option<String> {
             }
         }
 
-        let merged = collected.join(" ");
+        let merged = clean_ai_overview_context(&collected.join(" "));
         if !merged.is_empty() {
             return Some(merged);
         }
@@ -904,6 +973,165 @@ fn supporting_point_from_snippet(item: &SearchSnippet) -> Option<String> {
     } else {
         Some(summary)
     }
+}
+
+fn synthesize_ai_overview(query: &str, overview: &str, max_chars: usize) -> Option<String> {
+    let overview = clean_ai_overview_context(overview);
+    let sentences = split_sentences(&overview);
+    if sentences.is_empty() {
+        let fallback = truncate_chars(&overview, max_chars);
+        return (!fallback.is_empty()).then_some(fallback);
+    }
+
+    let folded_query = ascii_fold(query);
+    let query_tokens = meaningful_query_tokens(&folded_query);
+    let mut scored = sentences
+        .iter()
+        .enumerate()
+        .map(|(index, sentence)| {
+            let folded_sentence = ascii_fold(sentence);
+            let token_score = query_tokens
+                .iter()
+                .filter(|token| folded_sentence.contains(token.as_str()))
+                .count() as i32;
+            let intent_score = score_spoken_sentence(query, sentence);
+            (index, token_score + intent_score, sentence)
+        })
+        .collect::<Vec<_>>();
+
+    scored.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+
+    let mut selected = scored
+        .iter()
+        .filter(|(_, score, _)| *score >= 2)
+        .take(3)
+        .map(|(index, _, sentence)| (*index, (*sentence).clone()))
+        .collect::<Vec<_>>();
+
+    if selected.is_empty() {
+        selected = sentences
+            .iter()
+            .take(3)
+            .enumerate()
+            .map(|(index, sentence)| (index, sentence.clone()))
+            .collect();
+    }
+
+    selected.sort_by_key(|(index, _)| *index);
+
+    let mut summary = String::new();
+    for (_, sentence) in selected {
+        let sentence = ensure_sentence(&sentence);
+        if summary.is_empty() {
+            summary.push_str(&sentence);
+        } else {
+            let candidate = format!("{summary} {sentence}");
+            if candidate.chars().count() > max_chars {
+                break;
+            }
+            summary = candidate;
+        }
+    }
+
+    let summary = truncate_chars(&summary, max_chars);
+    (!summary.is_empty()).then_some(summary)
+}
+
+fn clean_ai_overview_context(input: &str) -> String {
+    let sentences = split_sentences(input)
+        .into_iter()
+        .filter(|sentence| !is_ai_overview_noise_line(sentence))
+        .map(|sentence| ensure_sentence(&sentence))
+        .collect::<Vec<_>>();
+
+    if sentences.is_empty() {
+        return normalize_text(input);
+    }
+
+    sentences.join(" ")
+}
+
+fn split_sentences(input: &str) -> Vec<String> {
+    input
+        .split(['.', '!', '?'])
+        .map(normalize_text)
+        .filter(|sentence| sentence.chars().count() >= 24)
+        .collect()
+}
+
+fn score_spoken_sentence(query: &str, sentence: &str) -> i32 {
+    let folded_query = ascii_fold(query);
+    let folded_sentence = ascii_fold(sentence);
+    let query_tokens = meaningful_query_tokens(&folded_query);
+    let mut score = 0_i32;
+
+    for token in &query_tokens {
+        if folded_sentence.contains(token) {
+            score += 1;
+        }
+    }
+
+    if folded_query.contains("quando") && looks_like_date_answer(&folded_sentence) {
+        score += 3;
+    }
+    if (folded_query.contains("quem foi") || folded_query.contains("quem e"))
+        && (folded_sentence.contains(" foi ")
+            || folded_sentence.contains(" e ")
+            || folded_sentence.contains(" era "))
+    {
+        score += 2;
+    }
+    if folded_query.contains("o que") && folded_sentence.contains(" e ") {
+        score += 1;
+    }
+
+    score
+}
+
+fn meaningful_query_tokens(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .map(|token| token.trim_matches(|ch: char| !ch.is_ascii_alphanumeric()))
+        .filter(|token| {
+            token.chars().count() >= 3
+                && !matches!(
+                    *token,
+                    "quem"
+                        | "que"
+                        | "foi"
+                        | "quando"
+                        | "fundada"
+                        | "fundado"
+                        | "qual"
+                        | "sobre"
+                        | "pesquise"
+                        | "pesquisar"
+                )
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+fn looks_like_date_answer(sentence: &str) -> bool {
+    sentence.contains("criada")
+        || sentence.contains("criado")
+        || sentence.contains("fundada")
+        || sentence.contains("fundado")
+        || sentence
+            .split_whitespace()
+            .any(|token| token.len() == 4 && token.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+fn normalize_spoken_answer(input: &str) -> String {
+    input
+        .replace(" - Wikipedia", "")
+        .replace("–", "-")
+        .replace("“", "\"")
+        .replace("”", "\"")
+        .replace(" ,", ",")
+        .trim()
+        .trim_end_matches(['.', ',', ';', ':'])
+        .to_string()
 }
 
 fn ensure_sentence(input: &str) -> String {
@@ -1372,6 +1600,15 @@ fn is_known_search_section_label(line: &str) -> bool {
         || is_ai_overview_stop_marker(line)
 }
 
+fn is_ai_overview_noise_line(line: &str) -> bool {
+    let normalized = ascii_fold(line);
+    AI_OVERVIEW_NOISE_LINES.iter().any(|marker| {
+        let marker = ascii_fold(marker);
+        normalized == marker || normalized.starts_with(&format!("{marker}:"))
+    }) || normalized.starts_with("a ia generativa")
+        || normalized.starts_with("generative ai")
+}
+
 fn matches_any_label(line: &str, labels: &[&str]) -> bool {
     let normalized = ascii_fold(line);
     labels
@@ -1432,6 +1669,29 @@ mod tests {
         assert_eq!(enrichment.snippets[0].domain, "example.com");
         assert_eq!(enrichment.related_questions.len(), 2);
         assert_eq!(enrichment.related_searches.len(), 2);
+    }
+
+    #[test]
+    fn parse_google_html_ignores_ai_overview_ui_noise() {
+        let html = r#"
+            <html><body>
+              <div>AI Overview</div>
+              <div>JavaScript é uma linguagem de programação usada na Web.</div>
+              <div>Mostrar mais</div>
+              <div>AI responses may include mistakes</div>
+              <div>Ela permite criar páginas interativas no navegador.</div>
+              <div>People also ask</div>
+              <div>What is JavaScript used for?</div>
+            </body></html>
+        "#;
+
+        let enrichment = parse_google_search_html(html, 3);
+
+        let overview = enrichment.ai_overview.expect("AI overview");
+        assert!(overview.contains("JavaScript é uma linguagem"));
+        assert!(overview.contains("páginas interativas"));
+        assert!(!overview.contains("Mostrar mais"));
+        assert!(!overview.contains("mistakes"));
     }
 
     #[test]
@@ -1504,10 +1764,39 @@ mod tests {
         let text = enrichment
             .clipboard_text("erro visionclip portal")
             .expect("clipboard summary");
-        assert!(text.contains("Leitura inicial"));
-        assert!(text.contains("Pistas iniciais"));
+        assert!(text.contains("Síntese do VisionClip"));
+        assert!(text.contains("Contexto capturado da visão geral criada por IA"));
+        assert!(text.contains("Fontes iniciais para validar"));
         assert!(text.contains("Fonte 1"));
         assert!(text.contains("Perguntas para aprofundar"));
+    }
+
+    #[test]
+    fn clipboard_text_structures_google_ai_overview_context() {
+        let enrichment = SearchEnrichment {
+            ai_overview: Some(
+                "JavaScript é uma linguagem de programação usada para criar páginas web interativas. Também pode ser usada no servidor com runtimes como Node.js. AI responses may include mistakes".into(),
+            ),
+            snippets: vec![SearchSnippet {
+                title: "JavaScript - MDN".into(),
+                url: "https://developer.mozilla.org/pt-BR/docs/Web/JavaScript".into(),
+                domain: "developer.mozilla.org".into(),
+                snippet: "JavaScript é uma linguagem de scripting usada em páginas da Web.".into(),
+            }],
+            related_questions: vec!["JavaScript é o mesmo que Java?".into()],
+            related_searches: Vec::new(),
+        };
+
+        let text = enrichment
+            .clipboard_text("O que é JavaScript?")
+            .expect("clipboard summary");
+
+        assert!(text.contains("Pesquisa: O que é JavaScript?"));
+        assert!(text.contains("Síntese do VisionClip"));
+        assert!(text.contains("JavaScript é uma linguagem de programação"));
+        assert!(text.contains("Validação inicial"));
+        assert!(text.contains("Contexto capturado da visão geral criada por IA"));
+        assert!(text.contains("Fontes iniciais para validar"));
     }
 
     #[test]
@@ -1562,6 +1851,73 @@ mod tests {
     }
 
     #[test]
+    fn spoken_text_prioritizes_google_ai_overview_context() {
+        let enrichment = SearchEnrichment {
+            ai_overview: Some(
+                "JavaScript é uma linguagem de programação usada para criar páginas web interativas. Ela também é usada no backend com Node.js.".into(),
+            ),
+            snippets: vec![SearchSnippet {
+                title: "Resultado divergente".into(),
+                url: "https://example.com".into(),
+                domain: "example.com".into(),
+                snippet: "Este snippet não deve ser priorizado quando existe visão geral criada por IA.".into(),
+            }],
+            related_questions: Vec::new(),
+            related_searches: Vec::new(),
+        };
+
+        let spoken = enrichment
+            .spoken_text("O que é JavaScript?")
+            .expect("spoken text");
+
+        assert!(spoken.starts_with("Pela visão geral criada por IA do Google"));
+        assert!(spoken.contains("JavaScript é uma linguagem de programação"));
+        assert!(spoken.chars().count() <= 280);
+    }
+
+    #[test]
+    fn spoken_text_prefers_date_sentence_for_when_queries() {
+        let enrichment = SearchEnrichment {
+            ai_overview: None,
+            snippets: vec![SearchSnippet {
+                title: "NASA - Wikipedia".into(),
+                url: "https://pt.wikipedia.org/wiki/NASA".into(),
+                domain: "pt.wikipedia.org".into(),
+                snippet: "Administração Nacional da Aeronáutica e Espaço é uma agência do governo federal dos Estados Unidos responsável por programas espaciais. A NASA foi criada em 29 de julho de 1958, substituindo seu antecessor.".into(),
+            }],
+            related_questions: Vec::new(),
+            related_searches: Vec::new(),
+        };
+
+        let spoken = enrichment
+            .spoken_text("Quando foi fundada a NASA?")
+            .expect("spoken text");
+        assert!(spoken.contains("29 de julho de 1958"));
+        assert!(spoken.chars().count() <= 180);
+    }
+
+    #[test]
+    fn spoken_text_prefers_identity_sentence_for_who_queries() {
+        let enrichment = SearchEnrichment {
+            ai_overview: None,
+            snippets: vec![SearchSnippet {
+                title: "Jean-Jacques Rousseau - Wikipedia".into(),
+                url: "https://pt.wikipedia.org/wiki/Jean-Jacques_Rousseau".into(),
+                domain: "pt.wikipedia.org".into(),
+                snippet: "filósofo, escritor e compositor genebrino (1712–1778). Jean-Jacques Rousseau foi um importante filósofo, teórico político, escritor e compositor genebrino.".into(),
+            }],
+            related_questions: Vec::new(),
+            related_searches: Vec::new(),
+        };
+
+        let spoken = enrichment
+            .spoken_text("Quem foi Rousseau?")
+            .expect("spoken text");
+        assert!(spoken.contains("Jean-Jacques Rousseau foi"));
+        assert!(spoken.chars().count() <= 180);
+    }
+
+    #[test]
     fn parse_google_html_discards_related_searches_that_match_result_titles() {
         let html = r#"
             <html><body>
@@ -1583,16 +1939,15 @@ mod tests {
     }
 
     #[test]
-    fn spoken_text_uses_follow_up_question_when_available() {
+    fn spoken_text_uses_follow_up_question_when_no_direct_answer_is_available() {
         let enrichment = SearchEnrichment {
-            ai_overview: Some("Resumo curto sobre o tema.".into()),
+            ai_overview: None,
             snippets: Vec::new(),
             related_questions: vec!["Como isso funciona na prática?".into()],
             related_searches: Vec::new(),
         };
 
         let spoken = enrichment.spoken_text("tema geral").expect("spoken text");
-        assert!(spoken.contains("Resumo curto sobre o tema."));
         assert!(spoken.contains("Como isso funciona na prática?"));
     }
 
