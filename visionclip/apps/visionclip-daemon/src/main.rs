@@ -1,13 +1,15 @@
+mod linux_apps;
 mod search;
 
+use crate::linux_apps::open_application;
 use crate::search::GoogleSearchClient;
 use anyhow::{Context, Result};
 use std::{path::PathBuf, sync::Arc, time::Instant};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{error, info, warn};
 use visionclip_common::{
-    read_message, write_message, Action, AppConfig, CaptureJob, JobResult, VisionRequest,
-    VoiceSearchJob,
+    read_message, write_message, Action, AppConfig, ApplicationLaunchJob, CaptureJob, JobResult,
+    VisionRequest, VoiceSearchJob,
 };
 use visionclip_infer::{
     postprocess::{sanitize_for_speech, sanitize_output},
@@ -91,7 +93,57 @@ async fn process_request(state: &AppState, request: VisionRequest) -> Result<Job
     match request {
         VisionRequest::Capture(job) => process_job(state, job).await,
         VisionRequest::VoiceSearch(job) => process_voice_search(state, job).await,
+        VisionRequest::OpenApplication(job) => process_open_application(state, job).await,
     }
+}
+
+async fn process_open_application(
+    state: &AppState,
+    job: ApplicationLaunchJob,
+) -> Result<JobResult> {
+    let request_id = job.request_id;
+    let total_started_at = Instant::now();
+    let app_name = job.app_name.trim();
+    let speak_requested = state
+        .config
+        .action_should_speak("OpenApplication", job.speak);
+
+    info!(
+        request_id = %request_id,
+        transcript = ?job.transcript,
+        app_name,
+        speak_requested,
+        "processing open application job"
+    );
+
+    let result = open_application(app_name)?;
+    let message = result.message;
+    let (tts_enqueue_ms, spoken) = enqueue_tts(
+        state.piper.as_ref(),
+        request_id,
+        "OpenApplication",
+        &message,
+        None,
+        speak_requested,
+    );
+
+    let _ = notify("VisionClip", &message);
+
+    info!(
+        request_id = %request_id,
+        app_name,
+        resolved_app = %result.resolved_app,
+        spoken,
+        tts_enqueue_ms,
+        total_ms = elapsed_ms(total_started_at),
+        "open application job completed"
+    );
+
+    Ok(JobResult::ActionStatus {
+        request_id,
+        message,
+        spoken,
+    })
 }
 
 async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
