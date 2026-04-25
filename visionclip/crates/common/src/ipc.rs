@@ -58,6 +58,20 @@ pub struct CaptureJob {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoiceSearchJob {
+    pub request_id: Uuid,
+    pub transcript: String,
+    pub query: String,
+    pub speak: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum VisionRequest {
+    Capture(CaptureJob),
+    VoiceSearch(VoiceSearchJob),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum JobResult {
     ClipboardText {
         request_id: Uuid,

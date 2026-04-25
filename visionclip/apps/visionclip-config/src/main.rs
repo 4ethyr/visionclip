@@ -11,6 +11,7 @@ use visionclip_common::{
 use visionclip_infer::{list_ollama_models, OllamaModelSummary};
 
 const OLLAMA_PROBE_TIMEOUT_MS: u64 = 180_000;
+const GTK_OVERLAY_ENABLED: bool = cfg!(feature = "gtk-overlay");
 
 #[derive(Debug, Parser)]
 #[command(name = "visionclip-config")]
@@ -56,6 +57,33 @@ async fn run_doctor() -> Result<()> {
     println!(
         "Portal screenshot backends: {}",
         summarize_portal_backends(&screenshot_portal_backends_for_current_desktop())
+    );
+    println!("Voice input enabled: {}", yes_no(config.voice.enabled));
+    println!("Voice backend: {}", config.voice.backend);
+    println!(
+        "Voice overlay enabled: {}",
+        yes_no(config.voice.overlay_enabled)
+    );
+    println!(
+        "Voice overlay runtime: {}",
+        if GTK_OVERLAY_ENABLED {
+            "gtk-overlay compiled"
+        } else {
+            "gtk-overlay not compiled"
+        }
+    );
+    println!("Voice shortcut: {}", config.voice.shortcut);
+    println!(
+        "Voice record duration: {} ms",
+        config.voice.record_duration_ms
+    );
+    println!(
+        "Voice transcribe command: {}",
+        if config.voice.transcribe_command.trim().is_empty() {
+            "not configured"
+        } else {
+            "configured"
+        }
     );
     println!("Configured model: {}", config.infer.model);
     if config.infer.ocr_model.trim().is_empty() {
@@ -120,6 +148,7 @@ async fn run_doctor() -> Result<()> {
         "ollama",
         "notify-send",
         "xdg-open",
+        "gsettings",
         "gdbus",
         "busctl",
         "wl-copy",
@@ -127,7 +156,9 @@ async fn run_doctor() -> Result<()> {
         "xclip",
         "paplay",
         "pw-play",
+        "pw-record",
         "aplay",
+        "arecord",
         "grim",
         "slurp",
         "maim",

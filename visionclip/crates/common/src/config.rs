@@ -16,6 +16,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub audio: AudioConfig,
     #[serde(default)]
+    pub voice: VoiceConfig,
+    #[serde(default)]
     pub ui: UiConfig,
 }
 
@@ -61,6 +63,10 @@ pub struct SearchConfig {
     pub enabled: bool,
     #[serde(default = "default_search_base_url")]
     pub base_url: String,
+    #[serde(default = "default_true")]
+    pub fallback_enabled: bool,
+    #[serde(default = "default_search_fallback_base_url")]
+    pub fallback_base_url: String,
     #[serde(default = "default_search_request_timeout_ms")]
     pub request_timeout_ms: u64,
     #[serde(default = "default_search_max_results")]
@@ -83,6 +89,32 @@ pub struct AudioConfig {
     pub speak_actions: Vec<String>,
     #[serde(default = "default_player_command")]
     pub player_command: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoiceConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_voice_backend")]
+    pub backend: String,
+    #[serde(default)]
+    pub target: String,
+    #[serde(default = "default_true")]
+    pub overlay_enabled: bool,
+    #[serde(default = "default_voice_shortcut")]
+    pub shortcut: String,
+    #[serde(default = "default_voice_record_duration_ms")]
+    pub record_duration_ms: u64,
+    #[serde(default = "default_voice_sample_rate_hz")]
+    pub sample_rate_hz: u32,
+    #[serde(default = "default_voice_channels")]
+    pub channels: u16,
+    #[serde(default)]
+    pub record_command: String,
+    #[serde(default)]
+    pub transcribe_command: String,
+    #[serde(default = "default_voice_transcribe_timeout_ms")]
+    pub transcribe_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,6 +206,7 @@ impl Default for AppConfig {
             infer: InferConfig::default(),
             search: SearchConfig::default(),
             audio: AudioConfig::default(),
+            voice: VoiceConfig::default(),
             ui: UiConfig::default(),
         }
     }
@@ -230,9 +263,29 @@ impl Default for SearchConfig {
         Self {
             enabled: default_true(),
             base_url: default_search_base_url(),
+            fallback_enabled: default_true(),
+            fallback_base_url: default_search_fallback_base_url(),
             request_timeout_ms: default_search_request_timeout_ms(),
             max_results: default_search_max_results(),
             open_browser: default_true(),
+        }
+    }
+}
+
+impl Default for VoiceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backend: default_voice_backend(),
+            target: String::new(),
+            overlay_enabled: default_true(),
+            shortcut: default_voice_shortcut(),
+            record_duration_ms: default_voice_record_duration_ms(),
+            sample_rate_hz: default_voice_sample_rate_hz(),
+            channels: default_voice_channels(),
+            record_command: String::new(),
+            transcribe_command: String::new(),
+            transcribe_timeout_ms: default_voice_transcribe_timeout_ms(),
         }
     }
 }
@@ -279,7 +332,7 @@ fn default_ollama_model() -> String {
 }
 
 fn default_ollama_ocr_model() -> String {
-    "glm-ocr:latest".to_string()
+    "gemma4:e2b".to_string()
 }
 
 fn default_keep_alive() -> String {
@@ -298,6 +351,10 @@ fn default_search_base_url() -> String {
     "https://www.google.com/search".to_string()
 }
 
+fn default_search_fallback_base_url() -> String {
+    "https://html.duckduckgo.com/html/".to_string()
+}
+
 fn default_search_request_timeout_ms() -> u64 {
     10_000
 }
@@ -308,6 +365,30 @@ fn default_search_max_results() -> usize {
 
 fn default_audio_backend() -> String {
     "piper_http".to_string()
+}
+
+fn default_voice_backend() -> String {
+    "auto".to_string()
+}
+
+fn default_voice_shortcut() -> String {
+    "<Super>F12".to_string()
+}
+
+fn default_voice_record_duration_ms() -> u64 {
+    4_000
+}
+
+fn default_voice_sample_rate_hz() -> u32 {
+    16_000
+}
+
+fn default_voice_channels() -> u16 {
+    1
+}
+
+fn default_voice_transcribe_timeout_ms() -> u64 {
+    60_000
 }
 
 fn default_piper_base_url() -> String {
@@ -381,9 +462,14 @@ mod tests {
     fn default_config_has_expected_model() {
         let cfg = AppConfig::default();
         assert_eq!(cfg.infer.model, "gemma4:e2b");
-        assert_eq!(cfg.infer.ocr_model, "glm-ocr:latest");
+        assert_eq!(cfg.infer.ocr_model, "gemma4:e2b");
         assert!(cfg.infer.thinking_default.is_empty());
         assert!(cfg.audio.enabled);
+        assert!(!cfg.voice.enabled);
+        assert_eq!(cfg.voice.backend, "auto");
+        assert!(cfg.voice.overlay_enabled);
+        assert_eq!(cfg.voice.shortcut, "<Super>F12");
+        assert_eq!(cfg.voice.record_duration_ms, 4_000);
     }
 
     #[test]

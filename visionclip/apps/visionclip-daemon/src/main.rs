@@ -5,7 +5,10 @@ use anyhow::{Context, Result};
 use std::{path::PathBuf, sync::Arc, time::Instant};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{error, info, warn};
-use visionclip_common::{read_message, write_message, Action, AppConfig, CaptureJob, JobResult};
+use visionclip_common::{
+    read_message, write_message, Action, AppConfig, CaptureJob, JobResult, VisionRequest,
+    VoiceSearchJob,
+};
 use visionclip_infer::{
     postprocess::{sanitize_for_speech, sanitize_output},
     InferenceBackend, InferenceInput, OllamaBackend,
@@ -66,9 +69,9 @@ struct AppState {
 }
 
 async fn handle_connection(mut stream: UnixStream, state: Arc<AppState>) -> Result<()> {
-    let job: CaptureJob = read_message(&mut stream).await?;
+    let request: VisionRequest = read_message(&mut stream).await?;
 
-    let response = match process_job(&state, job).await {
+    let response = match process_request(&state, request).await {
         Ok(result) => result,
         Err(error) => {
             error!(?error, "job processing failed");
@@ -82,6 +85,13 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<AppState>) -> Resu
 
     write_message(&mut stream, &response).await?;
     Ok(())
+}
+
+async fn process_request(state: &AppState, request: VisionRequest) -> Result<JobResult> {
+    match request {
+        VisionRequest::Capture(job) => process_job(state, job).await,
+        VisionRequest::VoiceSearch(job) => process_voice_search(state, job).await,
+    }
 }
 
 async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
@@ -235,63 +245,14 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
 
     match job.action {
         Action::SearchWeb => {
-            let mut search_fetch_ms = 0_u64;
-            let mut search_summary = None;
-            let mut search_spoken_text = None;
-            let mut search_result_count = 0_usize;
-            let mut ai_overview_chars = 0_usize;
-
-            if let Some(search) = &state.search {
-                let search_started_at = Instant::now();
-                match search.search(&cleaned).await {
-                    Ok(enrichment) => {
-                        search_fetch_ms = elapsed_ms(search_started_at);
-                        search_result_count = enrichment.snippets.len();
-                        ai_overview_chars = enrichment
-                            .ai_overview
-                            .as_ref()
-                            .map(|value| value.chars().count())
-                            .unwrap_or_default();
-                        search_spoken_text = enrichment.spoken_text(&cleaned);
-                        search_summary = enrichment.clipboard_text(&cleaned);
-                    }
-                    Err(error) => {
-                        search_fetch_ms = elapsed_ms(search_started_at);
-                        warn!(?error, request_id = %request_id, query = %cleaned, search_fetch_ms, "failed to enrich search query");
-                    }
-                }
-            }
-
-            let output_started_at = Instant::now();
-            if let Some(summary) = &search_summary {
-                state.clipboard.set_text(summary)?;
-            }
-            if state.config.search.open_browser {
-                open_search_query(&cleaned)?;
-            }
-            let _ = notify(
-                "VisionClip",
-                if search_summary.is_some() {
-                    "Pesquisa aberta e resumo inicial copiado."
-                } else {
-                    "Consulta aberta no navegador."
-                },
-            );
-            let output_ms = elapsed_ms(output_started_at);
-            let tts_text = sanitize_for_speech(
-                &job.action,
-                search_spoken_text
-                    .as_deref()
-                    .unwrap_or("Pesquisa aberta no navegador para aprofundar o tema."),
-            );
-            let (tts_enqueue_ms, spoken) = enqueue_tts(
-                state.piper.as_ref(),
+            let search_result = execute_search_query(
+                state,
                 request_id,
-                action_name,
-                &tts_text,
-                None,
+                &cleaned,
                 speak_requested,
-            );
+                total_started_at,
+            )
+            .await?;
 
             info!(
                 request_id = %request_id,
@@ -302,17 +263,18 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                 infer_ms,
                 sanitize_ms,
                 output_chars,
-                search_fetch_ms,
-                search_result_count,
-                ai_overview_chars,
-                search_summary_chars = search_summary
+                search_fetch_ms = search_result.search_fetch_ms,
+                search_result_count = search_result.search_result_count,
+                ai_overview_chars = search_result.ai_overview_chars,
+                search_summary_chars = search_result
+                    .summary
                     .as_ref()
                     .map(|value| value.chars().count())
                     .unwrap_or_default(),
-                output_ms,
+                output_ms = search_result.output_ms,
                 speak_requested,
-                spoken,
-                tts_enqueue_ms,
+                spoken = search_result.spoken,
+                tts_enqueue_ms = search_result.tts_enqueue_ms,
                 total_ms = elapsed_ms(total_started_at),
                 "capture job completed"
             );
@@ -320,8 +282,8 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
             Ok(JobResult::BrowserQuery {
                 request_id,
                 query: cleaned,
-                summary: search_summary,
-                spoken,
+                summary: search_result.summary,
+                spoken: search_result.spoken,
             })
         }
         _ => {
@@ -372,6 +334,190 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                 spoken,
             })
         }
+    }
+}
+
+async fn process_voice_search(state: &AppState, job: VoiceSearchJob) -> Result<JobResult> {
+    let request_id = job.request_id;
+    let action_name = Action::SearchWeb.as_str();
+    let total_started_at = Instant::now();
+    let cleaned = sanitize_output(&Action::SearchWeb, &job.query);
+
+    info!(
+        request_id = %request_id,
+        action = action_name,
+        transcript = %job.transcript,
+        query = %cleaned,
+        speak_requested = job.speak,
+        "processing voice search job"
+    );
+
+    let speak_requested = state.config.action_should_speak(action_name, job.speak);
+    let search_result = execute_search_query(
+        state,
+        request_id,
+        &cleaned,
+        speak_requested,
+        total_started_at,
+    )
+    .await?;
+
+    info!(
+        request_id = %request_id,
+        action = action_name,
+        search_fetch_ms = search_result.search_fetch_ms,
+        search_result_count = search_result.search_result_count,
+        ai_overview_chars = search_result.ai_overview_chars,
+        search_summary_chars = search_result
+            .summary
+            .as_ref()
+            .map(|value| value.chars().count())
+            .unwrap_or_default(),
+        output_ms = search_result.output_ms,
+        speak_requested,
+        spoken = search_result.spoken,
+        tts_enqueue_ms = search_result.tts_enqueue_ms,
+        total_ms = elapsed_ms(total_started_at),
+        "voice search job completed"
+    );
+
+    Ok(JobResult::BrowserQuery {
+        request_id,
+        query: cleaned,
+        summary: search_result.summary,
+        spoken: search_result.spoken,
+    })
+}
+
+struct SearchExecution {
+    summary: Option<String>,
+    spoken: bool,
+    search_fetch_ms: u64,
+    search_result_count: usize,
+    ai_overview_chars: usize,
+    output_ms: u64,
+    tts_enqueue_ms: u64,
+}
+
+async fn execute_search_query(
+    state: &AppState,
+    request_id: uuid::Uuid,
+    query: &str,
+    speak_requested: bool,
+    total_started_at: Instant,
+) -> Result<SearchExecution> {
+    let mut search_fetch_ms = 0_u64;
+    let mut search_summary = None;
+    let mut search_spoken_text = None;
+    let mut search_result_count = 0_usize;
+    let mut ai_overview_chars = 0_usize;
+    let mut search_blocked = false;
+
+    if let Some(search) = &state.search {
+        let search_started_at = Instant::now();
+        match search.search(query).await {
+            Ok(enrichment) => {
+                search_fetch_ms = elapsed_ms(search_started_at);
+                search_result_count = enrichment.snippets.len();
+                ai_overview_chars = enrichment
+                    .ai_overview
+                    .as_ref()
+                    .map(|value| value.chars().count())
+                    .unwrap_or_default();
+                search_spoken_text = enrichment.spoken_text(query);
+                search_summary = enrichment.clipboard_text(query);
+            }
+            Err(error) => {
+                search_fetch_ms = elapsed_ms(search_started_at);
+                search_blocked = search::is_google_challenge_page(&error.to_string());
+                warn!(?error, request_id = %request_id, query = %query, search_fetch_ms, "failed to enrich search query");
+            }
+        }
+    }
+
+    if search_summary.is_none() {
+        search_summary = Some(search_browser_fallback_summary(query, search_blocked));
+    }
+    if search_spoken_text.is_none() {
+        search_spoken_text = Some(search_browser_fallback_speech(query, search_blocked));
+    }
+
+    let output_started_at = Instant::now();
+    if let Some(summary) = &search_summary {
+        state.clipboard.set_text(summary)?;
+    }
+    if state.config.search.open_browser {
+        open_search_query(query)?;
+    }
+    let _ = notify(
+        "VisionClip",
+        if search_result_count > 0 || ai_overview_chars > 0 {
+            "Pesquisa aberta e resumo inicial copiado."
+        } else if search_blocked {
+            "Pesquisa aberta. O Google bloqueou a coleta local de resultados nesta sessão."
+        } else {
+            "Pesquisa aberta no navegador com resumo inicial de fallback."
+        },
+    );
+    let output_ms = elapsed_ms(output_started_at);
+    let tts_text = sanitize_for_speech(
+        &Action::SearchWeb,
+        search_spoken_text
+            .as_deref()
+            .unwrap_or("Pesquisa aberta no navegador para aprofundar o tema."),
+    );
+    let (tts_enqueue_ms, spoken) = enqueue_tts(
+        state.piper.as_ref(),
+        request_id,
+        Action::SearchWeb.as_str(),
+        &tts_text,
+        None,
+        speak_requested,
+    );
+
+    info!(
+        request_id = %request_id,
+        query = %query,
+        search_fetch_ms,
+        output_ms,
+        speak_requested,
+        spoken,
+        total_ms = elapsed_ms(total_started_at),
+        "search query executed"
+    );
+
+    Ok(SearchExecution {
+        summary: search_summary,
+        spoken,
+        search_fetch_ms,
+        search_result_count,
+        ai_overview_chars,
+        output_ms,
+        tts_enqueue_ms,
+    })
+}
+
+fn search_browser_fallback_summary(query: &str, search_blocked: bool) -> String {
+    let leitura_inicial = if search_blocked {
+        "A consulta foi aberta no navegador, mas o Google bloqueou a coleta local de resultados nesta sessão."
+    } else {
+        "A consulta foi aberta no navegador, mas o VisionClip não conseguiu extrair um resumo local útil desta resposta."
+    };
+
+    format!(
+        "Pesquisa: {query}\n\nLeitura inicial:\n{leitura_inicial}\n\nPróximo passo:\nRevise a aba aberta e refine a busca com local, data, fonte ou tipo de resultado."
+    )
+}
+
+fn search_browser_fallback_speech(query: &str, search_blocked: bool) -> String {
+    if search_blocked {
+        format!(
+            "Pesquisa aberta no navegador para {query}. O Google bloqueou a coleta local de resultados nesta sessão."
+        )
+    } else {
+        format!(
+            "Pesquisa aberta no navegador para {query}. Revise a aba aberta para aprofundar o tema."
+        )
     }
 }
 

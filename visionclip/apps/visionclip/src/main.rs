@@ -1,14 +1,17 @@
 mod capture;
+mod voice;
+mod voice_overlay;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::PathBuf;
 use std::time::Instant;
 use tokio::net::UnixStream;
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 use visionclip_common::{
-    read_message, write_message, Action, AppConfig, CaptureJob, JobResult, SessionType,
+    read_message, write_message, AppConfig, CaptureJob, JobResult, SessionType, VisionRequest,
+    VoiceSearchJob,
 };
 
 #[derive(Debug, Parser)]
@@ -29,11 +32,30 @@ struct Cli {
 
     #[arg(long)]
     source_app: Option<String>,
+
+    #[arg(long, default_value_t = false)]
+    voice_request: bool,
+
+    #[arg(long, default_value_t = false)]
+    voice_search: bool,
+
+    #[arg(long)]
+    voice_transcript: Option<String>,
+
+    #[arg(long, hide = true, default_value_t = false)]
+    voice_overlay_listening: bool,
+
+    #[arg(long, hide = true, default_value_t = 4000)]
+    voice_overlay_duration_ms: u64,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if cli.voice_overlay_listening {
+        return voice_overlay::run_listening_overlay(cli.voice_overlay_duration_ms);
+    }
+
     let config = AppConfig::load()?;
 
     tracing_subscriber::fmt()
@@ -42,14 +64,50 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let action_string = cli
-        .action
-        .clone()
-        .unwrap_or_else(|| config.general.default_action.clone());
-    let action: Action = action_string.parse().map_err(anyhow::Error::msg)?;
+    if cli.action.is_some()
+        && (cli.voice_request || cli.voice_search || cli.voice_transcript.is_some())
+    {
+        warn!("voice inputs were ignored because --action was provided explicitly");
+    }
+
+    let resolved_voice_request = if cli.action.is_none() && cli.voice_request {
+        Some(voice::resolve_voice_request(&config.voice, cli.voice_transcript.as_deref()).await?)
+    } else {
+        None
+    };
+    let resolved_voice_search = if cli.action.is_none() && cli.voice_search {
+        Some(voice::resolve_voice_search(&config.voice, cli.voice_transcript.as_deref()).await?)
+    } else {
+        None
+    };
+
+    if let Some(voice_search) = &resolved_voice_search {
+        return run_voice_search(&config, cli.speak, voice_search).await;
+    }
+
+    let action = if let Some(action_string) = cli.action.clone() {
+        action_string.parse().map_err(anyhow::Error::msg)?
+    } else if let Some(voice_request) = &resolved_voice_request {
+        voice_request.action.clone()
+    } else {
+        config
+            .general
+            .default_action
+            .parse()
+            .map_err(anyhow::Error::msg)?
+    };
     let session_type = detect_session_type();
     let request_id = Uuid::new_v4();
     let total_started_at = Instant::now();
+
+    if let Some(voice_request) = &resolved_voice_request {
+        info!(
+            request_id = %request_id,
+            transcript = %voice_request.transcript,
+            resolved_action = voice_request.action.as_str(),
+            "voice request resolved"
+        );
+    }
 
     info!(
         request_id = %request_id,
@@ -103,9 +161,10 @@ async fn main() -> Result<()> {
         speak: cli.speak,
         source_app: cli.source_app,
     };
+    let request = VisionRequest::Capture(job);
 
     let daemon_roundtrip_started_at = Instant::now();
-    write_message(&mut stream, &job).await?;
+    write_message(&mut stream, &request).await?;
     let response: JobResult = read_message(&mut stream).await?;
     let daemon_roundtrip_ms = elapsed_ms(daemon_roundtrip_started_at);
 
@@ -140,6 +199,81 @@ async fn main() -> Result<()> {
         }
         JobResult::Error { code, message, .. } => {
             anyhow::bail!("daemon returned error {code}: {message}");
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_voice_search(
+    config: &AppConfig,
+    speak: bool,
+    voice_search: &voice::VoiceSearch,
+) -> Result<()> {
+    let request_id = Uuid::new_v4();
+    let total_started_at = Instant::now();
+    let socket_path = config.socket_path()?;
+
+    info!(
+        request_id = %request_id,
+        transcript = %voice_search.transcript,
+        query = %voice_search.query,
+        speak,
+        "voice search request started"
+    );
+
+    let connect_started_at = Instant::now();
+    let mut stream = UnixStream::connect(&socket_path).await.with_context(|| {
+        format!(
+            "failed to connect to daemon socket {}",
+            socket_path.display()
+        )
+    })?;
+    let connect_ms = elapsed_ms(connect_started_at);
+
+    info!(
+        request_id = %request_id,
+        connect_ms,
+        socket = %socket_path.display(),
+        "daemon socket connected"
+    );
+
+    let request = VisionRequest::VoiceSearch(VoiceSearchJob {
+        request_id,
+        transcript: voice_search.transcript.clone(),
+        query: voice_search.query.clone(),
+        speak,
+    });
+
+    let daemon_roundtrip_started_at = Instant::now();
+    write_message(&mut stream, &request).await?;
+    let response: JobResult = read_message(&mut stream).await?;
+    let daemon_roundtrip_ms = elapsed_ms(daemon_roundtrip_started_at);
+
+    match response {
+        JobResult::BrowserQuery {
+            query,
+            summary,
+            spoken,
+            ..
+        } => {
+            info!(
+                request_id = %request_id,
+                spoken,
+                daemon_roundtrip_ms,
+                total_ms = elapsed_ms(total_started_at),
+                "voice browser query response received"
+            );
+            println!("Consulta por voz aberta no navegador: {}", query);
+            if let Some(summary) = summary {
+                println!("\nResumo inicial da pesquisa:\n{}", summary);
+            }
+        }
+        JobResult::Error { code, message, .. } => {
+            anyhow::bail!("daemon returned error {code}: {message}");
+        }
+        JobResult::ClipboardText { .. } => {
+            anyhow::bail!("daemon returned unexpected clipboard response for voice search");
         }
     }
 

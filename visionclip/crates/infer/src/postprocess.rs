@@ -47,10 +47,53 @@ fn sanitize_search_query(input: &str) -> String {
         .unwrap_or_default()
         .trim();
     let line = strip_leading_label(line);
+    let line = strip_search_helper_prefix(&line);
     let cleaned = normalize_inline_markup(&line);
     cleaned
         .trim_matches(|ch| matches!(ch, '"' | '\'' | '`'))
+        .trim_end_matches('.')
         .to_string()
+}
+
+fn strip_search_helper_prefix(input: &str) -> String {
+    for prefix in [
+        "pesquise por ",
+        "pesquisar por ",
+        "procure por ",
+        "busque por ",
+        "busca por ",
+        "search for ",
+        "look up ",
+        "search query: ",
+        "google search: ",
+        "pesquise no google por ",
+    ] {
+        if let Some(rest) = strip_prefix_ignore_ascii_case(input, prefix) {
+            return rest.trim_start().to_string();
+        }
+    }
+
+    input.to_string()
+}
+
+fn strip_prefix_ignore_ascii_case<'a>(input: &'a str, prefix: &str) -> Option<&'a str> {
+    if input.len() < prefix.len() {
+        return None;
+    }
+
+    let mut input_indices = input.char_indices();
+    for prefix_ch in prefix.chars() {
+        let (_, input_ch) = input_indices.next()?;
+        if !input_ch.eq_ignore_ascii_case(&prefix_ch) {
+            return None;
+        }
+    }
+
+    let byte_index = input_indices
+        .next()
+        .map(|(index, _)| index)
+        .unwrap_or_else(|| input.len());
+    Some(&input[byte_index..])
 }
 
 fn normalize_plain_text(input: &str) -> String {
@@ -283,6 +326,12 @@ fn ptbr_replacement(word: &str) -> Option<&'static str> {
         "execucao" => Some("execução"),
         "execucoes" => Some("execuções"),
         "sintese" => Some("síntese"),
+        "sessao" => Some("sessão"),
+        "sessoes" => Some("sessões"),
+        "proximo" => Some("próximo"),
+        "proximos" => Some("próximos"),
+        "proxima" => Some("próxima"),
+        "proximas" => Some("próximas"),
         "tambem" => Some("também"),
         "area" => Some("área"),
         "areas" => Some("áreas"),
@@ -367,11 +416,11 @@ mod tests {
 
     #[test]
     fn speech_sanitizer_restores_common_ptbr_accents() {
-        let raw = "Nao foi possivel gerar traducao e explicacao util para esta aplicacao.";
+        let raw = "Nao foi possivel gerar traducao e explicacao util para esta aplicacao na proxima sessao.";
         let cleaned = sanitize_for_speech(&Action::Explain, raw);
         assert_eq!(
             cleaned,
-            "Não foi possível gerar tradução e explicação útil para esta aplicação."
+            "Não foi possível gerar tradução e explicação útil para esta aplicação na próxima sessão."
         );
     }
 
@@ -397,5 +446,19 @@ mod tests {
         let raw = "Query: \"visionclip portal screenshot timeout\"";
         let cleaned = sanitize_output(&Action::SearchWeb, raw);
         assert_eq!(cleaned, "visionclip portal screenshot timeout");
+    }
+
+    #[test]
+    fn sanitize_search_query_removes_search_helper_prefix() {
+        let raw = "Pesquise por Serviço para cidadãos japoneses no exterior.";
+        let cleaned = sanitize_output(&Action::SearchWeb, raw);
+        assert_eq!(cleaned, "Serviço para cidadãos japoneses no exterior");
+    }
+
+    #[test]
+    fn sanitize_search_query_handles_accented_text_without_panicking() {
+        let raw = "Judeu, hoje, na defensão contemporânea, contemporânea a gente está";
+        let cleaned = sanitize_output(&Action::SearchWeb, raw);
+        assert_eq!(cleaned, raw);
     }
 }

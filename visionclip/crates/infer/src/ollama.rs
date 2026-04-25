@@ -490,10 +490,11 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(body).unwrap();
         assert_eq!(json["model"], "gemma4:test");
         assert_eq!(json["messages"][1]["images"][0], "UE5H");
-        assert_eq!(
-            json["messages"][1]["content"],
-            "Explique tecnicamente o que aparece nesta captura, destacando contexto, ponto principal e proxima acao util."
-        );
+        let prompt = json["messages"][1]["content"]
+            .as_str()
+            .expect("user prompt string");
+        assert!(prompt.contains("Explique tecnicamente o que aparece nesta captura."));
+        assert!(prompt.contains("Se for terminal ou log"));
     }
 
     #[tokio::test]

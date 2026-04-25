@@ -30,6 +30,31 @@ const AI_OVERVIEW_STOP_MARKERS: [&str; 14] = [
     "Pesquisas relacionadas",
     "Related searches",
 ];
+const RELATED_QUESTIONS_LABELS: [&str; 4] = [
+    "As pessoas tambem perguntam",
+    "People also ask",
+    "Outras perguntas",
+    "Perguntas relacionadas",
+];
+const RELATED_SEARCHES_LABELS: [&str; 4] = [
+    "Pesquisas relacionadas",
+    "Related searches",
+    "People also search for",
+    "Mais pesquisas",
+];
+const GOOGLE_CHALLENGE_MARKERS: [&str; 6] = [
+    "If you're having trouble accessing Google Search",
+    "Clique aqui se o redirecionamento nao iniciar",
+    "/httpservice/retry/enablejs",
+    "id=\"yvlrue\"",
+    "cad=sg_trbl",
+    "SG_SS=",
+];
+const GOOGLE_CHALLENGE_ERROR_MARKERS: [&str; 3] = [
+    "google search returned a challenge page",
+    "blocked local scraping",
+    "google bloqueou a coleta local",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchSnippet {
@@ -43,51 +68,120 @@ pub struct SearchSnippet {
 pub struct SearchEnrichment {
     pub ai_overview: Option<String>,
     pub snippets: Vec<SearchSnippet>,
+    pub related_questions: Vec<String>,
+    pub related_searches: Vec<String>,
 }
 
 impl SearchEnrichment {
+    fn has_useful_content(&self) -> bool {
+        self.ai_overview.is_some()
+            || !self.snippets.is_empty()
+            || !self.related_questions.is_empty()
+            || !self.related_searches.is_empty()
+    }
+
     pub fn clipboard_text(&self, query: &str) -> Option<String> {
-        if let Some(overview) = &self.ai_overview {
-            let mut sections = vec![
-                format!("Pesquisa: {query}"),
-                format!("Resumo inicial encontrado na busca:\n{overview}"),
-            ];
-
-            if !self.snippets.is_empty() {
-                sections.push(format!(
-                    "Fontes iniciais:\n{}",
-                    self.snippets
-                        .iter()
-                        .take(3)
-                        .enumerate()
-                        .map(|(index, item)| format_snippet_entry(index, item))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                ));
-            }
-
-            return Some(sections.join("\n\n"));
-        }
-
-        if self.snippets.is_empty() {
+        let summary = self.summary_text();
+        let supporting_points = self.supporting_points();
+        if summary.is_none()
+            && self.snippets.is_empty()
+            && self.related_questions.is_empty()
+            && self.related_searches.is_empty()
+        {
             return None;
         }
 
-        Some(format!(
-            "Pesquisa: {query}\n\nSinais iniciais encontrados na busca:\n{}",
-            self.snippets
-                .iter()
-                .take(3)
-                .enumerate()
-                .map(|(index, item)| format_snippet_entry(index, item))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ))
+        let mut sections = vec![format!("Pesquisa: {query}")];
+
+        if let Some(summary) = summary {
+            sections.push(format!("Leitura inicial:\n{summary}"));
+        }
+
+        if self.ai_overview.is_some() && !supporting_points.is_empty() {
+            sections.push(format!(
+                "Pistas iniciais:\n{}",
+                supporting_points
+                    .iter()
+                    .take(3)
+                    .enumerate()
+                    .map(|(index, item)| format!("{}. {}", index + 1, item))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
+
+        if !self.related_questions.is_empty() {
+            sections.push(format!(
+                "Perguntas para aprofundar:\n{}",
+                self.related_questions
+                    .iter()
+                    .take(3)
+                    .enumerate()
+                    .map(|(index, item)| format!("{}. {}", index + 1, item))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
+
+        if !self.related_searches.is_empty() {
+            sections.push(format!(
+                "Buscas relacionadas:\n{}",
+                self.related_searches
+                    .iter()
+                    .take(4)
+                    .enumerate()
+                    .map(|(index, item)| format!("{}. {}", index + 1, item))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
+
+        if !self.snippets.is_empty() {
+            sections.push(format!(
+                "Fontes iniciais:\n{}",
+                self.snippets
+                    .iter()
+                    .take(3)
+                    .enumerate()
+                    .map(|(index, item)| format_snippet_entry(index, item))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
+
+        Some(sections.join("\n\n"))
     }
 
     pub fn spoken_text(&self, query: &str) -> Option<String> {
-        if let Some(overview) = &self.ai_overview {
-            return Some(overview.clone());
+        if let Some(summary) = self.summary_text() {
+            let summary = truncate_chars(&summary, 280);
+            if let Some(follow_up) = self
+                .related_questions
+                .first()
+                .map(String::as_str)
+                .or_else(|| self.related_searches.first().map(String::as_str))
+            {
+                return Some(format!(
+                    "{} Para aprofundar, considere: {}",
+                    summary,
+                    truncate_chars(follow_up, 96)
+                ));
+            }
+            return Some(summary);
+        }
+
+        if !self.related_questions.is_empty() {
+            return Some(format!(
+                "Pesquisa aberta. Uma pergunta útil para aprofundar é: {}",
+                truncate_chars(&self.related_questions[0], 120)
+            ));
+        }
+
+        if !self.related_searches.is_empty() {
+            return Some(format!(
+                "Pesquisa aberta. Um bom próximo termo é: {}",
+                truncate_chars(&self.related_searches[0], 120)
+            ));
         }
 
         if self.snippets.is_empty() {
@@ -97,20 +191,54 @@ impl SearchEnrichment {
         }
 
         let combined = self
-            .snippets
+            .supporting_points()
             .iter()
             .take(2)
-            .map(|item| {
-                if item.snippet.is_empty() {
-                    item.title.clone()
-                } else {
-                    item.snippet.clone()
-                }
-            })
+            .cloned()
             .collect::<Vec<_>>()
             .join(" ");
 
-        Some(combined)
+        Some(truncate_chars(&combined, 280))
+    }
+
+    fn summary_text(&self) -> Option<String> {
+        if let Some(overview) = &self.ai_overview {
+            return Some(truncate_chars(overview, 420));
+        }
+
+        let points = self.supporting_points();
+        if points.is_empty() {
+            None
+        } else if points.len() == 1 {
+            Some(points[0].clone())
+        } else {
+            Some(
+                points
+                    .iter()
+                    .take(2)
+                    .map(|point| ensure_sentence(point))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
+        }
+    }
+
+    fn supporting_points(&self) -> Vec<String> {
+        let mut points = Vec::new();
+        let mut seen = HashSet::new();
+
+        for item in self.snippets.iter().take(3) {
+            let Some(point) = supporting_point_from_snippet(item) else {
+                continue;
+            };
+            let folded = ascii_fold(&point);
+            if !seen.insert(folded) {
+                continue;
+            }
+            points.push(point);
+        }
+
+        points
     }
 }
 
@@ -150,11 +278,37 @@ impl GoogleSearchClient {
     }
 
     pub async fn search(&self, query: &str) -> Result<SearchEnrichment> {
-        let primary = match self.fetch_and_parse(query, SearchFetchMode::Standard).await {
+        let google_result = self.search_google(query).await;
+        match google_result {
+            Ok(enrichment) if enrichment.has_useful_content() => Ok(enrichment),
+            Ok(enrichment) if !self.config.fallback_enabled => Ok(enrichment),
+            Ok(_) => self
+                .fetch_duckduckgo_and_parse(query)
+                .await
+                .with_context(|| {
+                    "Google returned no useful local search data and fallback search failed"
+                }),
+            Err(google_error) if self.config.fallback_enabled => self
+                .fetch_duckduckgo_and_parse(query)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Google local search unavailable; fallback search failed: {google_error}"
+                    )
+                }),
+            Err(google_error) => Err(google_error),
+        }
+    }
+
+    async fn search_google(&self, query: &str) -> Result<SearchEnrichment> {
+        let primary = match self
+            .fetch_google_and_parse(query, SearchFetchMode::Standard)
+            .await
+        {
             Ok(enrichment) => enrichment,
             Err(primary_error) => {
                 return self
-                    .fetch_and_parse(query, SearchFetchMode::WebResults)
+                    .fetch_google_and_parse(query, SearchFetchMode::WebResults)
                     .await
                     .with_context(|| {
                         format!(
@@ -165,11 +319,13 @@ impl GoogleSearchClient {
         };
 
         let fallback = self
-            .fetch_and_parse(query, SearchFetchMode::WebResults)
+            .fetch_google_and_parse(query, SearchFetchMode::WebResults)
             .await
             .unwrap_or_else(|_| SearchEnrichment {
                 ai_overview: None,
                 snippets: Vec::new(),
+                related_questions: Vec::new(),
+                related_searches: Vec::new(),
             });
 
         let merged = merge_enrichment(primary, fallback, self.config.max_results);
@@ -180,7 +336,7 @@ impl GoogleSearchClient {
         Ok(merged)
     }
 
-    async fn fetch_and_parse(
+    async fn fetch_google_and_parse(
         &self,
         query: &str,
         mode: SearchFetchMode,
@@ -199,8 +355,40 @@ impl GoogleSearchClient {
             .await
             .context("failed to read Google search response body")?;
 
+        if is_google_challenge_page(&html) {
+            anyhow::bail!("google search returned a challenge page and blocked local scraping");
+        }
+
         Ok(parse_google_search_html(&html, self.config.max_results))
     }
+
+    async fn fetch_duckduckgo_and_parse(&self, query: &str) -> Result<SearchEnrichment> {
+        let url = build_duckduckgo_url(&self.config.fallback_base_url, query)?;
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .context("failed to fetch fallback search page")?
+            .error_for_status()
+            .context("fallback search returned an error status")?;
+        let html = response
+            .text()
+            .await
+            .context("failed to read fallback search response body")?;
+
+        Ok(parse_duckduckgo_search_html(&html, self.config.max_results))
+    }
+}
+
+pub fn is_google_challenge_page(input: &str) -> bool {
+    let normalized = ascii_fold(input);
+    GOOGLE_CHALLENGE_MARKERS
+        .iter()
+        .any(|marker| normalized.contains(&ascii_fold(marker)))
+        || GOOGLE_CHALLENGE_ERROR_MARKERS
+            .iter()
+            .any(|marker| normalized.contains(&ascii_fold(marker)))
 }
 
 fn build_fetch_url(
@@ -227,17 +415,27 @@ fn build_fetch_url(
     Ok(url)
 }
 
+fn build_duckduckgo_url(base_url: &str, query: &str) -> Result<Url> {
+    let mut url = Url::parse(base_url)
+        .with_context(|| format!("invalid fallback search base URL `{base_url}`"))?;
+    url.query_pairs_mut().append_pair("q", query.trim());
+    Ok(url)
+}
+
 fn parse_google_search_html(html: &str, max_results: usize) -> SearchEnrichment {
     let document = Html::parse_document(html);
+    let lines = visible_text_lines(&document);
+    let snippets = extract_search_results(&document, max_results);
+    let related_searches = filter_related_searches(extract_related_searches(&lines), &snippets);
     SearchEnrichment {
-        ai_overview: extract_ai_overview(&document),
-        snippets: extract_search_results(&document, max_results),
+        ai_overview: extract_ai_overview(&lines),
+        snippets,
+        related_questions: extract_related_questions(&lines),
+        related_searches,
     }
 }
 
-fn extract_ai_overview(document: &Html) -> Option<String> {
-    let lines = visible_text_lines(document);
-
+fn extract_ai_overview(lines: &[String]) -> Option<String> {
     for (index, line) in lines.iter().enumerate() {
         if !is_ai_overview_label(line) {
             continue;
@@ -269,6 +467,16 @@ fn extract_ai_overview(document: &Html) -> Option<String> {
     }
 
     None
+}
+
+fn parse_duckduckgo_search_html(html: &str, max_results: usize) -> SearchEnrichment {
+    let document = Html::parse_document(html);
+    SearchEnrichment {
+        ai_overview: None,
+        snippets: extract_duckduckgo_results(&document, max_results),
+        related_questions: Vec::new(),
+        related_searches: Vec::new(),
+    }
 }
 
 fn extract_search_results(document: &Html, max_results: usize) -> Vec<SearchSnippet> {
@@ -356,6 +564,84 @@ fn extract_search_results(document: &Html, max_results: usize) -> Vec<SearchSnip
     items
 }
 
+fn extract_duckduckgo_results(document: &Html, max_results: usize) -> Vec<SearchSnippet> {
+    let containers = selector_list(&[
+        "div.result",
+        "div.web-result",
+        "div.result__body",
+        "article",
+    ]);
+    let title_selectors = selector_list(&[
+        "a.result__a",
+        ".result__title a",
+        "h2 a",
+        "a[data-testid='result-title-a']",
+    ]);
+    let snippet_selectors = selector_list(&[
+        "a.result__snippet",
+        ".result__snippet",
+        ".result__body .result__snippet",
+        "[data-result='snippet']",
+    ]);
+    let link_selector = Selector::parse("a[href]").expect("valid anchor selector");
+    let mut seen = HashSet::new();
+    let mut items = Vec::new();
+
+    for container_selector in &containers {
+        for container in document.select(container_selector) {
+            let mut title = title_selectors
+                .iter()
+                .find_map(|selector| first_text_in(&container, selector))
+                .unwrap_or_default();
+            let link = title_selectors
+                .iter()
+                .find_map(|selector| {
+                    container.select(selector).find_map(|element| {
+                        normalize_duckduckgo_href(element.value().attr("href")?)
+                    })
+                })
+                .or_else(|| {
+                    container.select(&link_selector).find_map(|element| {
+                        normalize_duckduckgo_href(element.value().attr("href")?)
+                    })
+                });
+            let Some(link) = link else {
+                continue;
+            };
+
+            let snippet = snippet_selectors
+                .iter()
+                .find_map(|selector| first_text_in(&container, selector))
+                .unwrap_or_default();
+
+            if title.is_empty() {
+                title = domain_from_url(&link);
+            }
+            if title.is_empty() && snippet.is_empty() {
+                continue;
+            }
+
+            let key = format!("{title}::{link}");
+            if !seen.insert(key) {
+                continue;
+            }
+
+            items.push(SearchSnippet {
+                title,
+                url: link.clone(),
+                domain: domain_from_url(&link),
+                snippet,
+            });
+
+            if items.len() >= max_results {
+                return items;
+            }
+        }
+    }
+
+    items
+}
+
 fn merge_enrichment(
     primary: SearchEnrichment,
     fallback: SearchEnrichment,
@@ -378,6 +664,16 @@ fn merge_enrichment(
     SearchEnrichment {
         ai_overview: primary.ai_overview.or(fallback.ai_overview),
         snippets,
+        related_questions: merge_text_entries(
+            primary.related_questions,
+            fallback.related_questions,
+            3,
+        ),
+        related_searches: merge_text_entries(
+            primary.related_searches,
+            fallback.related_searches,
+            4,
+        ),
     }
 }
 
@@ -393,6 +689,192 @@ fn format_snippet_entry(index: usize, item: &SearchSnippet) -> String {
             item.snippet
         )
     }
+}
+
+fn supporting_point_from_snippet(item: &SearchSnippet) -> Option<String> {
+    let summary = if item.snippet.is_empty() {
+        item.title.clone()
+    } else if item.title.is_empty() || ascii_fold(&item.snippet).contains(&ascii_fold(&item.title))
+    {
+        item.snippet.clone()
+    } else {
+        format!("{}: {}", item.title, item.snippet)
+    };
+
+    let summary = truncate_chars(summary.trim(), 180);
+    if summary.is_empty() {
+        None
+    } else {
+        Some(summary)
+    }
+}
+
+fn ensure_sentence(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.ends_with('.') || trimmed.ends_with('!') || trimmed.ends_with('?') {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}.")
+    }
+}
+
+fn truncate_chars(input: &str, max_chars: usize) -> String {
+    let total = input.chars().count();
+    if total <= max_chars {
+        return input.trim().to_string();
+    }
+
+    let mut truncated = input
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    while truncated.ends_with(' ') || truncated.ends_with('.') || truncated.ends_with(',') {
+        truncated.pop();
+    }
+    format!("{}…", truncated.trim_end())
+}
+
+fn filter_related_searches(
+    related_searches: Vec<String>,
+    snippets: &[SearchSnippet],
+) -> Vec<String> {
+    let snippet_titles = snippets
+        .iter()
+        .map(|item| ascii_fold(&item.title))
+        .filter(|title| !title.is_empty())
+        .collect::<HashSet<_>>();
+
+    related_searches
+        .into_iter()
+        .filter(|item| !snippet_titles.contains(&ascii_fold(item)))
+        .collect()
+}
+
+fn extract_related_questions(lines: &[String]) -> Vec<String> {
+    collect_lines_after_label(lines, &RELATED_QUESTIONS_LABELS, 3, |line| {
+        let trimmed = line.trim();
+        trimmed.chars().count() >= 8
+            && trimmed.chars().count() <= 140
+            && (trimmed.ends_with('?')
+                || trimmed.starts_with("como ")
+                || trimmed.starts_with("o que ")
+                || trimmed.starts_with("what ")
+                || trimmed.starts_with("how "))
+    })
+}
+
+fn extract_related_searches(lines: &[String]) -> Vec<String> {
+    let mut items = Vec::new();
+    let mut seen = HashSet::new();
+
+    for (index, line) in lines.iter().enumerate() {
+        if !matches_any_label(line, &RELATED_SEARCHES_LABELS) {
+            continue;
+        }
+
+        for offset in index + 1..lines.len() {
+            let candidate = lines[offset].trim();
+            if candidate.is_empty() {
+                continue;
+            }
+            if is_known_search_section_label(candidate) {
+                break;
+            }
+
+            let next = lines
+                .get(offset + 1)
+                .map(|value| value.as_str())
+                .unwrap_or("");
+            if looks_like_search_result_title(candidate, next) && !items.is_empty() {
+                break;
+            }
+
+            if !is_plausible_related_search(candidate) {
+                if !items.is_empty() {
+                    break;
+                }
+                continue;
+            }
+
+            let folded = ascii_fold(candidate);
+            if !seen.insert(folded) {
+                continue;
+            }
+
+            items.push(candidate.to_string());
+            if items.len() >= 4 {
+                return items;
+            }
+        }
+    }
+
+    items
+}
+
+fn collect_lines_after_label<F>(
+    lines: &[String],
+    labels: &[&str],
+    max_items: usize,
+    predicate: F,
+) -> Vec<String>
+where
+    F: Fn(&str) -> bool,
+{
+    let mut items = Vec::new();
+    let mut seen = HashSet::new();
+
+    for (index, line) in lines.iter().enumerate() {
+        if !matches_any_label(line, labels) {
+            continue;
+        }
+
+        for candidate in lines.iter().skip(index + 1) {
+            if candidate.is_empty() {
+                continue;
+            }
+            if is_known_search_section_label(candidate) {
+                break;
+            }
+            if !predicate(candidate) {
+                continue;
+            }
+
+            let folded = ascii_fold(candidate);
+            if !seen.insert(folded) {
+                continue;
+            }
+
+            items.push(candidate.clone());
+            if items.len() >= max_items {
+                return items;
+            }
+        }
+    }
+
+    items
+}
+
+fn is_plausible_related_search(line: &str) -> bool {
+    let trimmed = line.trim();
+    let word_count = trimmed.split_whitespace().count();
+    trimmed.chars().count() >= 3
+        && trimmed.chars().count() <= 96
+        && word_count >= 2
+        && word_count <= 10
+        && !trimmed.ends_with('?')
+}
+
+fn looks_like_search_result_title(line: &str, next_line: &str) -> bool {
+    let trimmed = line.trim();
+    let next = next_line.trim();
+
+    trimmed.split_whitespace().count() <= 6
+        && trimmed.chars().any(|ch| ch.is_uppercase())
+        && next.chars().count() >= 36
+        && (next.ends_with('.') || next.contains(':'))
 }
 
 fn visible_text_lines(document: &Html) -> Vec<String> {
@@ -440,6 +922,42 @@ fn normalize_search_href(href: &str) -> Option<String> {
     None
 }
 
+fn normalize_duckduckgo_href(href: &str) -> Option<String> {
+    let absolute = if href.starts_with("//") {
+        format!("https:{href}")
+    } else if href.starts_with('/') {
+        format!("https://duckduckgo.com{href}")
+    } else {
+        href.to_string()
+    };
+
+    let url = Url::parse(&absolute).ok()?;
+    let host = url.host_str().unwrap_or_default();
+
+    if host.ends_with("duckduckgo.com") && url.path().starts_with("/l/") {
+        let target = url.query_pairs().find_map(|(name, value)| {
+            if name == "uddg" {
+                Some(value.into_owned())
+            } else {
+                None
+            }
+        })?;
+        if target.starts_with("http://") || target.starts_with("https://") {
+            return Some(target);
+        }
+        return None;
+    }
+
+    if absolute.starts_with("http://") || absolute.starts_with("https://") {
+        if host.ends_with("duckduckgo.com") {
+            return None;
+        }
+        return Some(absolute);
+    }
+
+    None
+}
+
 fn domain_from_url(url: &str) -> String {
     Url::parse(url)
         .ok()
@@ -463,11 +981,30 @@ fn normalize_text(input: &str) -> String {
     ascii.trim().to_string()
 }
 
+fn merge_text_entries(
+    primary: Vec<String>,
+    fallback: Vec<String>,
+    max_items: usize,
+) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut items = Vec::new();
+
+    for item in primary.into_iter().chain(fallback) {
+        let folded = ascii_fold(&item);
+        if !seen.insert(folded) {
+            continue;
+        }
+        items.push(item);
+        if items.len() >= max_items {
+            break;
+        }
+    }
+
+    items
+}
+
 fn is_ai_overview_label(line: &str) -> bool {
-    let normalized = ascii_fold(line);
-    AI_OVERVIEW_LABELS
-        .iter()
-        .any(|label| normalized.contains(&ascii_fold(label)))
+    matches_any_label(line, &AI_OVERVIEW_LABELS)
 }
 
 fn is_ai_overview_stop_marker(line: &str) -> bool {
@@ -475,6 +1012,20 @@ fn is_ai_overview_stop_marker(line: &str) -> bool {
     AI_OVERVIEW_STOP_MARKERS
         .iter()
         .any(|marker| normalized.contains(&ascii_fold(marker)))
+}
+
+fn is_known_search_section_label(line: &str) -> bool {
+    is_ai_overview_label(line)
+        || matches_any_label(line, &RELATED_QUESTIONS_LABELS)
+        || matches_any_label(line, &RELATED_SEARCHES_LABELS)
+        || is_ai_overview_stop_marker(line)
+}
+
+fn matches_any_label(line: &str, labels: &[&str]) -> bool {
+    let normalized = ascii_fold(line);
+    labels
+        .iter()
+        .any(|label| normalized.contains(&ascii_fold(label)))
 }
 
 fn ascii_fold(input: &str) -> String {
@@ -500,10 +1051,15 @@ mod tests {
     fn parse_google_html_extracts_ai_overview_and_results() {
         let html = r#"
             <html><body>
-              <div>Visao Geral Criada por IA</div>
+              <div>Visão geral criada por IA</div>
               <div>O daemon coordena clipboard, TTS e inferencia local.</div>
               <div>Ele pode abrir a pesquisa para aprofundamento.</div>
               <div>As pessoas tambem perguntam</div>
+              <div>Como configurar o VisionClip?</div>
+              <div>Como ativar o Piper?</div>
+              <div>Pesquisas relacionadas</div>
+              <div>visionclip piper setup</div>
+              <div>visionclip daemon config</div>
               <div class="g">
                 <a href="/url?q=https://example.com/docs&sa=U"><h3>VisionClip Docs</h3></a>
                 <div class="VwiC3b">Guia de configuracao do daemon e do Piper.</div>
@@ -523,6 +1079,38 @@ mod tests {
         assert_eq!(enrichment.snippets.len(), 2);
         assert_eq!(enrichment.snippets[0].title, "VisionClip Docs");
         assert_eq!(enrichment.snippets[0].domain, "example.com");
+        assert_eq!(enrichment.related_questions.len(), 2);
+        assert_eq!(enrichment.related_searches.len(), 2);
+    }
+
+    #[test]
+    fn parse_duckduckgo_html_extracts_fallback_results() {
+        let html = r#"
+            <html><body>
+              <div class="result">
+                <h2 class="result__title">
+                  <a class="result__a" href="/l/?uddg=https%3A%2F%2Fdeveloper.mozilla.org%2Fpt-BR%2Fdocs%2FWeb%2FJavaScript">JavaScript - MDN</a>
+                </h2>
+                <a class="result__snippet">JavaScript é uma linguagem de programação usada na Web.</a>
+              </div>
+              <div class="result">
+                <h2 class="result__title">
+                  <a class="result__a" href="https://pt.wikipedia.org/wiki/JavaScript">JavaScript - Wikipédia</a>
+                </h2>
+                <a class="result__snippet">JavaScript permite páginas interativas.</a>
+              </div>
+            </body></html>
+        "#;
+
+        let enrichment = parse_duckduckgo_search_html(html, 3);
+        assert_eq!(enrichment.snippets.len(), 2);
+        assert_eq!(enrichment.snippets[0].title, "JavaScript - MDN");
+        assert_eq!(
+            enrichment.snippets[0].url,
+            "https://developer.mozilla.org/pt-BR/docs/Web/JavaScript"
+        );
+        assert_eq!(enrichment.snippets[0].domain, "developer.mozilla.org");
+        assert!(enrichment.spoken_text("O que é Javascript?").is_some());
     }
 
     #[test]
@@ -558,13 +1146,17 @@ mod tests {
                 domain: "example.com".into(),
                 snippet: "Detalhe complementar.".into(),
             }],
+            related_questions: vec!["Como instalar?".into()],
+            related_searches: vec!["visionclip install".into()],
         };
 
         let text = enrichment
             .clipboard_text("erro visionclip portal")
             .expect("clipboard summary");
-        assert!(text.contains("Resumo inicial encontrado na busca"));
+        assert!(text.contains("Leitura inicial"));
+        assert!(text.contains("Pistas iniciais"));
         assert!(text.contains("Fonte 1"));
+        assert!(text.contains("Perguntas para aprofundar"));
     }
 
     #[test]
@@ -577,6 +1169,8 @@ mod tests {
                 domain: "example.com".into(),
                 snippet: "Guia principal.".into(),
             }],
+            related_questions: vec!["Como configurar?".into()],
+            related_searches: vec!["visionclip config".into()],
         };
         let fallback = SearchEnrichment {
             ai_overview: None,
@@ -586,11 +1180,80 @@ mod tests {
                 domain: "example.org".into(),
                 snippet: "Discussao complementar.".into(),
             }],
+            related_questions: vec!["Como configurar?".into(), "Como testar?".into()],
+            related_searches: vec!["visionclip config".into(), "visionclip test".into()],
         };
 
         let merged = merge_enrichment(primary, fallback, 3);
         assert_eq!(merged.ai_overview, Some("Resumo principal".into()));
         assert_eq!(merged.snippets.len(), 2);
         assert_eq!(merged.snippets[1].title, "Forum");
+        assert_eq!(merged.related_questions.len(), 2);
+        assert_eq!(merged.related_searches.len(), 2);
+    }
+
+    #[test]
+    fn spoken_text_falls_back_to_structured_snippet_summary() {
+        let enrichment = SearchEnrichment {
+            ai_overview: None,
+            snippets: vec![SearchSnippet {
+                title: "Wikipedia".into(),
+                url: "https://example.com/wiki".into(),
+                domain: "example.com".into(),
+                snippet: "Artigo introdutório sobre o tema pesquisado.".into(),
+            }],
+            related_questions: Vec::new(),
+            related_searches: Vec::new(),
+        };
+
+        let spoken = enrichment.spoken_text("tema geral").expect("spoken text");
+        assert!(spoken.contains("Artigo introdutório"));
+    }
+
+    #[test]
+    fn parse_google_html_discards_related_searches_that_match_result_titles() {
+        let html = r#"
+            <html><body>
+              <div>Pesquisas relacionadas</div>
+              <div>VisionClip Docs</div>
+              <div>visionclip piper setup</div>
+              <div class="g">
+                <a href="/url?q=https://example.com/docs&sa=U"><h3>VisionClip Docs</h3></a>
+                <div class="VwiC3b">Guia de configuracao do daemon e do Piper.</div>
+              </div>
+            </body></html>
+        "#;
+
+        let enrichment = parse_google_search_html(html, 3);
+        assert_eq!(
+            enrichment.related_searches,
+            vec!["visionclip piper setup".to_string()]
+        );
+    }
+
+    #[test]
+    fn spoken_text_uses_follow_up_question_when_available() {
+        let enrichment = SearchEnrichment {
+            ai_overview: Some("Resumo curto sobre o tema.".into()),
+            snippets: Vec::new(),
+            related_questions: vec!["Como isso funciona na prática?".into()],
+            related_searches: Vec::new(),
+        };
+
+        let spoken = enrichment.spoken_text("tema geral").expect("spoken text");
+        assert!(spoken.contains("Resumo curto sobre o tema."));
+        assert!(spoken.contains("Como isso funciona na prática?"));
+    }
+
+    #[test]
+    fn detects_google_challenge_page() {
+        let html = r#"
+            <html><body>
+              <noscript><meta content="0;url=/httpservice/retry/enablejs?sei=123" http-equiv="refresh"></noscript>
+              <div id="yvlrue">If you're having trouble accessing Google Search, please click here.</div>
+            </body></html>
+        "#;
+
+        assert!(is_google_challenge_page(html));
     }
 }
