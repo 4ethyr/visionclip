@@ -101,7 +101,7 @@ Encerrar os processos iniciados pelos helpers:
 ## Troubleshooting
 
 - Se o Ollama retornar `does not support thinking`, o cliente faz retry automaticamente sem o campo `think`.
-- Se o modelo principal retornar vazio em multimodal, valide se a config ativa aponta para `ocr_model = "glm-ocr:latest"`; `TranslatePtBr`, `Explain` e `SearchWeb` usam um caminho híbrido `OCR -> Gemma` quando o OCR dedicado está disponível.
+- Se o modelo principal retornar uma resposta muito curta ou vaga em imagem direta, valide se a config ativa aponta para `ocr_model = "gemma4:e2b"`; o default atual foi ajustado para `OCR -> Gemma -> Gemma`.
 - Se o Ollama retornar `unable to load model`, o problema está no runtime ou no blob do modelo carregado pelo host.
 - Se o Piper não estiver ativo, os fluxos de áudio não poderão ser validados fim a fim.
 - O scrape de busca e best-effort; se o Google nao responder a tempo ou nao expor HTML util, o VisionClip continua abrindo a consulta no navegador sem resumo enriquecido.

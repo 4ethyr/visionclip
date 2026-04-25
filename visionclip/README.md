@@ -8,7 +8,7 @@ VisionClip é um serviço local para Linux que transforma screenshots em ações
 - `visionclip-daemon`: serviço residente com socket Unix, integração com Ollama, clipboard e TTS.
 - `visionclip-config`: utilitário de bootstrap, diagnóstico do host e listagem de modelos locais.
 - Suporte a ações de `CopyText`, `ExtractCode`, `TranslatePtBr`, `Explain` e `SearchWeb`.
-- Pipeline híbrido de OCR dedicado com `glm-ocr` e raciocínio textual com `gemma4:e2b`.
+- Pipeline padrão com `gemma4:e2b` para OCR e raciocínio textual no mesmo stack local.
 - `SearchWeb` agora gera a query, tenta enriquecer a resposta com scrape best-effort do Google e pode copiar um resumo inicial para o clipboard antes de abrir o navegador.
 - Integração com Ollama via `/api/chat`, com retry automático quando o modelo não suporta `think`.
 - Integração com Piper HTTP, com fallback de playback entre `paplay`, `pw-play` e `aplay`.
@@ -19,13 +19,13 @@ VisionClip é um serviço local para Linux que transforma screenshots em ações
 
 1. `visionclip` recebe uma captura já existente, executa um comando externo ou resolve automaticamente um backend nativo de screenshot.
 2. A imagem é enviada por socket Unix ao `visionclip-daemon`.
-3. O daemon extrai texto com `glm-ocr` quando o fluxo depende de OCR e envia esse texto para o modelo principal configurado no Ollama.
+3. O daemon extrai texto com `infer.ocr_model` e envia esse texto para o modelo principal configurado no Ollama. No default atual, `gemma4:e2b` faz as duas etapas.
 4. O resultado é pós-processado conforme a ação pedida.
 5. A saída é enviada para clipboard, navegador ou TTS.
 
 ## Status atual
 
-O projeto valida o fluxo principal com `gemma4:e2b` para `TranslatePtBr`, `Explain` e `SearchWeb`, e `glm-ocr:latest` para OCR dedicado. Em Wayland, o launcher tenta primeiro o portal de screenshot quando `prefer_portal = true`; se isso não estiver disponível, ele pode cair para outros backends compatíveis instalados no host.
+Nesta etapa, o projeto passa a validar o fluxo principal com `gemma4:e2b` tanto para OCR quanto para `TranslatePtBr`, `Explain` e `SearchWeb`. O caminho multimodal puro continua suportado, mas o default foi mantido em `OCR -> Gemma -> Gemma` porque ele preservou melhor a qualidade do que a imagem direta e ficou mais rápido do que o stack com dois modelos. Em Wayland, o launcher tenta primeiro o portal de screenshot quando `prefer_portal = true`; se isso não estiver disponível, ele pode cair para outros backends compatíveis instalados no host.
 
 ## Requisitos do host
 
@@ -33,7 +33,6 @@ O projeto valida o fluxo principal com `gemma4:e2b` para `TranslatePtBr`, `Expla
 - Rust toolchain
 - Ollama instalado e ativo
 - `gemma4:e2b`
-- `glm-ocr:latest`
 - Piper HTTP para áudio real, se você quiser TTS fora dos mocks de teste
 - Ferramentas nativas de desktop como `xdg-open`, `notify-send` e algum player de áudio suportado
 - Para captura automática: `gdbus`, `gnome-screenshot`, `grim` ou `maim`
@@ -92,7 +91,7 @@ Defaults importantes desses helpers:
 - escrevem runtime, logs, pid files e config em `tools/runtime/local-stack/`
 - usam `pw-play` como player padrao
 - usam `gemma4:e2b` como modelo principal por padrao
-- usam `glm-ocr:latest` como OCR por padrao
+- usam `gemma4:e2b` tambem como OCR por padrao
 - configuram `capture_timeout_ms = 60000`
 
 ## Diagnóstico e operação
@@ -111,7 +110,7 @@ Use `visionclip-config doctor` para verificar:
 - reachability do Piper HTTP
 - ferramentas nativas do host usadas pelo fluxo
 
-Use `visionclip-config models` para listar os modelos disponíveis no Ollama e ajustar `infer.model` com o nome exato do runtime. O default atual do projeto usa `gemma4:e2b`, `ocr_model = "glm-ocr:latest"` e `thinking_default = ""`.
+Use `visionclip-config models` para listar os modelos disponíveis no Ollama e ajustar `infer.model` com o nome exato do runtime. Nesta etapa, o default do projeto usa `model = "gemma4:e2b"`, `ocr_model = "gemma4:e2b"` e `thinking_default = ""`.
 
 Quando nenhum `--image` ou `--capture-command` é informado, o launcher usa `capture.backend`. Em `auto`, o fluxo tenta portal com `gdbus` quando `prefer_portal = true` e, se necessário, cai para `gnome-screenshot`, `grim` ou `maim`, conforme a sessão e os binários disponíveis.
 
@@ -159,7 +158,7 @@ systemctl --user enable --now visionclip-daemon.service
 - A captura via portal ainda precisa de validação manual ampla em diferentes desktops Wayland
 - Em algumas sessões Wayland, o portal pode abrir ou aguardar confirmação do usuário antes de devolver a captura
 - Overlay/UI compacta ainda não implementada
-- A qualidade do OCR ainda depende da captura e do `glm-ocr`; erros pequenos como `170 -> 17` ainda podem acontecer
+- A qualidade do OCR ainda depende da captura e do modelo configurado; se a captura vier ruidosa, erros pequenos como `170 -> 17` ainda podem acontecer
 - O fluxo de áudio real depende de um Piper HTTP ativo no host
 
 ## Licença
