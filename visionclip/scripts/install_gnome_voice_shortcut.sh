@@ -15,7 +15,7 @@ normalize_binding() {
     local lowered="${value,,}"
     case "$lowered" in
         "/+f12"|"slash+f12"|"slash + f12")
-            echo "<Super>F12"
+            echo "<Super><Alt>F12"
             ;;
         *)
             echo "$value"
@@ -61,7 +61,9 @@ fi
 cat >"$WRAPPER_PATH" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-exec "$VISIONCLIP_BIN" --voice-search --speak "\$@"
+mkdir -p "\${HOME}/.local/state/visionclip"
+printf '%s visionclip voice shortcut invoked\n' "\$(date --iso-8601=seconds)" >>"\${HOME}/.local/state/visionclip/voice-shortcut.log"
+exec "$VISIONCLIP_BIN" --voice-agent --speak "\$@"
 EOF
 chmod +x "$WRAPPER_PATH"
 
