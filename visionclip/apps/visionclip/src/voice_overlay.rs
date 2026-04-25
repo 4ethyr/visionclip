@@ -35,11 +35,12 @@ mod imp {
                 .title("VisionClip Listening")
                 .decorated(false)
                 .resizable(false)
+                .default_width(CANVAS_SIZE)
+                .default_height(CANVAS_SIZE)
                 .build();
             window.add_css_class("voice-overlay-root");
             window.set_focusable(false);
             window.set_can_target(false);
-            window.fullscreen();
 
             let area = gtk::DrawingArea::builder()
                 .content_width(CANVAS_SIZE)
@@ -56,8 +57,9 @@ mod imp {
 
             let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
             container.add_css_class("voice-overlay-window");
-            container.set_hexpand(true);
-            container.set_vexpand(true);
+            container.set_size_request(CANVAS_SIZE, CANVAS_SIZE);
+            container.set_hexpand(false);
+            container.set_vexpand(false);
             container.set_halign(gtk::Align::Center);
             container.set_valign(gtk::Align::Center);
             container.append(&area);
