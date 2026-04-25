@@ -1,0 +1,22 @@
+[package]
+name = "visionclip-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+visionclip-common = { path = "../../crates/common" }
+visionclip-infer = { path = "../../crates/infer" }
+visionclip-output = { path = "../../crates/output" }
+visionclip-tts = { path = "../../crates/tts" }
+anyhow.workspace = true
+reqwest.workspace = true
+scraper.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+urlencoding.workspace = true
+which.workspace = true
+uuid.workspace = true
