@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     thread,
+    time::{Duration, Instant},
 };
 use tracing::warn;
 use uuid::Uuid;
@@ -28,7 +29,10 @@ struct PiperSynthesisRequest<'a> {
 impl PiperHttpClient {
     pub fn new(config: AudioConfig) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(Duration::from_secs(20))
+                .build()
+                .unwrap_or_else(|_| Client::new()),
             config,
         }
     }
@@ -83,24 +87,55 @@ impl PiperHttpClient {
 
         let player = preferred_player(&self.config);
         thread::spawn(move || {
-            match Command::new(&player).arg(&temp_path).status() {
-                Ok(status) if !status.success() => {
-                    warn!(
-                        player,
-                        ?status,
-                        "audio player exited with non-success status"
-                    );
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    warn!(player, ?error, "failed to execute audio player");
-                }
-            }
+            play_with_timeout(&player, &temp_path, Duration::from_secs(20));
 
             let _ = fs::remove_file(&temp_path);
         });
 
         Ok(())
+    }
+}
+
+fn play_with_timeout(player: &str, temp_path: &Path, timeout: Duration) {
+    let mut child = match Command::new(player).arg(temp_path).spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            warn!(player, ?error, "failed to execute audio player");
+            return;
+        }
+    };
+
+    let started_at = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if !status.success() => {
+                warn!(
+                    player,
+                    ?status,
+                    "audio player exited with non-success status"
+                );
+                return;
+            }
+            Ok(Some(_)) => return,
+            Ok(None) if started_at.elapsed() >= timeout => {
+                if let Err(error) = child.kill() {
+                    warn!(player, ?error, "failed to kill timed out audio player");
+                } else {
+                    warn!(
+                        player,
+                        timeout_ms = timeout.as_millis(),
+                        "audio player timed out"
+                    );
+                }
+                let _ = child.wait();
+                return;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(50)),
+            Err(error) => {
+                warn!(player, ?error, "failed to poll audio player status");
+                return;
+            }
+        }
     }
 }
 
@@ -340,5 +375,32 @@ mod tests {
         });
 
         assert!(!selected.is_empty());
+    }
+
+    #[test]
+    fn play_with_timeout_kills_stuck_player() {
+        let base = std::env::temp_dir().join(format!("visionclip-tts-timeout-{}", Uuid::new_v4()));
+        fs::create_dir_all(&base).unwrap();
+        let script_path = base.join("sleep-player.sh");
+        let script = "#!/bin/sh\nsleep 5\n";
+        fs::write(&script_path, script).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&script_path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script_path, permissions).unwrap();
+        }
+
+        let started_at = std::time::Instant::now();
+        play_with_timeout(
+            &script_path.display().to_string(),
+            Path::new("/dev/null"),
+            Duration::from_millis(100),
+        );
+
+        assert!(started_at.elapsed() < Duration::from_secs(2));
+        let _ = fs::remove_dir_all(&base);
     }
 }
