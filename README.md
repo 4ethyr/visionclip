@@ -165,7 +165,9 @@ Para `SearchWeb`, o daemon tenta falar o resumo enriquecido da busca quando esse
 
 ## Busca enriquecida
 
-O VisionClip tenta enriquecer `SearchWeb` com uma leitura inicial dos resultados do Google. Esse scrape e best-effort: quando houver bloco util equivalente a AI Overview ou snippets organicos iniciais, o daemon monta um resumo limpo para clipboard e TTS. Se a busca falhar, expirar ou o Google nao devolver HTML util, o fluxo cai de volta para o comportamento basico de abrir a consulta no navegador.
+O VisionClip tenta enriquecer `SearchWeb` com uma leitura inicial dos resultados do Google. Esse scrape e best-effort: quando houver bloco util equivalente a AI Overview/Visão geral criada por IA ou snippets organicos iniciais, o daemon monta uma síntese coesa para clipboard e TTS.
+
+Quando uma Visão geral criada por IA estiver disponível no HTML retornado, ela é tratada como contexto auxiliar gerado pelo Google/Gemini, não como verdade final. O daemon limpa ruído de interface, gera uma síntese própria, inclui o contexto capturado e lista fontes orgânicas iniciais para validação. Se a busca falhar, expirar, exigir CAPTCHA/autenticação ou o Google não devolver HTML útil, o fluxo cai de volta para o comportamento básico de abrir a consulta no navegador.
 
 As opcoes desse fluxo ficam em `[search]` na configuracao:
 
