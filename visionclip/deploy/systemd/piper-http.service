@@ -5,7 +5,7 @@ After=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 -m piper.http_server -m <VOICE_NAME> --host 127.0.0.1 --port 5000
+ExecStart=%h/.local/bin/visionclip-piper-http
 Restart=on-failure
 RestartSec=2
 

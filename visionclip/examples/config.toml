@@ -11,7 +11,7 @@ capture_timeout_ms = 30000
 backend = "ollama"
 base_url = "http://127.0.0.1:11434"
 model = "gemma4:e2b"
-ocr_model = "glm-ocr:latest"
+ocr_model = "gemma4:e2b"
 keep_alive = "15m"
 temperature = 0.1
 thinking_default = ""
@@ -19,6 +19,8 @@ thinking_default = ""
 [search]
 enabled = true
 base_url = "https://www.google.com/search"
+fallback_enabled = true
+fallback_base_url = "https://html.duckduckgo.com/html/"
 request_timeout_ms = 10000
 max_results = 3
 open_browser = true
@@ -30,6 +32,21 @@ base_url = "http://127.0.0.1:5000"
 default_voice = ""
 speak_actions = ["TranslatePtBr", "Explain", "SearchWeb"]
 player_command = "pw-play"
+
+[voice]
+enabled = false
+backend = "auto"
+target = ""
+overlay_enabled = true
+shortcut = "<Super>F12"
+record_duration_ms = 4000
+sample_rate_hz = 16000
+channels = 1
+record_command = ""
+# O comando de transcricao deve escrever o texto no stdout ou em {transcript_path}.
+# Placeholders: {wav_path}, {transcript_path}, {duration_ms}, {duration_s}, {sample_rate_hz}, {channels}
+transcribe_command = "venv/bin/python tools/stt/faster_whisper_transcribe.py {wav_path} --model base --language pt --cache-dir tools/stt-cache"
+transcribe_timeout_ms = 60000
 
 [ui]
 overlay = "compact"

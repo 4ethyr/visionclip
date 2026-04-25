@@ -10,14 +10,25 @@ PIPER_HOST="${VISIONCLIP_PIPER_HOST:-127.0.0.1}"
 PIPER_PORT="${VISIONCLIP_PIPER_PORT:-5000}"
 OLLAMA_URL="${VISIONCLIP_OLLAMA_URL:-http://127.0.0.1:11434}"
 MODEL_NAME="${VISIONCLIP_MODEL:-gemma4:e2b}"
-OCR_MODEL_NAME="${VISIONCLIP_OCR_MODEL:-glm-ocr:latest}"
+OCR_MODEL_NAME="${VISIONCLIP_OCR_MODEL:-$MODEL_NAME}"
 PIPER_VOICE="${VISIONCLIP_PIPER_VOICE:-pt_BR-faber-medium}"
 PIPER_VOICE_DIR="${VISIONCLIP_PIPER_DIR:-$ROOT_DIR/tools/piper-voices}"
 PLAYER_COMMAND="${VISIONCLIP_PLAYER_COMMAND:-pw-play}"
 CAPTURE_TIMEOUT_MS="${VISIONCLIP_CAPTURE_TIMEOUT_MS:-60000}"
+VOICE_ENABLED="${VISIONCLIP_VOICE_ENABLED:-0}"
+VOICE_BACKEND="${VISIONCLIP_VOICE_BACKEND:-auto}"
+VOICE_OVERLAY_ENABLED="${VISIONCLIP_VOICE_OVERLAY_ENABLED:-1}"
+VOICE_SHORTCUT="${VISIONCLIP_VOICE_SHORTCUT:-<Super>F12}"
+VOICE_RECORD_DURATION_MS="${VISIONCLIP_VOICE_RECORD_DURATION_MS:-4000}"
+VOICE_SAMPLE_RATE_HZ="${VISIONCLIP_VOICE_SAMPLE_RATE_HZ:-16000}"
+VOICE_CHANNELS="${VISIONCLIP_VOICE_CHANNELS:-1}"
+VOICE_RECORD_COMMAND="${VISIONCLIP_VOICE_RECORD_COMMAND:-}"
+VOICE_TRANSCRIBE_COMMAND="${VISIONCLIP_VOICE_TRANSCRIBE_COMMAND:-}"
+VOICE_TRANSCRIBE_TIMEOUT_MS="${VISIONCLIP_VOICE_TRANSCRIBE_TIMEOUT_MS:-60000}"
 VENV_PYTHON="${VISIONCLIP_VENV_PYTHON:-$ROOT_DIR/venv/bin/python}"
 BUILD_IF_NEEDED="${VISIONCLIP_BUILD_IF_NEEDED:-1}"
 WARM_MODEL="${VISIONCLIP_WARM_MODEL:-1}"
+BUILD_FEATURES="${VISIONCLIP_BUILD_FEATURES:-}"
 
 PIPER_PID_FILE="$PID_DIR/piper-http.pid"
 DAEMON_PID_FILE="$PID_DIR/visionclip-daemon.pid"
@@ -40,8 +51,19 @@ Variaveis uteis:
   VISIONCLIP_PIPER_DIR
   VISIONCLIP_PLAYER_COMMAND
   VISIONCLIP_CAPTURE_TIMEOUT_MS
+  VISIONCLIP_VOICE_ENABLED=1
+  VISIONCLIP_VOICE_BACKEND=auto
+  VISIONCLIP_VOICE_OVERLAY_ENABLED=1
+  VISIONCLIP_VOICE_SHORTCUT=<Super>F12
+  VISIONCLIP_VOICE_RECORD_DURATION_MS=4000
+  VISIONCLIP_VOICE_SAMPLE_RATE_HZ=16000
+  VISIONCLIP_VOICE_CHANNELS=1
+  VISIONCLIP_VOICE_RECORD_COMMAND
+  VISIONCLIP_VOICE_TRANSCRIBE_COMMAND
+  VISIONCLIP_VOICE_TRANSCRIBE_TIMEOUT_MS=60000
   VISIONCLIP_VENV_PYTHON
   VISIONCLIP_BUILD_IF_NEEDED=0
+  VISIONCLIP_BUILD_FEATURES="gtk-overlay"
   VISIONCLIP_WARM_MODEL=0
 EOF
 }
@@ -121,7 +143,11 @@ ensure_build() {
     echo "Binaries ausentes. Rodando cargo build --workspace..."
     (
         cd "$ROOT_DIR"
-        cargo build --workspace
+        if [[ -n "$BUILD_FEATURES" ]]; then
+            cargo build --workspace --features "$BUILD_FEATURES"
+        else
+            cargo build --workspace
+        fi
     )
 }
 
@@ -137,8 +163,33 @@ ensure_piper_voice() {
     "$VENV_PYTHON" -m piper.download_voices "$PIPER_VOICE" --download_dir "$PIPER_VOICE_DIR"
 }
 
+escape_toml_string() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '%s' "$value"
+}
+
 write_config() {
     mkdir -p "$(dirname "$CONFIG_PATH")"
+
+    local escaped_ollama_url
+    local escaped_model_name
+    local escaped_ocr_model_name
+    local escaped_player_command
+    local escaped_voice_backend
+    local escaped_voice_shortcut
+    local escaped_voice_record_command
+    local escaped_voice_transcribe_command
+
+    escaped_ollama_url="$(escape_toml_string "$OLLAMA_URL")"
+    escaped_model_name="$(escape_toml_string "$MODEL_NAME")"
+    escaped_ocr_model_name="$(escape_toml_string "$OCR_MODEL_NAME")"
+    escaped_player_command="$(escape_toml_string "$PLAYER_COMMAND")"
+    escaped_voice_backend="$(escape_toml_string "$VOICE_BACKEND")"
+    escaped_voice_shortcut="$(escape_toml_string "$VOICE_SHORTCUT")"
+    escaped_voice_record_command="$(escape_toml_string "$VOICE_RECORD_COMMAND")"
+    escaped_voice_transcribe_command="$(escape_toml_string "$VOICE_TRANSCRIBE_COMMAND")"
 
     cat >"$CONFIG_PATH" <<EOF
 [general]
@@ -152,9 +203,9 @@ capture_timeout_ms = $CAPTURE_TIMEOUT_MS
 
 [infer]
 backend = "ollama"
-base_url = "$OLLAMA_URL"
-model = "$MODEL_NAME"
-ocr_model = "$OCR_MODEL_NAME"
+base_url = "$escaped_ollama_url"
+model = "$escaped_model_name"
+ocr_model = "$escaped_ocr_model_name"
 keep_alive = "15m"
 temperature = 0.1
 thinking_default = ""
@@ -172,7 +223,19 @@ backend = "piper_http"
 base_url = "http://$PIPER_HOST:$PIPER_PORT"
 default_voice = ""
 speak_actions = ["TranslatePtBr", "Explain", "SearchWeb"]
-player_command = "$PLAYER_COMMAND"
+player_command = "$escaped_player_command"
+
+[voice]
+enabled = $( [[ "$VOICE_ENABLED" == "1" ]] && echo true || echo false )
+backend = "$escaped_voice_backend"
+overlay_enabled = $( [[ "$VOICE_OVERLAY_ENABLED" == "1" ]] && echo true || echo false )
+shortcut = "$escaped_voice_shortcut"
+record_duration_ms = $VOICE_RECORD_DURATION_MS
+sample_rate_hz = $VOICE_SAMPLE_RATE_HZ
+channels = $VOICE_CHANNELS
+record_command = "$escaped_voice_record_command"
+transcribe_command = "$escaped_voice_transcribe_command"
+transcribe_timeout_ms = $VOICE_TRANSCRIBE_TIMEOUT_MS
 
 [ui]
 overlay = "compact"

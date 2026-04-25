@@ -2,3 +2,5 @@
 .DS_Store
 /tools/runtime/
 /tools/piper-voices/
+/tools/stt-cache/
+/print.png
