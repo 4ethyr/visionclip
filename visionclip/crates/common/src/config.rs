@@ -3,7 +3,7 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::{env, fs, path::PathBuf};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
     pub general: GeneralConfig,
@@ -12,7 +12,11 @@ pub struct AppConfig {
     #[serde(default)]
     pub infer: InferConfig,
     #[serde(default)]
+    pub search: SearchConfig,
+    #[serde(default)]
     pub audio: AudioConfig,
+    #[serde(default)]
+    pub voice: VoiceConfig,
     #[serde(default)]
     pub ui: UiConfig,
 }
@@ -43,12 +47,32 @@ pub struct InferConfig {
     pub base_url: String,
     #[serde(default = "default_ollama_model")]
     pub model: String,
+    #[serde(default = "default_ollama_ocr_model")]
+    pub ocr_model: String,
     #[serde(default = "default_keep_alive")]
     pub keep_alive: String,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
     #[serde(default = "default_thinking")]
     pub thinking_default: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_search_base_url")]
+    pub base_url: String,
+    #[serde(default = "default_true")]
+    pub fallback_enabled: bool,
+    #[serde(default = "default_search_fallback_base_url")]
+    pub fallback_base_url: String,
+    #[serde(default = "default_search_request_timeout_ms")]
+    pub request_timeout_ms: u64,
+    #[serde(default = "default_search_max_results")]
+    pub max_results: usize,
+    #[serde(default = "default_true")]
+    pub open_browser: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +89,32 @@ pub struct AudioConfig {
     pub speak_actions: Vec<String>,
     #[serde(default = "default_player_command")]
     pub player_command: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoiceConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_voice_backend")]
+    pub backend: String,
+    #[serde(default)]
+    pub target: String,
+    #[serde(default = "default_true")]
+    pub overlay_enabled: bool,
+    #[serde(default = "default_voice_shortcut")]
+    pub shortcut: String,
+    #[serde(default = "default_voice_record_duration_ms")]
+    pub record_duration_ms: u64,
+    #[serde(default = "default_voice_sample_rate_hz")]
+    pub sample_rate_hz: u32,
+    #[serde(default = "default_voice_channels")]
+    pub channels: u16,
+    #[serde(default)]
+    pub record_command: String,
+    #[serde(default)]
+    pub transcribe_command: String,
+    #[serde(default = "default_voice_transcribe_timeout_ms")]
+    pub transcribe_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,18 +198,6 @@ impl AppConfig {
     }
 }
 
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            general: GeneralConfig::default(),
-            capture: CaptureConfig::default(),
-            infer: InferConfig::default(),
-            audio: AudioConfig::default(),
-            ui: UiConfig::default(),
-        }
-    }
-}
-
 impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
@@ -185,6 +223,7 @@ impl Default for InferConfig {
             backend: default_infer_backend(),
             base_url: default_ollama_base_url(),
             model: default_ollama_model(),
+            ocr_model: default_ollama_ocr_model(),
             keep_alive: default_keep_alive(),
             temperature: default_temperature(),
             thinking_default: default_thinking(),
@@ -201,6 +240,38 @@ impl Default for AudioConfig {
             default_voice: String::new(),
             speak_actions: default_speak_actions(),
             player_command: default_player_command(),
+        }
+    }
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            base_url: default_search_base_url(),
+            fallback_enabled: default_true(),
+            fallback_base_url: default_search_fallback_base_url(),
+            request_timeout_ms: default_search_request_timeout_ms(),
+            max_results: default_search_max_results(),
+            open_browser: default_true(),
+        }
+    }
+}
+
+impl Default for VoiceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backend: default_voice_backend(),
+            target: String::new(),
+            overlay_enabled: default_true(),
+            shortcut: default_voice_shortcut(),
+            record_duration_ms: default_voice_record_duration_ms(),
+            sample_rate_hz: default_voice_sample_rate_hz(),
+            channels: default_voice_channels(),
+            record_command: String::new(),
+            transcribe_command: String::new(),
+            transcribe_timeout_ms: default_voice_transcribe_timeout_ms(),
         }
     }
 }
@@ -231,7 +302,7 @@ fn default_true() -> bool {
 }
 
 fn default_capture_timeout_ms() -> u64 {
-    10_000
+    30_000
 }
 
 fn default_infer_backend() -> String {
@@ -243,6 +314,10 @@ fn default_ollama_base_url() -> String {
 }
 
 fn default_ollama_model() -> String {
+    "gemma4:e2b".to_string()
+}
+
+fn default_ollama_ocr_model() -> String {
     "gemma4:e2b".to_string()
 }
 
@@ -258,8 +333,48 @@ fn default_thinking() -> String {
     String::new()
 }
 
+fn default_search_base_url() -> String {
+    "https://www.google.com/search".to_string()
+}
+
+fn default_search_fallback_base_url() -> String {
+    "https://html.duckduckgo.com/html/".to_string()
+}
+
+fn default_search_request_timeout_ms() -> u64 {
+    10_000
+}
+
+fn default_search_max_results() -> usize {
+    3
+}
+
 fn default_audio_backend() -> String {
     "piper_http".to_string()
+}
+
+fn default_voice_backend() -> String {
+    "auto".to_string()
+}
+
+fn default_voice_shortcut() -> String {
+    "<Super>F12".to_string()
+}
+
+fn default_voice_record_duration_ms() -> u64 {
+    4_000
+}
+
+fn default_voice_sample_rate_hz() -> u32 {
+    16_000
+}
+
+fn default_voice_channels() -> u16 {
+    1
+}
+
+fn default_voice_transcribe_timeout_ms() -> u64 {
+    60_000
 }
 
 fn default_piper_base_url() -> String {
@@ -271,6 +386,7 @@ fn default_speak_actions() -> Vec<String> {
         "TranslatePtBr".to_string(),
         "Explain".to_string(),
         "SearchWeb".to_string(),
+        "OpenApplication".to_string(),
     ]
 }
 
@@ -333,8 +449,14 @@ mod tests {
     fn default_config_has_expected_model() {
         let cfg = AppConfig::default();
         assert_eq!(cfg.infer.model, "gemma4:e2b");
+        assert_eq!(cfg.infer.ocr_model, "gemma4:e2b");
         assert!(cfg.infer.thinking_default.is_empty());
         assert!(cfg.audio.enabled);
+        assert!(!cfg.voice.enabled);
+        assert_eq!(cfg.voice.backend, "auto");
+        assert!(cfg.voice.overlay_enabled);
+        assert_eq!(cfg.voice.shortcut, "<Super>F12");
+        assert_eq!(cfg.voice.record_duration_ms, 4_000);
     }
 
     #[test]
@@ -349,8 +471,8 @@ mod tests {
     #[test]
     fn explicit_config_path_supports_legacy_override() {
         assert_eq!(
-            explicit_config_path(None, Some("/tmp/legacy-ai-snap.toml".into())),
-            Some(PathBuf::from("/tmp/legacy-ai-snap.toml"))
+            explicit_config_path(None, Some("/home/demo/.config/ai-snap/config.toml".into())),
+            Some(PathBuf::from("/home/demo/.config/ai-snap/config.toml"))
         );
     }
 
@@ -358,10 +480,10 @@ mod tests {
     fn explicit_config_path_prefers_visionclip_override() {
         assert_eq!(
             explicit_config_path(
-                Some("/tmp/visionclip.toml".into()),
-                Some("/tmp/legacy-ai-snap.toml".into())
+                Some("/home/demo/.config/visionclip/config.toml".into()),
+                Some("/home/demo/.config/ai-snap/config.toml".into())
             ),
-            Some(PathBuf::from("/tmp/visionclip.toml"))
+            Some(PathBuf::from("/home/demo/.config/visionclip/config.toml"))
         );
     }
 }

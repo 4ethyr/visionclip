@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+gtk-overlay = ["dep:gtk4"]
+
 [dependencies]
 visionclip-common = { path = "../../crates/common" }
 anyhow.workspace = true
@@ -11,4 +15,7 @@ clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+urlencoding.workspace = true
 uuid.workspace = true
+which.workspace = true
+gtk4 = { workspace = true, optional = true }
