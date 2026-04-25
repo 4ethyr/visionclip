@@ -94,6 +94,27 @@ Defaults importantes desses helpers:
 - usam `gemma4:e2b` tambem como OCR por padrao
 - configuram `capture_timeout_ms = 60000`
 
+## Voz e agente local
+
+O modo `--voice-agent` captura a fala, resolve uma intenção local simples e decide entre abrir aplicativo ou pesquisar na web. Ele é o caminho usado pelo atalho global instalado pelo script `scripts/install_gnome_voice_shortcut.sh`.
+
+Exemplos de teste sem microfone:
+
+```bash
+visionclip --voice-agent --voice-transcript 'Abra o terminal'
+visionclip --voice-agent --voice-transcript 'Abra o VS Code'
+visionclip --voice-agent --voice-transcript 'O que é JavaScript?'
+```
+
+Também é possível acionar a abertura segura de aplicativo diretamente:
+
+```bash
+visionclip --open-app terminal
+visionclip --open-app vscode
+```
+
+O handler de abertura usa allowlists para casos conhecidos como terminal/navegador e resolução por arquivos `.desktop` com `gtk-launch`/`gio`. O LLM não executa shell arbitrário.
+
 ## Diagnóstico e operação
 
 Use `visionclip-config doctor` para verificar:
@@ -118,7 +139,7 @@ Em desktops Wayland via portal, a captura pode depender de uma confirmação exp
 
 ## TTS
 
-Com Piper HTTP ativo, o daemon pode responder em áudio para `TranslatePtBr`, `Explain` e `SearchWeb` quando `--speak` estiver ligado.
+Com Piper HTTP ativo, o daemon pode responder em áudio para `TranslatePtBr`, `Explain`, `SearchWeb` e `OpenApplication` quando `--speak` estiver ligado.
 
 Para `SearchWeb`, o daemon tenta falar o resumo enriquecido da busca quando esse material estiver disponivel; caso contrario, ele apenas confirma a abertura da pesquisa.
 
@@ -132,6 +153,8 @@ As opcoes desse fluxo ficam em `[search]` na configuracao:
 [search]
 enabled = true
 base_url = "https://www.google.com/search"
+fallback_enabled = true
+fallback_base_url = "https://html.duckduckgo.com/html/"
 request_timeout_ms = 10000
 max_results = 3
 open_browser = true
