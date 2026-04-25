@@ -30,7 +30,7 @@ enabled = true
 backend = "piper_http"
 base_url = "http://127.0.0.1:5000"
 default_voice = ""
-speak_actions = ["TranslatePtBr", "Explain", "SearchWeb"]
+speak_actions = ["TranslatePtBr", "Explain", "SearchWeb", "OpenApplication"]
 player_command = "pw-play"
 
 [voice]
@@ -38,7 +38,7 @@ enabled = false
 backend = "auto"
 target = ""
 overlay_enabled = true
-shortcut = "<Super>F12"
+shortcut = "<Super><Alt>F12"
 record_duration_ms = 4000
 sample_rate_hz = 16000
 channels = 1

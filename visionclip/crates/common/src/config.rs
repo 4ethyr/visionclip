@@ -3,7 +3,7 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::{env, fs, path::PathBuf};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
     pub general: GeneralConfig,
@@ -198,20 +198,6 @@ impl AppConfig {
     }
 }
 
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            general: GeneralConfig::default(),
-            capture: CaptureConfig::default(),
-            infer: InferConfig::default(),
-            search: SearchConfig::default(),
-            audio: AudioConfig::default(),
-            voice: VoiceConfig::default(),
-            ui: UiConfig::default(),
-        }
-    }
-}
-
 impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
@@ -400,6 +386,7 @@ fn default_speak_actions() -> Vec<String> {
         "TranslatePtBr".to_string(),
         "Explain".to_string(),
         "SearchWeb".to_string(),
+        "OpenApplication".to_string(),
     ]
 }
 
