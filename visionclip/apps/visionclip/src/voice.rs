@@ -28,6 +28,18 @@ pub struct VoiceSearch {
     pub query: String,
 }
 
+#[derive(Debug, Clone)]
+pub enum VoiceAgentCommand {
+    OpenApplication {
+        transcript: String,
+        app_name: String,
+    },
+    SearchWeb {
+        transcript: String,
+        query: String,
+    },
+}
+
 pub async fn resolve_voice_request(
     config: &VoiceConfig,
     transcript_override: Option<&str>,
@@ -55,6 +67,28 @@ pub async fn resolve_voice_search(
         };
     let query = resolve_search_query_from_transcript(&transcript)?;
     Ok(VoiceSearch { transcript, query })
+}
+
+pub async fn resolve_voice_agent_command(
+    config: &VoiceConfig,
+    transcript_override: Option<&str>,
+) -> Result<VoiceAgentCommand> {
+    let transcript =
+        if let Some(transcript) = transcript_override.filter(|value| !value.trim().is_empty()) {
+            transcript.trim().to_string()
+        } else {
+            capture_and_transcribe(config).await?
+        };
+
+    if let Some(app_name) = resolve_open_application_from_transcript(&transcript) {
+        return Ok(VoiceAgentCommand::OpenApplication {
+            transcript,
+            app_name,
+        });
+    }
+
+    let query = resolve_search_query_from_transcript(&transcript)?;
+    Ok(VoiceAgentCommand::SearchWeb { transcript, query })
 }
 
 async fn capture_and_transcribe(config: &VoiceConfig) -> Result<String> {
@@ -417,6 +451,57 @@ fn resolve_search_query_from_transcript(transcript: &str) -> Result<String> {
     Ok(query)
 }
 
+fn resolve_open_application_from_transcript(transcript: &str) -> Option<String> {
+    let raw = transcript.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let normalized = normalize_transcript(raw);
+    let prefixes = [
+        "abra o",
+        "abra a",
+        "abra",
+        "abrir o",
+        "abrir a",
+        "abrir",
+        "inicie o",
+        "inicie a",
+        "inicie",
+        "execute o",
+        "execute a",
+        "execute",
+        "abrir aplicativo",
+        "open",
+        "open the",
+        "launch",
+        "start",
+    ];
+
+    for prefix in prefixes {
+        if normalized == prefix {
+            return None;
+        }
+        if normalized.starts_with(prefix) {
+            let prefix_len = prefix.chars().count();
+            let start = raw
+                .char_indices()
+                .nth(prefix_len)
+                .map(|(index, _)| index)
+                .unwrap_or(raw.len());
+            let app_name = raw[start..]
+                .trim()
+                .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '.' | ',' | ';' | ':'))
+                .to_string();
+            if !app_name.is_empty() {
+                return Some(app_name);
+            }
+        }
+    }
+
+    None
+}
+
 async fn run_shell_command(
     command: &str,
     timeout_ms: u64,
@@ -452,7 +537,7 @@ fn render_template(
     transcript_path: Option<&Path>,
     config: &VoiceConfig,
 ) -> String {
-    let duration_s = ((config.record_duration_ms + 999) / 1_000).to_string();
+    let duration_s = config.record_duration_ms.div_ceil(1_000).to_string();
 
     template
         .replace("{wav_path}", &wav_path.display().to_string())
@@ -569,8 +654,7 @@ fn normalized_is_search_command_only(normalized: &str) -> bool {
         "look up",
         "find information about",
     ]
-    .iter()
-    .any(|prefix| normalized == *prefix)
+    .contains(&normalized)
 }
 
 pub fn overlay_cli_args(duration_ms: u64) -> Vec<OsString> {
@@ -673,5 +757,38 @@ mod tests {
     fn rejects_empty_search_query_after_prefix_only() {
         let error = resolve_search_query_from_transcript("pesquise por").unwrap_err();
         assert!(error.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn resolves_open_application_from_voice_transcript() {
+        let app_name = resolve_open_application_from_transcript("Abra o VS Code").unwrap();
+        assert_eq!(app_name, "VS Code");
+    }
+
+    #[tokio::test]
+    async fn voice_agent_prefers_open_application_intent() {
+        let config = VoiceConfig {
+            enabled: false,
+            backend: "auto".into(),
+            target: String::new(),
+            overlay_enabled: true,
+            shortcut: "<Super>F12".into(),
+            record_duration_ms: 4_000,
+            sample_rate_hz: 16_000,
+            channels: 1,
+            record_command: String::new(),
+            transcribe_command: String::new(),
+            transcribe_timeout_ms: 60_000,
+        };
+
+        let command = resolve_voice_agent_command(&config, Some("Abra o terminal"))
+            .await
+            .unwrap();
+        match command {
+            VoiceAgentCommand::OpenApplication { app_name, .. } => {
+                assert_eq!(app_name, "terminal");
+            }
+            other => panic!("unexpected voice agent command: {other:?}"),
+        }
     }
 }
