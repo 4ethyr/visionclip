@@ -16,6 +16,8 @@ cp "$ROOT_DIR/deploy/systemd/piper-http.service" "$USER_SYSTEMD_DIR/piper-http.s
 cat >"$BIN_DIR/visionclip-voice-search" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+mkdir -p "${HOME}/.local/state/visionclip"
+printf '%s visionclip voice shortcut invoked\n' "$(date --iso-8601=seconds)" >>"${HOME}/.local/state/visionclip/voice-shortcut.log"
 exec "${HOME}/.local/bin/visionclip" --voice-agent --speak "$@"
 EOF
 chmod +x "$BIN_DIR/visionclip-voice-search"

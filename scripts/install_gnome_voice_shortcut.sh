@@ -88,6 +88,10 @@ gsettings set "$SECONDARY_CUSTOM_KEYBINDING_SCHEMA" name "$SHORTCUT_NAME (fallba
 gsettings set "$SECONDARY_CUSTOM_KEYBINDING_SCHEMA" command "$WRAPPER_PATH"
 gsettings set "$SECONDARY_CUSTOM_KEYBINDING_SCHEMA" binding "$SECONDARY_SHORTCUT_BINDING"
 
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user start org.gnome.SettingsDaemon.MediaKeys.target >/dev/null 2>&1 || true
+fi
+
 echo "Atalho do VisionClip configurado."
 echo "Binding: $RESOLVED_BINDING"
 echo "Fallback binding: $SECONDARY_SHORTCUT_BINDING"
