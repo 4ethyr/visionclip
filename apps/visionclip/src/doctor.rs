@@ -14,6 +14,7 @@ use which::which;
 
 const VOICE_WRAPPER_NAME: &str = "visionclip-voice-search";
 const SECONDARY_VOICE_SHORTCUT: &str = "<Super><Shift>F12";
+const GNOME_MEDIA_KEYS_SERVICE: &str = "org.gnome.SettingsDaemon.MediaKeys.service";
 const GNOME_MEDIA_KEYS_SCHEMA: &str =
     "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-voice-search/";
 const GNOME_SECONDARY_MEDIA_KEYS_SCHEMA: &str =
@@ -78,6 +79,7 @@ pub(crate) async fn run(config: &AppConfig) -> Result<bool> {
     checks.push(check_voice_transcriber(&config.voice, command_available));
     checks.push(check_tts_player(&config.audio, command_available));
     checks.push(check_voice_wrapper());
+    checks.push(check_media_keys_service());
     checks.extend(check_gnome_shortcuts(&config.voice));
 
     println!("VisionClip doctor");
@@ -329,6 +331,36 @@ fn check_gnome_shortcuts(voice: &VoiceConfig) -> Vec<DoctorCheck> {
     checks
 }
 
+fn check_media_keys_service() -> DoctorCheck {
+    if !command_available("systemctl") {
+        return DoctorCheck::warn(
+            "media-keys",
+            "systemctl ausente; servico GNOME de atalhos nao verificado",
+        );
+    }
+
+    let status = Command::new("systemctl")
+        .args(["--user", "is-active", GNOME_MEDIA_KEYS_SERVICE])
+        .output()
+        .ok()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string());
+
+    media_keys_status_check(status.as_deref())
+}
+
+fn media_keys_status_check(status: Option<&str>) -> DoctorCheck {
+    match status {
+        Some("active") => DoctorCheck::ok("media-keys", "servico GNOME de atalhos ativo"),
+        Some(value) if !value.is_empty() => DoctorCheck::fail(
+            "media-keys",
+            format!(
+                "servico GNOME de atalhos esta {value}; rode: systemctl --user start org.gnome.SettingsDaemon.MediaKeys.target"
+            ),
+        ),
+        _ => DoctorCheck::warn("media-keys", "nao foi possivel ler o estado do servico GNOME de atalhos"),
+    }
+}
+
 fn check_command(
     name: &'static str,
     command: &str,
@@ -511,5 +543,18 @@ mod tests {
             strip_gsettings_quotes("'<Super><Shift>F12'"),
             "<Super><Shift>F12"
         );
+    }
+
+    #[test]
+    fn media_keys_status_reports_inactive_service_as_failure() {
+        let check = media_keys_status_check(Some("inactive"));
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert!(check.message.contains("MediaKeys.target"));
+    }
+
+    #[test]
+    fn media_keys_status_accepts_active_service() {
+        let check = media_keys_status_check(Some("active"));
+        assert_eq!(check.status, CheckStatus::Ok);
     }
 }
