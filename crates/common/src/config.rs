@@ -417,6 +417,7 @@ fn default_speak_actions() -> Vec<String> {
         "Explain".to_string(),
         "SearchWeb".to_string(),
         "OpenApplication".to_string(),
+        "OpenUrl".to_string(),
     ]
 }
 
@@ -505,6 +506,7 @@ mod tests {
         let cfg = AppConfig::default();
         assert!(cfg.action_should_speak("Explain", true));
         assert!(cfg.action_should_speak("SearchWeb", true));
+        assert!(cfg.action_should_speak("OpenUrl", true));
         assert!(!cfg.action_should_speak("CopyText", true));
         assert!(!cfg.action_should_speak("Explain", false));
     }

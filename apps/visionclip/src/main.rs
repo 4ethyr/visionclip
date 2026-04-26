@@ -12,7 +12,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 use visionclip_common::{
     read_message, write_message, AppConfig, ApplicationLaunchJob, CaptureJob, JobResult,
-    SessionType, VisionRequest, VoiceSearchJob,
+    SessionType, UrlOpenJob, VisionRequest, VoiceSearchJob,
 };
 
 #[derive(Debug, Parser)]
@@ -36,6 +36,9 @@ struct Cli {
 
     #[arg(long)]
     open_app: Option<String>,
+
+    #[arg(long)]
+    open_url: Option<String>,
 
     #[arg(long, default_value_t = false)]
     voice_agent: bool,
@@ -82,7 +85,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    if (cli.action.is_some() || cli.open_app.is_some())
+    if (cli.action.is_some() || cli.open_app.is_some() || cli.open_url.is_some())
         && (cli.voice_agent
             || cli.voice_request
             || cli.voice_search
@@ -93,6 +96,10 @@ async fn main() -> Result<()> {
 
     if let Some(app_name) = &cli.open_app {
         return run_open_application(&config, cli.speak, app_name, None).await;
+    }
+
+    if let Some(url) = &cli.open_url {
+        return run_open_url(&config, cli.speak, url, url, None).await;
     }
 
     let resolved_voice_agent = if cli.action.is_none() && cli.open_app.is_none() && cli.voice_agent
@@ -112,6 +119,13 @@ async fn main() -> Result<()> {
                 app_name,
             } => {
                 return run_open_application(&config, cli.speak, app_name, Some(transcript)).await;
+            }
+            voice::VoiceAgentCommand::OpenUrl {
+                transcript,
+                label,
+                url,
+            } => {
+                return run_open_url(&config, cli.speak, label, url, Some(transcript)).await;
             }
             voice::VoiceAgentCommand::SearchWeb { transcript, query } => {
                 let voice_search = voice::VoiceSearch {
@@ -334,6 +348,79 @@ async fn run_open_application(
         }
         JobResult::ClipboardText { .. } | JobResult::BrowserQuery { .. } => {
             anyhow::bail!("daemon returned unexpected response for open application");
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_open_url(
+    config: &AppConfig,
+    speak: bool,
+    label: &str,
+    url: &str,
+    transcript: Option<&str>,
+) -> Result<()> {
+    let request_id = Uuid::new_v4();
+    let total_started_at = Instant::now();
+    let socket_path = config.socket_path()?;
+
+    info!(
+        request_id = %request_id,
+        transcript,
+        label,
+        url,
+        speak,
+        "open url request started"
+    );
+
+    let connect_started_at = Instant::now();
+    let mut stream = UnixStream::connect(&socket_path).await.with_context(|| {
+        format!(
+            "failed to connect to daemon socket {}",
+            socket_path.display()
+        )
+    })?;
+    let connect_ms = elapsed_ms(connect_started_at);
+
+    info!(
+        request_id = %request_id,
+        connect_ms,
+        socket = %socket_path.display(),
+        "daemon socket connected"
+    );
+
+    let request = VisionRequest::OpenUrl(UrlOpenJob {
+        request_id,
+        transcript: transcript.map(str::to_string),
+        label: label.to_string(),
+        url: url.to_string(),
+        speak,
+    });
+
+    let daemon_roundtrip_started_at = Instant::now();
+    write_message(&mut stream, &request).await?;
+    let response: JobResult = read_message(&mut stream).await?;
+    let daemon_roundtrip_ms = elapsed_ms(daemon_roundtrip_started_at);
+
+    match response {
+        JobResult::ActionStatus {
+            message, spoken, ..
+        } => {
+            info!(
+                request_id = %request_id,
+                spoken,
+                daemon_roundtrip_ms,
+                total_ms = elapsed_ms(total_started_at),
+                "open url response received"
+            );
+            println!("{}", message);
+        }
+        JobResult::Error { code, message, .. } => {
+            anyhow::bail!("daemon returned error {code}: {message}");
+        }
+        JobResult::ClipboardText { .. } | JobResult::BrowserQuery { .. } => {
+            anyhow::bail!("daemon returned unexpected response for open url");
         }
     }
 

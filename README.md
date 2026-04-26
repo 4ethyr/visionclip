@@ -107,15 +107,23 @@ install -Dm755 target/release/visionclip ~/.local/bin/visionclip
 bash scripts/install_gnome_voice_shortcut.sh '<Super>F12'
 ```
 
-O instalador configura `Super+F12` como atalho principal e `Super+Shift+F12` como fallback para o mesmo wrapper. Ao acionar o atalho, o wrapper executa `visionclip --voice-agent --speak`, abre a overlay de escuta e grava o comando de voz.
+O instalador configura `Super+F12` como atalho principal, `Super+Shift+F12` como fallback e `Super+Alt+V` como fallback alternativo para o mesmo wrapper. Ao acionar o atalho, o wrapper executa `visionclip --voice-agent --speak`, abre a overlay de escuta e grava o comando de voz.
 
-O wrapper importa o ambiente gráfico do `systemd --user` antes de iniciar o binário, para que `DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR` e o barramento D-Bus estejam disponíveis quando o comando vier do GNOME. Logs de acionamento ficam em `~/.local/state/visionclip/voice-shortcut.log`.
+O wrapper importa o ambiente gráfico do `systemd --user` antes de iniciar o binário, para que `DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR` e o barramento D-Bus estejam disponíveis quando o comando vier do GNOME. O instalador grava a tecla Super como `Mod4`, que é o nome de baixo nível usado pelo GTK/GNOME para esse modificador. Logs de acionamento ficam em `~/.local/state/visionclip/voice-shortcut.log`.
+
+Para testar outro acelerador no GNOME, passe o binding desejado ao instalador. O alias `Shift+CapsLk` é normalizado para `<Shift>Caps_Lock`:
+
+```bash
+bash scripts/install_gnome_voice_shortcut.sh 'Shift+CapsLk'
+```
 
 Exemplos de teste sem microfone:
 
 ```bash
 visionclip --voice-agent --voice-transcript 'Abra o terminal'
 visionclip --voice-agent --voice-transcript 'Abra o VS Code'
+visionclip --voice-agent --voice-transcript 'youtube'
+visionclip --voice-agent --voice-transcript 'abra o site do LinkedIn'
 visionclip --voice-agent --voice-transcript 'O que é JavaScript?'
 ```
 
@@ -126,7 +134,7 @@ visionclip --open-app terminal
 visionclip --open-app vscode
 ```
 
-O handler de abertura usa allowlists para casos conhecidos como terminal/navegador e resolução por arquivos `.desktop` com `gtk-launch`/`gio`. O LLM não executa shell arbitrário.
+O handler de abertura usa allowlists para casos conhecidos como terminal/navegador/configurações, resolução por arquivos `.desktop` com `gtk-launch`/`gio` e uma lista explícita de sites comuns que devem abrir no navegador padrão, como YouTube, Facebook e LinkedIn. O LLM não executa shell arbitrário.
 
 ## Diagnóstico e operação
 
@@ -162,7 +170,7 @@ Em desktops Wayland via portal, a captura pode depender de uma confirmação exp
 
 ## TTS
 
-Com Piper HTTP ativo, o daemon pode responder em áudio para `TranslatePtBr`, `Explain`, `SearchWeb` e `OpenApplication` quando `--speak` estiver ligado.
+Com Piper HTTP ativo, o daemon pode responder em áudio para `TranslatePtBr`, `Explain`, `SearchWeb`, `OpenApplication` e `OpenUrl` quando `--speak` estiver ligado.
 
 Para `SearchWeb`, o daemon tenta falar o resumo enriquecido da busca quando esse material estiver disponivel; caso contrario, ele apenas confirma a abertura da pesquisa.
 

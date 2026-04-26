@@ -4,11 +4,14 @@ set -euo pipefail
 SHORTCUT_NAME="${VISIONCLIP_VOICE_SHORTCUT_NAME:-VisionClip Voice Search}"
 SHORTCUT_BINDING="${1:-${VISIONCLIP_VOICE_SHORTCUT:-<Super>F12}}"
 SECONDARY_SHORTCUT_BINDING="${VISIONCLIP_VOICE_SECONDARY_SHORTCUT:-<Super><Shift>F12}"
+TERTIARY_SHORTCUT_BINDING="${VISIONCLIP_VOICE_TERTIARY_SHORTCUT:-<Super><Alt>v}"
 CUSTOM_KEYBINDINGS_SCHEMA="org.gnome.settings-daemon.plugins.media-keys"
 CUSTOM_KEYBINDING_PATH="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-voice-search/"
 CUSTOM_KEYBINDING_SCHEMA="org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:${CUSTOM_KEYBINDING_PATH}"
 SECONDARY_CUSTOM_KEYBINDING_PATH="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-voice-search-shift/"
 SECONDARY_CUSTOM_KEYBINDING_SCHEMA="org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:${SECONDARY_CUSTOM_KEYBINDING_PATH}"
+TERTIARY_CUSTOM_KEYBINDING_PATH="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-voice-search-super-alt-v/"
+TERTIARY_CUSTOM_KEYBINDING_SCHEMA="org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:${TERTIARY_CUSTOM_KEYBINDING_PATH}"
 USER_BIN_DIR="${HOME}/.local/bin"
 VISIONCLIP_BIN="${VISIONCLIP_BIN:-${USER_BIN_DIR}/visionclip}"
 WRAPPER_PATH="${USER_BIN_DIR}/visionclip-voice-search"
@@ -18,10 +21,13 @@ normalize_binding() {
     local lowered="${value,,}"
     case "$lowered" in
         "/+f12"|"slash+f12"|"slash + f12")
-            echo "<Super>F12"
+            echo "<Mod4>F12"
+            ;;
+        "shift+capslk"|"shift + capslk"|"shift+capslock"|"shift + capslock"|"shift+caps_lock"|"shift + caps_lock")
+            echo "<Shift>Caps_Lock"
             ;;
         *)
-            echo "$value"
+            echo "${value//<Super>/<Mod4>}"
             ;;
     esac
 }
@@ -110,14 +116,19 @@ EOF
 chmod +x "$WRAPPER_PATH"
 
 RESOLVED_BINDING="$(normalize_binding "$SHORTCUT_BINDING")"
-if [[ "$RESOLVED_BINDING" != "$SHORTCUT_BINDING" ]]; then
+RESOLVED_SECONDARY_BINDING="$(normalize_binding "$SECONDARY_SHORTCUT_BINDING")"
+RESOLVED_TERTIARY_BINDING="$(normalize_binding "$TERTIARY_SHORTCUT_BINDING")"
+case "${SHORTCUT_BINDING,,}" in
+    "/+f12"|"slash+f12"|"slash + f12")
     echo "Aviso: o GNOME nao aceita o atalho global '$SHORTCUT_BINDING' com duas teclas normais."
     echo "Usando '$RESOLVED_BINDING' como padrao compativel."
-fi
+        ;;
+esac
 
 CURRENT_BINDINGS="$(gsettings get "$CUSTOM_KEYBINDINGS_SCHEMA" custom-keybindings)"
 UPDATED_BINDINGS="$(append_custom_keybinding_path "$CURRENT_BINDINGS" "$CUSTOM_KEYBINDING_PATH")"
 UPDATED_BINDINGS="$(append_custom_keybinding_path "$UPDATED_BINDINGS" "$SECONDARY_CUSTOM_KEYBINDING_PATH")"
+UPDATED_BINDINGS="$(append_custom_keybinding_path "$UPDATED_BINDINGS" "$TERTIARY_CUSTOM_KEYBINDING_PATH")"
 
 gsettings set "$CUSTOM_KEYBINDINGS_SCHEMA" custom-keybindings "$UPDATED_BINDINGS"
 gsettings set "$CUSTOM_KEYBINDING_SCHEMA" name "$SHORTCUT_NAME"
@@ -125,16 +136,20 @@ gsettings set "$CUSTOM_KEYBINDING_SCHEMA" command "$WRAPPER_PATH"
 gsettings set "$CUSTOM_KEYBINDING_SCHEMA" binding "$RESOLVED_BINDING"
 gsettings set "$SECONDARY_CUSTOM_KEYBINDING_SCHEMA" name "$SHORTCUT_NAME (fallback)"
 gsettings set "$SECONDARY_CUSTOM_KEYBINDING_SCHEMA" command "$WRAPPER_PATH"
-gsettings set "$SECONDARY_CUSTOM_KEYBINDING_SCHEMA" binding "$SECONDARY_SHORTCUT_BINDING"
+gsettings set "$SECONDARY_CUSTOM_KEYBINDING_SCHEMA" binding "$RESOLVED_SECONDARY_BINDING"
+gsettings set "$TERTIARY_CUSTOM_KEYBINDING_SCHEMA" name "$SHORTCUT_NAME (fallback alt)"
+gsettings set "$TERTIARY_CUSTOM_KEYBINDING_SCHEMA" command "$WRAPPER_PATH"
+gsettings set "$TERTIARY_CUSTOM_KEYBINDING_SCHEMA" binding "$RESOLVED_TERTIARY_BINDING"
 
 if command -v systemctl >/dev/null 2>&1; then
     systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS PATH >/dev/null 2>&1 || true
-    systemctl --user start org.gnome.SettingsDaemon.MediaKeys.target >/dev/null 2>&1 || true
-    systemctl --user restart org.gnome.SettingsDaemon.MediaKeys.service >/dev/null 2>&1 || true
+    systemctl --user restart org.gnome.SettingsDaemon.MediaKeys.target >/dev/null 2>&1 || \
+        systemctl --user start org.gnome.SettingsDaemon.MediaKeys.target >/dev/null 2>&1 || true
 fi
 
 echo "Atalho do VisionClip configurado."
 echo "Binding: $RESOLVED_BINDING"
-echo "Fallback binding: $SECONDARY_SHORTCUT_BINDING"
+echo "Fallback binding: $RESOLVED_SECONDARY_BINDING"
+echo "Fallback alt binding: $RESOLVED_TERTIARY_BINDING"
 echo "Command: $WRAPPER_PATH"
 echo "Log: ${HOME}/.local/state/visionclip/voice-shortcut.log"
