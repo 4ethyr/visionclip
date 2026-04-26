@@ -15,8 +15,9 @@ use tracing::{debug, warn};
 use urlencoding::decode;
 use uuid::Uuid;
 use visionclip_common::{
-    config::CaptureConfig, current_desktops, screenshot_portal_backends_for_current_desktop,
-    summarize_portal_backends, AppConfig, SessionType,
+    config::CaptureConfig, current_desktops, likely_gnome_shell_screenshot_available,
+    screenshot_portal_backends_for_current_desktop, summarize_portal_backends, AppConfig,
+    SessionType,
 };
 use which::which;
 
@@ -27,6 +28,7 @@ const PORTAL_SCREENSHOT_METHOD: &str = "org.freedesktop.portal.Screenshot.Screen
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResolvedCaptureBackend {
     Portal,
+    GnomeShellScreenshot,
     Grim,
     Maim,
     GnomeScreenshot,
@@ -123,6 +125,9 @@ async fn capture_with_backend(
 
     match backend {
         ResolvedCaptureBackend::Portal => capture_with_portal(timeout_ms).await,
+        ResolvedCaptureBackend::GnomeShellScreenshot => {
+            capture_with_gnome_shell_screenshot(timeout_ms).await
+        }
         ResolvedCaptureBackend::Grim => capture_with_grim(timeout_ms).await,
         ResolvedCaptureBackend::Maim => {
             capture_from_program("maim", &["-s", "-u"], timeout_ms).await
@@ -144,6 +149,13 @@ where
     match backend.as_str() {
         "auto" => resolve_auto_backend(config, session_type, command_exists),
         "portal" => require_backend(ResolvedCaptureBackend::Portal, "gdbus", command_exists),
+        "gnome-shell" | "gnome_shell" | "gnome-shell-screenshot" | "gnome_shell_screenshot" => {
+            require_backend(
+                ResolvedCaptureBackend::GnomeShellScreenshot,
+                "gdbus",
+                command_exists,
+            )
+        }
         "grim" => require_backend(ResolvedCaptureBackend::Grim, "grim", command_exists),
         "maim" => require_backend(ResolvedCaptureBackend::Maim, "maim", command_exists),
         "gnome-screenshot" | "gnome_screenshot" => require_backend(
@@ -171,6 +183,8 @@ where
         SessionType::Wayland => {
             if command_exists("gnome-screenshot") {
                 Ok(ResolvedCaptureBackend::GnomeScreenshot)
+            } else if likely_gnome_shell_screenshot_available(&command_exists) {
+                Ok(ResolvedCaptureBackend::GnomeShellScreenshot)
             } else if command_exists("grim") {
                 Ok(ResolvedCaptureBackend::Grim)
             } else {
@@ -184,6 +198,8 @@ where
                 Ok(ResolvedCaptureBackend::Maim)
             } else if command_exists("gnome-screenshot") {
                 Ok(ResolvedCaptureBackend::GnomeScreenshot)
+            } else if likely_gnome_shell_screenshot_available(&command_exists) {
+                Ok(ResolvedCaptureBackend::GnomeShellScreenshot)
             } else if command_exists("grim") {
                 Ok(ResolvedCaptureBackend::Grim)
             } else {
@@ -195,6 +211,8 @@ where
         SessionType::Unknown => {
             if command_exists("gnome-screenshot") {
                 Ok(ResolvedCaptureBackend::GnomeScreenshot)
+            } else if likely_gnome_shell_screenshot_available(&command_exists) {
+                Ok(ResolvedCaptureBackend::GnomeShellScreenshot)
             } else if command_exists("maim") {
                 Ok(ResolvedCaptureBackend::Maim)
             } else if command_exists("grim") {
@@ -285,6 +303,63 @@ async fn capture_with_gnome_screenshot(timeout_ms: u64) -> Result<Vec<u8>> {
         &args,
         timeout_ms,
         "gnome-screenshot capture backend",
+    )
+    .await?;
+
+    let bytes = fs::read(&temp_path)
+        .with_context(|| format!("failed to read screenshot file {}", temp_path.display()))?;
+    let _ = fs::remove_file(&temp_path);
+    Ok(bytes)
+}
+
+async fn capture_with_gnome_shell_screenshot(timeout_ms: u64) -> Result<Vec<u8>> {
+    let area_output = run_command(
+        "gdbus",
+        &[
+            "call".to_string(),
+            "--session".to_string(),
+            "--dest".to_string(),
+            "org.gnome.Shell.Screenshot".to_string(),
+            "--object-path".to_string(),
+            "/org/gnome/Shell/Screenshot".to_string(),
+            "--method".to_string(),
+            "org.gnome.Shell.Screenshot.SelectArea".to_string(),
+        ],
+        timeout_ms,
+        "GNOME Shell screenshot area selector",
+    )
+    .await?;
+
+    let (x, y, width, height) =
+        parse_gnome_shell_area(&String::from_utf8_lossy(&area_output.stdout))
+            .context("failed to parse GNOME Shell selected screenshot area")?;
+    if width <= 0 || height <= 0 {
+        anyhow::bail!("GNOME Shell selected an empty screenshot area");
+    }
+
+    let temp_path = temp_png_path();
+    let args = vec![
+        "call".to_string(),
+        "--session".to_string(),
+        "--dest".to_string(),
+        "org.gnome.Shell.Screenshot".to_string(),
+        "--object-path".to_string(),
+        "/org/gnome/Shell/Screenshot".to_string(),
+        "--method".to_string(),
+        "org.gnome.Shell.Screenshot.ScreenshotArea".to_string(),
+        x.to_string(),
+        y.to_string(),
+        width.to_string(),
+        height.to_string(),
+        "true".to_string(),
+        temp_path.display().to_string(),
+    ];
+
+    let _ = run_command(
+        "gdbus",
+        &args,
+        timeout_ms,
+        "GNOME Shell screenshot capture backend",
     )
     .await?;
 
@@ -397,6 +472,39 @@ async fn capture_with_portal(timeout_ms: u64) -> Result<Vec<u8>> {
         "read portal screenshot bytes"
     );
     Ok(bytes)
+}
+
+fn parse_gnome_shell_area(output: &str) -> Option<(i32, i32, i32, i32)> {
+    let normalized = output.replace("int32", "").replace("uint32", "");
+    let values = parse_signed_ints(&normalized);
+    (values.len() >= 4).then(|| (values[0], values[1], values[2], values[3]))
+}
+
+fn parse_signed_ints(input: &str) -> Vec<i32> {
+    let mut values = Vec::new();
+    let mut current = String::new();
+
+    for ch in input.chars() {
+        if ch.is_ascii_digit() || (ch == '-' && current.is_empty()) {
+            current.push(ch);
+            continue;
+        }
+
+        if !current.is_empty() && current != "-" {
+            if let Ok(value) = current.parse() {
+                values.push(value);
+            }
+        }
+        current.clear();
+    }
+
+    if !current.is_empty() && current != "-" {
+        if let Ok(value) = current.parse() {
+            values.push(value);
+        }
+    }
+
+    values
 }
 
 async fn wait_for_portal_response(
@@ -854,6 +962,34 @@ mod tests {
         .unwrap();
 
         assert_eq!(backend, ResolvedCaptureBackend::Maim);
+    }
+
+    #[test]
+    fn explicit_gnome_shell_backend_uses_gdbus() {
+        let backend = resolve_capture_backend(
+            &CaptureConfig {
+                backend: "gnome-shell".into(),
+                prefer_portal: false,
+                capture_timeout_ms: 30_000,
+            },
+            SessionType::Wayland,
+            |command| command == "gdbus",
+        )
+        .unwrap();
+
+        assert_eq!(backend, ResolvedCaptureBackend::GnomeShellScreenshot);
+    }
+
+    #[test]
+    fn parse_gnome_shell_selected_area() {
+        assert_eq!(
+            parse_gnome_shell_area("(10, 20, 300, 180)"),
+            Some((10, 20, 300, 180))
+        );
+        assert_eq!(
+            parse_gnome_shell_area("(int32 10, int32 20, int32 300, int32 180)"),
+            Some((10, 20, 300, 180))
+        );
     }
 
     #[test]
