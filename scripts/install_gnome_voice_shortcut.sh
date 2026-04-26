@@ -129,8 +129,8 @@ gsettings set "$SECONDARY_CUSTOM_KEYBINDING_SCHEMA" binding "$SECONDARY_SHORTCUT
 
 if command -v systemctl >/dev/null 2>&1; then
     systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS PATH >/dev/null 2>&1 || true
-    systemctl --user start org.gnome.SettingsDaemon.MediaKeys.target >/dev/null 2>&1 || true
-    systemctl --user restart org.gnome.SettingsDaemon.MediaKeys.service >/dev/null 2>&1 || true
+    systemctl --user restart org.gnome.SettingsDaemon.MediaKeys.target >/dev/null 2>&1 || \
+        systemctl --user start org.gnome.SettingsDaemon.MediaKeys.target >/dev/null 2>&1 || true
 fi
 
 echo "Atalho do VisionClip configurado."
