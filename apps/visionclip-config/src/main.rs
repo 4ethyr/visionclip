@@ -159,10 +159,14 @@ async fn run_doctor() -> Result<()> {
         "pw-record",
         "aplay",
         "arecord",
+        "gnome-screenshot",
         "grim",
         "slurp",
         "maim",
-        "gnome-screenshot",
+        "spectacle",
+        "flameshot",
+        "scrot",
+        "import",
     ] {
         println!("  {tool}: {}", tool_status(tool));
     }

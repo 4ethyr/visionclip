@@ -55,6 +55,8 @@ pub struct InferConfig {
     pub temperature: f32,
     #[serde(default = "default_thinking")]
     pub thinking_default: String,
+    #[serde(default = "default_context_window_tokens")]
+    pub context_window_tokens: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +75,12 @@ pub struct SearchConfig {
     pub max_results: usize,
     #[serde(default = "default_true")]
     pub open_browser: bool,
+    #[serde(default = "default_true")]
+    pub rendered_ai_overview_listener: bool,
+    #[serde(default = "default_rendered_ai_overview_wait_ms")]
+    pub rendered_ai_overview_wait_ms: u64,
+    #[serde(default = "default_rendered_ai_overview_poll_interval_ms")]
+    pub rendered_ai_overview_poll_interval_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +97,10 @@ pub struct AudioConfig {
     pub speak_actions: Vec<String>,
     #[serde(default = "default_player_command")]
     pub player_command: String,
+    #[serde(default = "default_tts_request_timeout_ms")]
+    pub request_timeout_ms: u64,
+    #[serde(default = "default_tts_playback_timeout_ms")]
+    pub playback_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,6 +239,7 @@ impl Default for InferConfig {
             keep_alive: default_keep_alive(),
             temperature: default_temperature(),
             thinking_default: default_thinking(),
+            context_window_tokens: default_context_window_tokens(),
         }
     }
 }
@@ -240,6 +253,8 @@ impl Default for AudioConfig {
             default_voice: String::new(),
             speak_actions: default_speak_actions(),
             player_command: default_player_command(),
+            request_timeout_ms: default_tts_request_timeout_ms(),
+            playback_timeout_ms: default_tts_playback_timeout_ms(),
         }
     }
 }
@@ -254,6 +269,9 @@ impl Default for SearchConfig {
             request_timeout_ms: default_search_request_timeout_ms(),
             max_results: default_search_max_results(),
             open_browser: default_true(),
+            rendered_ai_overview_listener: default_true(),
+            rendered_ai_overview_wait_ms: default_rendered_ai_overview_wait_ms(),
+            rendered_ai_overview_poll_interval_ms: default_rendered_ai_overview_poll_interval_ms(),
         }
     }
 }
@@ -333,6 +351,10 @@ fn default_thinking() -> String {
     String::new()
 }
 
+fn default_context_window_tokens() -> u32 {
+    8192
+}
+
 fn default_search_base_url() -> String {
     "https://www.google.com/search".to_string()
 }
@@ -347,6 +369,14 @@ fn default_search_request_timeout_ms() -> u64 {
 
 fn default_search_max_results() -> usize {
     3
+}
+
+fn default_rendered_ai_overview_wait_ms() -> u64 {
+    12_000
+}
+
+fn default_rendered_ai_overview_poll_interval_ms() -> u64 {
+    3_000
 }
 
 fn default_audio_backend() -> String {
@@ -392,6 +422,14 @@ fn default_speak_actions() -> Vec<String> {
 
 fn default_player_command() -> String {
     "paplay".to_string()
+}
+
+fn default_tts_request_timeout_ms() -> u64 {
+    60_000
+}
+
+fn default_tts_playback_timeout_ms() -> u64 {
+    120_000
 }
 
 fn default_overlay() -> String {
@@ -451,7 +489,10 @@ mod tests {
         assert_eq!(cfg.infer.model, "gemma4:e2b");
         assert_eq!(cfg.infer.ocr_model, "gemma4:e2b");
         assert!(cfg.infer.thinking_default.is_empty());
+        assert_eq!(cfg.infer.context_window_tokens, 8192);
         assert!(cfg.audio.enabled);
+        assert_eq!(cfg.audio.request_timeout_ms, 60_000);
+        assert_eq!(cfg.audio.playback_timeout_ms, 120_000);
         assert!(!cfg.voice.enabled);
         assert_eq!(cfg.voice.backend, "auto");
         assert!(cfg.voice.overlay_enabled);

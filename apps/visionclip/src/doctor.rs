@@ -1,5 +1,5 @@
 use crate::voice_overlay;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -7,8 +7,10 @@ use std::{
 };
 use tokio::net::UnixStream;
 use visionclip_common::{
-    config::{AudioConfig, VoiceConfig},
-    read_message, write_message, AppConfig, HealthCheckJob, JobResult, VisionRequest,
+    config::{AudioConfig, SearchConfig, VoiceConfig},
+    discover_capture_backends, discover_rendered_capture_backends, read_message,
+    summarize_capture_backends, write_message, AppConfig, HealthCheckJob, JobResult, SessionType,
+    VisionRequest,
 };
 use which::which;
 
@@ -75,10 +77,16 @@ pub(crate) async fn run(config: &AppConfig) -> Result<bool> {
     checks.push(check_config_path()?);
     checks.push(check_daemon_socket(config).await);
     checks.push(check_overlay_runtime());
+    checks.push(check_capture_system(command_available));
+    checks.push(check_rendered_ai_overview_listener(
+        &config.search,
+        command_available,
+    ));
     checks.push(check_voice_recorder(&config.voice, command_available));
     checks.push(check_voice_transcriber(&config.voice, command_available));
     checks.push(check_tts_player(&config.audio, command_available));
     checks.push(check_voice_wrapper());
+    checks.push(check_shortcut_environment());
     checks.push(check_media_keys_service());
     checks.extend(check_gnome_shortcuts(&config.voice));
 
@@ -170,6 +178,163 @@ fn check_overlay_runtime() -> DoctorCheck {
     DoctorCheck::ok("overlay", "runtime grafico disponivel")
 }
 
+fn current_session_type() -> SessionType {
+    match env::var("XDG_SESSION_TYPE") {
+        Ok(value) if value.eq_ignore_ascii_case("wayland") => SessionType::Wayland,
+        Ok(value) if value.eq_ignore_ascii_case("x11") => SessionType::X11,
+        _ => SessionType::Unknown,
+    }
+}
+
+fn session_type_label(session_type: &SessionType) -> &'static str {
+    match session_type {
+        SessionType::Wayland => "wayland",
+        SessionType::X11 => "x11",
+        SessionType::Unknown => "unknown",
+    }
+}
+
+fn gnome_shell_screenshot_passive_usable() -> bool {
+    if !command_available("gdbus") {
+        return false;
+    }
+
+    let Ok(probe_path) = gnome_shell_probe_path() else {
+        return false;
+    };
+
+    if let Some(parent) = probe_path.parent() {
+        if fs::create_dir_all(parent).is_err() {
+            return false;
+        }
+    }
+
+    let output = Command::new("gdbus")
+        .args([
+            "call",
+            "--session",
+            "--dest",
+            "org.gnome.Shell.Screenshot",
+            "--object-path",
+            "/org/gnome/Shell/Screenshot",
+            "--method",
+            "org.gnome.Shell.Screenshot.Screenshot",
+            "false",
+            "false",
+        ])
+        .arg(&probe_path)
+        .output();
+
+    let usable = output
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|_| fs::metadata(&probe_path).ok())
+        .map(|metadata| metadata.len() > 0)
+        .unwrap_or(false);
+    let _ = fs::remove_file(probe_path);
+    usable
+}
+
+fn gnome_shell_screenshot_interface_visible() -> bool {
+    Command::new("gdbus")
+        .args([
+            "introspect",
+            "--session",
+            "--dest",
+            "org.gnome.Shell.Screenshot",
+            "--object-path",
+            "/org/gnome/Shell/Screenshot",
+        ])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout).contains("org.gnome.Shell.Screenshot")
+        })
+        .unwrap_or(false)
+}
+
+fn gnome_shell_probe_path() -> Result<PathBuf> {
+    let runtime_dir = env::var("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .context("XDG_RUNTIME_DIR is not set")?;
+    Ok(runtime_dir
+        .join("visionclip")
+        .join(format!("doctor-gnome-shell-{}.png", uuid::Uuid::new_v4())))
+}
+
+fn check_capture_system(command_exists: impl Fn(&str) -> bool) -> DoctorCheck {
+    check_capture_system_with(command_exists, gnome_shell_screenshot_interface_visible())
+}
+
+fn check_capture_system_with(
+    command_exists: impl Fn(&str) -> bool,
+    gnome_shell_available: bool,
+) -> DoctorCheck {
+    let session_type = current_session_type();
+    let session_label = session_type_label(&session_type);
+    let backends = discover_capture_backends(session_type, command_exists, gnome_shell_available);
+
+    if backends.is_empty() {
+        DoctorCheck::fail(
+            "capture",
+            "nenhum backend de captura detectado; verifique xdg-desktop-portal ou instale uma ferramenta de screenshot compativel",
+        )
+    } else {
+        DoctorCheck::ok(
+            "capture",
+            format!(
+                "sessao={}; detectado: {}",
+                session_label,
+                summarize_capture_backends(&backends)
+            ),
+        )
+    }
+}
+
+fn check_rendered_ai_overview_listener(
+    search: &SearchConfig,
+    command_exists: impl Fn(&str) -> bool,
+) -> DoctorCheck {
+    check_rendered_ai_overview_listener_with(
+        search,
+        command_exists,
+        gnome_shell_screenshot_passive_usable(),
+    )
+}
+
+fn check_rendered_ai_overview_listener_with(
+    search: &SearchConfig,
+    command_exists: impl Fn(&str) -> bool,
+    gnome_shell_available: bool,
+) -> DoctorCheck {
+    if !search.rendered_ai_overview_listener {
+        return DoctorCheck::warn(
+            "render-ai",
+            "listener da AI Overview renderizada desabilitado em [search]",
+        );
+    }
+
+    let session_type = current_session_type();
+    let backends =
+        discover_rendered_capture_backends(session_type, command_exists, gnome_shell_available);
+
+    if !backends.is_empty() {
+        DoctorCheck::ok(
+            "render-ai",
+            format!(
+                "listener tentara {} + OCR",
+                summarize_capture_backends(&backends)
+            ),
+        )
+    } else {
+        DoctorCheck::warn(
+            "render-ai",
+            "sem backend passivo para OCR da pagina renderizada; captura manual continua via portal, mas AI Overview renderizada pode exigir gnome-screenshot, grim ou maim",
+        )
+    }
+}
+
 fn check_voice_recorder(voice: &VoiceConfig, command_exists: impl Fn(&str) -> bool) -> DoctorCheck {
     if !voice.enabled {
         return DoctorCheck::warn("voice", "entrada por voz desabilitada na configuracao");
@@ -247,6 +412,59 @@ fn check_voice_wrapper() -> DoctorCheck {
                 "wrapper ausente ou nao executavel em {}; reinstale scripts/install_gnome_voice_shortcut.sh",
                 path.display()
             ),
+        )
+    }
+}
+
+fn check_shortcut_environment() -> DoctorCheck {
+    if !command_available("systemctl") {
+        return DoctorCheck::warn(
+            "shortcut-env",
+            "systemctl ausente; ambiente do atalho nao verificado",
+        );
+    }
+
+    let output = Command::new("systemctl")
+        .args(["--user", "show-environment"])
+        .output();
+
+    let Ok(output) = output else {
+        return DoctorCheck::warn(
+            "shortcut-env",
+            "nao foi possivel ler systemctl --user show-environment",
+        );
+    };
+
+    if !output.status.success() {
+        return DoctorCheck::warn(
+            "shortcut-env",
+            "systemctl --user show-environment retornou erro",
+        );
+    }
+
+    shortcut_environment_status(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn shortcut_environment_status(environment: &str) -> DoctorCheck {
+    let has_runtime = environment
+        .lines()
+        .any(|line| line.starts_with("XDG_RUNTIME_DIR="));
+    let has_display = environment
+        .lines()
+        .any(|line| line.starts_with("WAYLAND_DISPLAY=") || line.starts_with("DISPLAY="));
+    let has_bus = environment
+        .lines()
+        .any(|line| line.starts_with("DBUS_SESSION_BUS_ADDRESS="));
+
+    if has_runtime && has_display && has_bus {
+        DoctorCheck::ok(
+            "shortcut-env",
+            "ambiente grafico importado no systemd de usuario",
+        )
+    } else {
+        DoctorCheck::warn(
+            "shortcut-env",
+            "ambiente grafico incompleto; rode scripts/install_gnome_voice_shortcut.sh novamente dentro da sessao GNOME",
         )
     }
 }
@@ -377,7 +595,14 @@ fn command_available(command: &str) -> bool {
     if command.contains('/') {
         return is_executable_path(Path::new(command));
     }
-    which(command).is_ok()
+    which(command).is_ok() || common_system_command_path(command).is_some()
+}
+
+fn common_system_command_path(command: &str) -> Option<PathBuf> {
+    ["/usr/local/bin", "/usr/bin", "/bin"]
+        .into_iter()
+        .map(|dir| PathBuf::from(dir).join(command))
+        .find(|path| is_executable_path(path))
 }
 
 fn is_executable_path(path: &Path) -> bool {
@@ -481,6 +706,8 @@ mod tests {
             default_voice: String::new(),
             speak_actions: vec!["SearchWeb".into()],
             player_command: "pw-play".into(),
+            request_timeout_ms: 60_000,
+            playback_timeout_ms: 120_000,
         }
     }
 
@@ -535,6 +762,58 @@ mod tests {
     fn tts_player_checks_configured_player() {
         let check = check_tts_player(&audio_config(), |command| command == "pw-play");
         assert_eq!(check.status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn rendered_ai_overview_listener_accepts_gnome_screenshot() {
+        let check = check_rendered_ai_overview_listener_with(
+            &SearchConfig::default(),
+            |command| command == "gnome-screenshot",
+            false,
+        );
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(check.message.contains("gnome-screenshot"));
+    }
+
+    #[test]
+    fn rendered_ai_overview_listener_accepts_gnome_shell_dbus() {
+        let check =
+            check_rendered_ai_overview_listener_with(&SearchConfig::default(), |_| false, true);
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(check.message.contains("GNOME Shell Screenshot"));
+    }
+
+    #[test]
+    fn rendered_ai_overview_listener_warns_without_capture_backend() {
+        let check =
+            check_rendered_ai_overview_listener_with(&SearchConfig::default(), |_| false, false);
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.message.contains("AI Overview"));
+    }
+
+    #[test]
+    fn capture_system_reports_detected_backend() {
+        let check = check_capture_system_with(|command| command == "grim", false);
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(check.message.contains("grim"));
+    }
+
+    #[test]
+    fn shortcut_environment_accepts_graphical_user_env() {
+        let check = shortcut_environment_status(
+            "XDG_RUNTIME_DIR=/run/user/1000\nWAYLAND_DISPLAY=wayland-0\nDBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus\n",
+        );
+
+        assert_eq!(check.status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn shortcut_environment_warns_without_display() {
+        let check = shortcut_environment_status(
+            "XDG_RUNTIME_DIR=/run/user/1000\nDBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus\n",
+        );
+
+        assert_eq!(check.status, CheckStatus::Warn);
     }
 
     #[test]

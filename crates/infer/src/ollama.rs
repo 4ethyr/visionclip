@@ -1,5 +1,8 @@
 use crate::backend::{InferenceBackend, InferenceInput, InferenceOutput};
-use crate::prompts::{policy_for_action, system_prompt, user_prompt, user_prompt_from_text};
+use crate::prompts::{
+    policy_for_action, search_answer_system_prompt, search_answer_user_prompt, system_prompt,
+    user_prompt, user_prompt_from_text,
+};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -64,6 +67,27 @@ impl OllamaBackend {
             .await
     }
 
+    pub async fn answer_search_from_context(
+        &self,
+        request_id: String,
+        query: &str,
+        source_label: &str,
+        ai_overview_text: &str,
+        supporting_sources: &str,
+    ) -> Result<InferenceOutput> {
+        let action = visionclip_common::ipc::Action::SearchWeb;
+        let model = self.config.model.as_str();
+        let payload = self.search_answer_chat_payload(
+            model,
+            query,
+            source_label,
+            ai_overview_text,
+            supporting_sources,
+        );
+        self.send_chat_request(&request_id, &action, model, "search_answer", payload)
+            .await
+    }
+
     fn image_chat_payload(&self, model: &str, input: &InferenceInput) -> serde_json::Value {
         let policy = policy_for_action(&input.action);
         let image_b64 = STANDARD.encode(&input.image_bytes);
@@ -71,10 +95,10 @@ impl OllamaBackend {
             "model": model,
             "stream": false,
             "keep_alive": self.config.keep_alive,
-            "options": {
-                "temperature": self.config.temperature,
-                "num_predict": num_predict_for_action(&input.action, "image")
-            },
+            "options": ollama_options(
+                &self.config,
+                num_predict_for_action(&input.action, "image")
+            ),
             "messages": [
                 {
                     "role": "system",
@@ -102,10 +126,10 @@ impl OllamaBackend {
             "model": model,
             "stream": false,
             "keep_alive": self.config.keep_alive,
-            "options": {
-                "temperature": self.config.temperature,
-                "num_predict": num_predict_for_action(action, "text")
-            },
+            "options": ollama_options(
+                &self.config,
+                num_predict_for_action(action, "text")
+            ),
             "messages": [
                 {
                     "role": "system",
@@ -114,6 +138,37 @@ impl OllamaBackend {
                 {
                     "role": "user",
                     "content": user_prompt_from_text(action, source_app, ocr_text)
+                }
+            ]
+        })
+    }
+
+    fn search_answer_chat_payload(
+        &self,
+        model: &str,
+        query: &str,
+        source_label: &str,
+        ai_overview_text: &str,
+        supporting_sources: &str,
+    ) -> serde_json::Value {
+        json!({
+            "model": model,
+            "stream": false,
+            "keep_alive": self.config.keep_alive,
+            "options": ollama_options(&self.config, 420),
+            "messages": [
+                {
+                    "role": "system",
+                    "content": search_answer_system_prompt()
+                },
+                {
+                    "role": "user",
+                    "content": search_answer_user_prompt(
+                        query,
+                        source_label,
+                        ai_overview_text,
+                        supporting_sources
+                    )
                 }
             ]
         })
@@ -315,13 +370,26 @@ fn default_think_value(thinking_default: &str) -> Option<serde_json::Value> {
 fn num_predict_for_action(action: &visionclip_common::ipc::Action, input_mode: &str) -> u32 {
     match (action, input_mode) {
         (visionclip_common::ipc::Action::SearchWeb, _) => 32,
-        (visionclip_common::ipc::Action::Explain, "text") => 160,
-        (visionclip_common::ipc::Action::Explain, _) => 220,
-        (visionclip_common::ipc::Action::TranslatePtBr, "text") => 180,
-        (visionclip_common::ipc::Action::TranslatePtBr, _) => 240,
+        (visionclip_common::ipc::Action::Explain, "text") => 360,
+        (visionclip_common::ipc::Action::Explain, _) => 480,
+        (visionclip_common::ipc::Action::TranslatePtBr, "text") => 300,
+        (visionclip_common::ipc::Action::TranslatePtBr, _) => 360,
         (visionclip_common::ipc::Action::CopyText, _) => 1024,
         (visionclip_common::ipc::Action::ExtractCode, _) => 1024,
     }
+}
+
+fn ollama_options(config: &InferConfig, num_predict: u32) -> serde_json::Value {
+    let mut options = json!({
+        "temperature": config.temperature,
+        "num_predict": num_predict
+    });
+
+    if config.context_window_tokens > 0 {
+        options["num_ctx"] = json!(config.context_window_tokens);
+    }
+
+    options
 }
 
 pub async fn list_models(base_url: &str) -> Result<Vec<OllamaModelSummary>> {
@@ -600,7 +668,53 @@ mod tests {
             backend.text_chat_payload("gemma4:e2b", &Action::Explain, None, "erro ao abrir");
 
         assert_eq!(image_payload["options"]["num_predict"], json!(32));
-        assert_eq!(text_payload["options"]["num_predict"], json!(160));
+        assert_eq!(text_payload["options"]["num_predict"], json!(360));
+        assert_eq!(text_payload["options"]["num_ctx"], json!(8192));
+    }
+
+    #[tokio::test]
+    async fn search_answer_uses_google_ai_overview_context_payload() {
+        let server = TestServer::spawn(
+            r#"{"message":{"content":"JavaScript é uma linguagem usada para criar interatividade na web."}}"#,
+        );
+        let backend = OllamaBackend::new(InferConfig {
+            base_url: server.base_url.clone(),
+            model: "gemma4:test".into(),
+            keep_alive: "5m".into(),
+            temperature: 0.1,
+            thinking_default: String::new(),
+            ..InferConfig::default()
+        });
+
+        let output = backend
+            .answer_search_from_context(
+                "req-search-answer".into(),
+                "O que é JavaScript?",
+                "Visão geral criada por IA renderizada no Google",
+                "JavaScript é uma linguagem de programação de alto nível para web.",
+                "MDN: JavaScript permite páginas interativas.",
+            )
+            .await
+            .unwrap();
+
+        let requests = server.finish();
+        let json: serde_json::Value = serde_json::from_str(&requests[0].1).unwrap();
+        assert_eq!(
+            output.text,
+            "JavaScript é uma linguagem usada para criar interatividade na web."
+        );
+        assert_eq!(json["model"], "gemma4:test");
+        assert_eq!(json["options"]["num_predict"], json!(420));
+        assert_eq!(json["options"]["num_ctx"], json!(8192));
+        assert_eq!(json["messages"][0]["role"], "system");
+        assert!(json["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("somente o contexto de busca fornecido"));
+        assert!(json["messages"][1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("GOOGLE_AI_OVERVIEW"));
     }
 
     #[test]

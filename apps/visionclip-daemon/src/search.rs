@@ -15,7 +15,7 @@ const AI_OVERVIEW_LABELS: [&str; 8] = [
     "Gerado com IA",
     "AI-generated overview",
 ];
-const AI_OVERVIEW_STOP_MARKERS: [&str; 14] = [
+const AI_OVERVIEW_STOP_MARKERS: [&str; 16] = [
     "As pessoas tambem perguntam",
     "People also ask",
     "Resultados da web",
@@ -30,6 +30,8 @@ const AI_OVERVIEW_STOP_MARKERS: [&str; 14] = [
     "People also search for",
     "Pesquisas relacionadas",
     "Related searches",
+    "Este video explica",
+    "Este vídeo explica",
 ];
 const AI_OVERVIEW_NOISE_LINES: [&str; 12] = [
     "Mostrar mais",
@@ -76,6 +78,12 @@ const DUCKDUCKGO_CHALLENGE_MARKERS: [&str; 4] = [
     "challenge-form",
     "/anomaly.js",
 ];
+const AI_OVERVIEW_SPEECH_MAX_CHARS: usize = 900;
+const AI_OVERVIEW_MAX_SENTENCES: usize = 6;
+const DIRECT_ANSWER_SPEECH_MAX_CHARS: usize = 520;
+const SUMMARY_SPEECH_MAX_CHARS: usize = 700;
+const FOLLOW_UP_SPEECH_MAX_CHARS: usize = 180;
+const SUPPORTING_POINT_MAX_CHARS: usize = 280;
 const WIKIPEDIA_LANGUAGES: [&str; 2] = ["pt", "en"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,7 +204,7 @@ impl SearchEnrichment {
         }
 
         if let Some(summary) = self.summary_text(query) {
-            let summary = truncate_chars(&summary, 180);
+            let summary = truncate_chars(&summary, SUMMARY_SPEECH_MAX_CHARS);
             if let Some(follow_up) = self
                 .related_questions
                 .first()
@@ -206,7 +214,7 @@ impl SearchEnrichment {
                 return Some(format!(
                     "{} Para aprofundar, considere: {}",
                     summary,
-                    truncate_chars(follow_up, 72)
+                    truncate_chars(follow_up, FOLLOW_UP_SPEECH_MAX_CHARS)
                 ));
             }
             return Some(summary);
@@ -215,14 +223,14 @@ impl SearchEnrichment {
         if !self.related_questions.is_empty() {
             return Some(format!(
                 "Pesquisa aberta. Uma pergunta útil para aprofundar é: {}",
-                truncate_chars(&self.related_questions[0], 120)
+                truncate_chars(&self.related_questions[0], FOLLOW_UP_SPEECH_MAX_CHARS)
             ));
         }
 
         if !self.related_searches.is_empty() {
             return Some(format!(
                 "Pesquisa aberta. Um bom próximo termo é: {}",
-                truncate_chars(&self.related_searches[0], 120)
+                truncate_chars(&self.related_searches[0], FOLLOW_UP_SPEECH_MAX_CHARS)
             ));
         }
 
@@ -240,12 +248,12 @@ impl SearchEnrichment {
             .collect::<Vec<_>>()
             .join(" ");
 
-        Some(truncate_chars(&combined, 280))
+        Some(truncate_chars(&combined, SUMMARY_SPEECH_MAX_CHARS))
     }
 
     fn ai_overview_spoken_text(&self, query: &str) -> Option<String> {
         let overview = self.ai_overview.as_ref()?;
-        let synthesis = synthesize_ai_overview(query, overview, 220)?;
+        let synthesis = synthesize_ai_overview(query, overview, AI_OVERVIEW_SPEECH_MAX_CHARS)?;
         Some(format!(
             "Pela visão geral criada por IA do Google: {}",
             normalize_spoken_answer(&synthesis)
@@ -253,21 +261,43 @@ impl SearchEnrichment {
     }
 
     fn spoken_answer_text(&self, query: &str) -> Option<String> {
-        let mut best = None;
-        let mut best_score = 0_i32;
+        let mut candidates = Vec::new();
+        let mut order = 0_usize;
 
         for snippet in &self.snippets {
             for sentence in split_sentences(&snippet.snippet) {
                 let score = score_spoken_sentence(query, &sentence);
-                if score > best_score {
-                    best_score = score;
-                    best = Some(sentence);
+                if score >= 2 {
+                    candidates.push((order, score, sentence));
                 }
+                order += 1;
             }
         }
 
-        let answer = best.filter(|_| best_score >= 2)?;
-        Some(truncate_chars(&normalize_spoken_answer(&answer), 180))
+        if candidates.is_empty() {
+            return None;
+        }
+
+        candidates.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+
+        let mut seen = HashSet::new();
+        let mut selected = candidates
+            .into_iter()
+            .filter(|(_, _, sentence)| seen.insert(ascii_fold(sentence)))
+            .take(4)
+            .map(|(index, _, sentence)| (index, sentence))
+            .collect::<Vec<_>>();
+        selected.sort_by_key(|(index, _)| *index);
+
+        let answer = selected
+            .into_iter()
+            .map(|(_, sentence)| ensure_sentence(&sentence))
+            .collect::<Vec<_>>()
+            .join(" ");
+        Some(truncate_chars(
+            &normalize_spoken_answer(&answer),
+            DIRECT_ANSWER_SPEECH_MAX_CHARS,
+        ))
     }
 
     fn summary_text(&self, query: &str) -> Option<String> {
@@ -313,6 +343,16 @@ impl SearchEnrichment {
         }
 
         points
+    }
+}
+
+pub fn parse_rendered_google_search_text(visible_text: &str) -> SearchEnrichment {
+    let lines = visible_text_lines_from_text(visible_text);
+    SearchEnrichment {
+        ai_overview: extract_ai_overview(&lines),
+        snippets: Vec::new(),
+        related_questions: extract_related_questions(&lines),
+        related_searches: extract_related_searches(&lines),
     }
 }
 
@@ -650,22 +690,52 @@ fn extract_ai_overview(lines: &[String]) -> Option<String> {
 
         let mut collected = Vec::new();
         let mut chars = 0_usize;
+        let mut should_stop = false;
+
+        if let Some(inline_context) = text_after_any_label(line, &AI_OVERVIEW_LABELS) {
+            let (candidate, stop_seen) = trim_at_first_stop_marker(&inline_context);
+            let candidate = normalize_text(&candidate);
+            if !candidate.is_empty() && !is_ai_overview_noise_line(&candidate) {
+                chars += candidate.chars().count();
+                collected.push(candidate);
+            }
+            should_stop = stop_seen;
+        }
+
+        if should_stop {
+            let merged = clean_ai_overview_context(&collected.join(" "));
+            if !merged.is_empty() {
+                return Some(merged);
+            }
+            continue;
+        }
 
         for candidate in lines.iter().skip(index + 1) {
             if candidate.is_empty() || is_ai_overview_label(candidate) {
                 continue;
             }
-            if is_ai_overview_stop_marker(candidate) {
-                break;
+            let (candidate, stop_seen) = trim_at_first_stop_marker(candidate);
+            let candidate = normalize_text(&candidate);
+            if candidate.is_empty() {
+                if stop_seen {
+                    break;
+                }
+                continue;
             }
-            if is_ai_overview_noise_line(candidate) {
+            if is_ai_overview_noise_line(&candidate) {
+                if stop_seen {
+                    break;
+                }
                 continue;
             }
 
             chars += candidate.chars().count();
-            collected.push(candidate.clone());
+            collected.push(candidate);
 
             if collected.len() >= 4 || chars >= 650 {
+                break;
+            }
+            if stop_seen {
                 break;
             }
         }
@@ -967,7 +1037,7 @@ fn supporting_point_from_snippet(item: &SearchSnippet) -> Option<String> {
         format!("{}: {}", item.title, item.snippet)
     };
 
-    let summary = truncate_chars(summary.trim(), 180);
+    let summary = truncate_chars(summary.trim(), SUPPORTING_POINT_MAX_CHARS);
     if summary.is_empty() {
         None
     } else {
@@ -1004,17 +1074,30 @@ fn synthesize_ai_overview(query: &str, overview: &str, max_chars: usize) -> Opti
     let mut selected = scored
         .iter()
         .filter(|(_, score, _)| *score >= 2)
-        .take(3)
+        .take(AI_OVERVIEW_MAX_SENTENCES)
         .map(|(index, _, sentence)| (*index, (*sentence).clone()))
         .collect::<Vec<_>>();
 
     if selected.is_empty() {
         selected = sentences
             .iter()
-            .take(3)
+            .take(AI_OVERVIEW_MAX_SENTENCES)
             .enumerate()
             .map(|(index, sentence)| (index, sentence.clone()))
             .collect();
+    } else if selected.len() < AI_OVERVIEW_MAX_SENTENCES {
+        let mut selected_indexes = selected
+            .iter()
+            .map(|(index, _)| *index)
+            .collect::<HashSet<_>>();
+        for (index, sentence) in sentences.iter().enumerate() {
+            if selected.len() >= AI_OVERVIEW_MAX_SENTENCES {
+                break;
+            }
+            if selected_indexes.insert(index) {
+                selected.push((index, sentence.clone()));
+            }
+        }
     }
 
     selected.sort_by_key(|(index, _)| *index);
@@ -1052,11 +1135,35 @@ fn clean_ai_overview_context(input: &str) -> String {
 }
 
 fn split_sentences(input: &str) -> Vec<String> {
-    input
-        .split(['.', '!', '?'])
-        .map(normalize_text)
-        .filter(|sentence| sentence.chars().count() >= 24)
-        .collect()
+    let mut sentences = Vec::new();
+    let mut current = String::new();
+
+    for (index, ch) in input.char_indices() {
+        current.push(ch);
+        if matches!(ch, '.' | '!' | '?') && is_sentence_boundary(input, index, ch) {
+            let sentence = normalize_text(&current);
+            if sentence.chars().count() >= 24 {
+                sentences.push(sentence);
+            }
+            current.clear();
+        }
+    }
+
+    let sentence = normalize_text(&current);
+    if sentence.chars().count() >= 24 {
+        sentences.push(sentence);
+    }
+
+    sentences
+}
+
+fn is_sentence_boundary(input: &str, index: usize, ch: char) -> bool {
+    let next_index = index + ch.len_utf8();
+    input[next_index..]
+        .chars()
+        .next()
+        .map(|next| next.is_whitespace())
+        .unwrap_or(true)
 }
 
 fn score_spoken_sentence(query: &str, sentence: &str) -> i32 {
@@ -1308,6 +1415,19 @@ fn visible_text_lines(document: &Html) -> Vec<String> {
         .map(normalize_text)
         .filter(|line| !line.is_empty())
         .collect()
+}
+
+fn visible_text_lines_from_text(input: &str) -> Vec<String> {
+    input
+        .lines()
+        .flat_map(expand_inline_search_markers)
+        .map(|line| normalize_text(&line))
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+fn expand_inline_search_markers(line: &str) -> Vec<String> {
+    vec![line.to_string()]
 }
 
 fn first_text_in(container: &scraper::ElementRef<'_>, selector: &Selector) -> Option<String> {
@@ -1609,6 +1729,36 @@ fn is_ai_overview_noise_line(line: &str) -> bool {
         || normalized.starts_with("generative ai")
 }
 
+fn text_after_any_label(line: &str, labels: &[&str]) -> Option<String> {
+    let folded_line = ascii_fold(line);
+    labels.iter().find_map(|label| {
+        let folded_label = ascii_fold(label);
+        let start = folded_line.find(&folded_label)?;
+        let char_end = folded_line[..start].chars().count() + folded_label.chars().count();
+        Some(line.chars().skip(char_end).collect::<String>())
+    })
+}
+
+fn trim_at_first_stop_marker(input: &str) -> (String, bool) {
+    let folded_input = ascii_fold(input);
+    let earliest = AI_OVERVIEW_STOP_MARKERS
+        .iter()
+        .chain(RELATED_QUESTIONS_LABELS.iter())
+        .chain(RELATED_SEARCHES_LABELS.iter())
+        .filter_map(|marker| {
+            let folded_marker = ascii_fold(marker);
+            folded_input.find(&folded_marker)
+        })
+        .min();
+
+    let Some(byte_index) = earliest else {
+        return (input.to_string(), false);
+    };
+
+    let char_index = folded_input[..byte_index].chars().count();
+    (input.chars().take(char_index).collect(), true)
+}
+
 fn matches_any_label(line: &str, labels: &[&str]) -> bool {
     let normalized = ascii_fold(line);
     labels
@@ -1692,6 +1842,318 @@ mod tests {
         assert!(overview.contains("páginas interativas"));
         assert!(!overview.contains("Mostrar mais"));
         assert!(!overview.contains("mistakes"));
+    }
+
+    #[test]
+    fn rendered_google_search_text_extracts_inline_ai_overview() {
+        let visible_text = "Google Search AI Overview JavaScript é uma linguagem de programação usada para criar páginas web interativas. Ela também pode rodar no servidor com Node.js. People also ask What is JavaScript used for?";
+
+        let enrichment = parse_rendered_google_search_text(visible_text);
+
+        let overview = enrichment.ai_overview.expect("rendered AI overview");
+        assert!(overview.contains("JavaScript é uma linguagem de programação"));
+        assert!(overview.contains("Node.js"));
+        assert!(!overview.contains("People also ask"));
+    }
+
+    #[test]
+    fn rendered_google_search_text_extracts_print_layout_ai_overview() {
+        let visible_text = r#"
+            O que é JavaScript?
+            Modo IA Tudo Imagens Vídeos
+            Visão geral criada por IA
+            JavaScript é uma linguagem de programação de alto nível, interpretada e dinâmica,
+            essencial para o desenvolvimento web. Ela permite criar páginas interativas, animações,
+            validação de formulários e atualizações de conteúdo em tempo real sem recarregar a
+            página, rodando tanto no navegador quanto no servidor com node.js.
+            Este vídeo explica o que é JavaScript e como ele torna a internet dinâmica:
+            DESCUBRA O QUE É JAVASCRIPT AGORA MESMO!
+        "#;
+
+        let enrichment = parse_rendered_google_search_text(visible_text);
+
+        let overview = enrichment.ai_overview.expect("rendered AI overview");
+        assert!(overview.contains("linguagem de programação de alto nível"));
+        assert!(overview.contains("node.js"));
+        assert!(!overview.contains("Este vídeo explica"));
+        assert!(!overview.contains("DESCUBRA"));
+    }
+
+    #[test]
+    fn ai_overview_spoken_text_handles_50_diverse_prompts() {
+        let cases = [
+            (
+                "O que é inflação?",
+                "Inflação é o aumento generalizado e persistente dos preços em uma economia. Ela reduz o poder de compra da moeda ao longo do tempo.",
+                "inflação",
+            ),
+            (
+                "Como funciona a taxa Selic?",
+                "A taxa Selic é a taxa básica de juros da economia brasileira. Ela influencia crédito, investimentos e controle da inflação.",
+                "Selic",
+            ),
+            (
+                "O que é PIB?",
+                "PIB significa Produto Interno Bruto. Ele mede o valor total de bens e serviços finais produzidos por uma economia em determinado período.",
+                "Produto Interno Bruto",
+            ),
+            (
+                "O que é renda fixa?",
+                "Renda fixa é uma classe de investimentos com regras de remuneração conhecidas antes da aplicação. Exemplos comuns incluem Tesouro Direto, CDBs e debêntures.",
+                "Renda fixa",
+            ),
+            (
+                "O que são juros compostos?",
+                "Juros compostos são juros calculados sobre o valor inicial e também sobre juros acumulados. Por isso, o crescimento tende a acelerar com o tempo.",
+                "Juros compostos",
+            ),
+            (
+                "Explique equação quadrática",
+                "Uma equação quadrática é uma equação polinomial de segundo grau. Ela geralmente aparece na forma ax² + bx + c = 0.",
+                "segundo grau",
+            ),
+            (
+                "O que é derivada em matemática?",
+                "A derivada mede a taxa de variação instantânea de uma função. Ela é muito usada para estudar inclinação, velocidade e otimização.",
+                "derivada",
+            ),
+            (
+                "O que é integral?",
+                "A integral representa acumulação de quantidades ou área sob uma curva. Ela é uma ferramenta central do cálculo.",
+                "integral",
+            ),
+            (
+                "O que é probabilidade?",
+                "Probabilidade é uma medida numérica da chance de um evento acontecer. Ela varia de zero a um ou de zero a cem por cento.",
+                "Probabilidade",
+            ),
+            (
+                "O que é álgebra linear?",
+                "Álgebra linear estuda vetores, matrizes, espaços vetoriais e transformações lineares. Ela é base para computação gráfica, IA e ciência de dados.",
+                "Álgebra linear",
+            ),
+            (
+                "Quem foi Van Gogh?",
+                "Vincent van Gogh foi um pintor pós-impressionista neerlandês. Ele é conhecido por obras expressivas como A Noite Estrelada.",
+                "van Gogh",
+            ),
+            (
+                "O que foi o Renascimento?",
+                "O Renascimento foi um movimento cultural europeu entre os séculos XIV e XVI. Ele valorizou humanismo, ciência, artes e herança clássica.",
+                "Renascimento",
+            ),
+            (
+                "O que é impressionismo?",
+                "Impressionismo foi um movimento artístico do século XIX. Ele priorizava luz, cor e impressões visuais momentâneas.",
+                "Impressionismo",
+            ),
+            (
+                "Quem foi Frida Kahlo?",
+                "Frida Kahlo foi uma artista mexicana conhecida por autorretratos intensos. Sua obra aborda identidade, dor, política e cultura mexicana.",
+                "Frida Kahlo",
+            ),
+            (
+                "O que é arte barroca?",
+                "A arte barroca é marcada por drama, movimento, contraste e ornamentação. Ela floresceu na Europa e nas Américas entre os séculos XVII e XVIII.",
+                "barroca",
+            ),
+            (
+                "O que é democracia?",
+                "Democracia é um sistema político em que o poder deriva do povo. Ela pode envolver eleições, representação, direitos e participação cidadã.",
+                "Democracia",
+            ),
+            (
+                "O que é separação dos poderes?",
+                "Separação dos poderes é a divisão entre funções legislativa, executiva e judiciária. O objetivo é limitar abusos e criar mecanismos de controle.",
+                "poderes",
+            ),
+            (
+                "Quem foi Nelson Mandela?",
+                "Nelson Mandela foi um líder sul-africano contra o apartheid. Ele se tornou presidente da África do Sul e símbolo de reconciliação.",
+                "Mandela",
+            ),
+            (
+                "O que é geopolítica?",
+                "Geopolítica analisa relações de poder entre Estados, territórios, recursos e estratégias internacionais. Ela conecta geografia e política.",
+                "Geopolítica",
+            ),
+            (
+                "O que é constituição?",
+                "Constituição é o conjunto de normas fundamentais de um Estado. Ela define instituições, direitos, deveres e limites do poder público.",
+                "Constituição",
+            ),
+            (
+                "O que é budismo?",
+                "Budismo é uma tradição religiosa e filosófica baseada nos ensinamentos atribuídos a Siddhartha Gautama. Ele enfatiza sofrimento, impermanência e caminho de libertação.",
+                "Budismo",
+            ),
+            (
+                "O que é cristianismo?",
+                "Cristianismo é uma religião abraâmica centrada na vida e nos ensinamentos de Jesus Cristo. É uma das maiores religiões do mundo.",
+                "Cristianismo",
+            ),
+            (
+                "O que é islamismo?",
+                "Islamismo, ou islã, é uma religião monoteísta baseada no Alcorão e nos ensinamentos do profeta Maomé. Seus seguidores são chamados muçulmanos.",
+                "islã",
+            ),
+            (
+                "O que é hinduísmo?",
+                "Hinduísmo é um conjunto diverso de tradições religiosas originadas no subcontinente indiano. Inclui conceitos como dharma, karma e moksha.",
+                "Hinduísmo",
+            ),
+            (
+                "O que é judaísmo?",
+                "Judaísmo é uma religião monoteísta ligada ao povo judeu e à Torá. Ele influenciou fortemente outras tradições abraâmicas.",
+                "Judaísmo",
+            ),
+            (
+                "Quem foi Sócrates?",
+                "Sócrates foi um filósofo grego clássico. Ele é conhecido pelo método socrático e por influenciar profundamente Platão e a filosofia ocidental.",
+                "Sócrates",
+            ),
+            (
+                "Quem foi Rousseau?",
+                "Jean-Jacques Rousseau foi um filósofo iluminista genebrino. Ele escreveu sobre contrato social, educação e desigualdade.",
+                "Rousseau",
+            ),
+            (
+                "Quem foi Nietzsche?",
+                "Friedrich Nietzsche foi um filósofo alemão do século XIX. Sua obra criticou moralidade tradicional, religião e cultura ocidental.",
+                "Nietzsche",
+            ),
+            (
+                "O que é existencialismo?",
+                "Existencialismo é uma corrente filosófica que enfatiza liberdade, responsabilidade e sentido da existência humana. Sartre e Camus são nomes associados ao tema.",
+                "Existencialismo",
+            ),
+            (
+                "O que é estoicismo?",
+                "Estoicismo é uma escola filosófica antiga que valoriza virtude, autocontrole e aceitação do que não depende de nós.",
+                "Estoicismo",
+            ),
+            (
+                "Quem foi Machado de Assis?",
+                "Machado de Assis foi um escritor brasileiro. Ele é considerado um dos maiores nomes da literatura em língua portuguesa.",
+                "Machado de Assis",
+            ),
+            (
+                "Quem foi Clarice Lispector?",
+                "Clarice Lispector foi uma escritora brasileira nascida na Ucrânia. Sua obra é conhecida pela introspecção e inovação narrativa.",
+                "Clarice Lispector",
+            ),
+            (
+                "Quem foi George Orwell?",
+                "George Orwell foi um escritor e jornalista britânico. Ele é conhecido por obras como 1984 e A Revolução dos Bichos.",
+                "George Orwell",
+            ),
+            (
+                "Quem foi Jane Austen?",
+                "Jane Austen foi uma romancista inglesa. Seus livros analisam relações sociais, casamento e costumes da Inglaterra georgiana.",
+                "Jane Austen",
+            ),
+            (
+                "Quem foi Dostoiévski?",
+                "Fiódor Dostoiévski foi um escritor russo. Seus romances exploram psicologia, moralidade, fé e conflito humano.",
+                "Dostoiévski",
+            ),
+            (
+                "O que é Google?",
+                "Google é uma empresa de tecnologia conhecida por seu mecanismo de busca. Ela também atua em publicidade, nuvem, Android, IA e serviços digitais.",
+                "Google",
+            ),
+            (
+                "O que é Microsoft?",
+                "Microsoft é uma empresa de tecnologia fundada em 1975. Ela desenvolve Windows, Office, Azure, Xbox e ferramentas para desenvolvedores.",
+                "Microsoft",
+            ),
+            (
+                "O que é Tesla?",
+                "Tesla é uma empresa conhecida por veículos elétricos, baterias e soluções de energia. Ela também desenvolve software automotivo e sistemas de assistência ao motorista.",
+                "Tesla",
+            ),
+            (
+                "O que é OpenAI?",
+                "OpenAI é uma organização de pesquisa e desenvolvimento em inteligência artificial. Ela cria modelos de linguagem, ferramentas generativas e APIs de IA.",
+                "OpenAI",
+            ),
+            (
+                "O que é Nvidia?",
+                "Nvidia é uma empresa de semicondutores conhecida por GPUs. Seus chips são amplamente usados em jogos, computação científica e inteligência artificial.",
+                "Nvidia",
+            ),
+            (
+                "O que é JavaScript?",
+                "JavaScript é uma linguagem de programação usada principalmente para criar interatividade em páginas web. Também é usada no servidor com Node.js.",
+                "JavaScript",
+            ),
+            (
+                "O que é Rust?",
+                "Rust é uma linguagem de programação focada em segurança de memória, desempenho e concorrência. Ela evita muitas classes de erros sem usar coletor de lixo.",
+                "Rust",
+            ),
+            (
+                "O que é Linux?",
+                "Linux é uma família de sistemas operacionais baseada no kernel Linux. Ele é usado em servidores, desktops, dispositivos embarcados e celulares.",
+                "Linux",
+            ),
+            (
+                "O que é Docker?",
+                "Docker é uma plataforma para empacotar e executar aplicações em contêineres. Ele ajuda a padronizar ambientes de desenvolvimento e produção.",
+                "Docker",
+            ),
+            (
+                "O que é Kubernetes?",
+                "Kubernetes é uma plataforma de orquestração de contêineres. Ela automatiza implantação, escalabilidade e operação de aplicações distribuídas.",
+                "Kubernetes",
+            ),
+            (
+                "O que é Git?",
+                "Git é um sistema de controle de versão distribuído. Ele permite rastrear mudanças no código e colaborar em projetos de software.",
+                "Git",
+            ),
+            (
+                "O que é VS Code?",
+                "Visual Studio Code é um editor de código da Microsoft. Ele oferece extensões, depuração, terminal integrado e suporte a várias linguagens.",
+                "Visual Studio Code",
+            ),
+            (
+                "O que é Blender?",
+                "Blender é um software livre para modelagem, animação, renderização e composição 3D. Ele é usado em arte, jogos e produção audiovisual.",
+                "Blender",
+            ),
+            (
+                "O que é Figma?",
+                "Figma é uma ferramenta de design de interfaces baseada na web. Ela permite colaboração em tempo real em protótipos e sistemas de design.",
+                "Figma",
+            ),
+            (
+                "O que é LibreOffice?",
+                "LibreOffice é uma suíte de escritório livre e de código aberto. Ela inclui editor de texto, planilhas, apresentações e outras ferramentas.",
+                "LibreOffice",
+            ),
+        ];
+
+        assert_eq!(cases.len(), 50);
+
+        for (query, overview, expected) in cases {
+            let enrichment = SearchEnrichment {
+                ai_overview: Some(format!("{overview} Mostrar mais Feedback")),
+                snippets: Vec::new(),
+                related_questions: Vec::new(),
+                related_searches: Vec::new(),
+            };
+
+            let spoken = enrichment.spoken_text(query).expect("spoken text");
+            assert!(
+                ascii_fold(&spoken).contains(&ascii_fold(expected)),
+                "query `{query}` did not include expected `{expected}` in `{spoken}`"
+            );
+            assert!(spoken.starts_with("Pela visão geral criada por IA do Google"));
+            assert!(spoken.chars().count() <= AI_OVERVIEW_SPEECH_MAX_CHARS + 48);
+            assert!(!spoken.contains("Mostrar mais"));
+            assert!(!spoken.contains("Feedback"));
+        }
     }
 
     #[test]
@@ -1872,7 +2334,30 @@ mod tests {
 
         assert!(spoken.starts_with("Pela visão geral criada por IA do Google"));
         assert!(spoken.contains("JavaScript é uma linguagem de programação"));
-        assert!(spoken.chars().count() <= 280);
+        assert!(spoken.chars().count() <= AI_OVERVIEW_SPEECH_MAX_CHARS + 48);
+    }
+
+    #[test]
+    fn spoken_text_keeps_extended_google_ai_overview_for_tts() {
+        let enrichment = SearchEnrichment {
+            ai_overview: Some(
+                "JavaScript é uma linguagem de programação usada para criar interatividade em páginas web. Ela permite validar formulários, atualizar conteúdo em tempo real e responder a ações do usuário sem recarregar a página. Também pode ser usada no servidor com runtimes como Node.js para criar APIs e ferramentas de linha de comando. Em aplicações modernas, JavaScript trabalha com HTML e CSS para formar a base da experiência web. O ecossistema inclui frameworks, bibliotecas e gerenciadores de pacotes usados em projetos grandes e pequenos. Para estudar o tema, é útil praticar fundamentos como variáveis, funções, eventos, objetos, módulos e chamadas assíncronas.".into(),
+            ),
+            snippets: Vec::new(),
+            related_questions: Vec::new(),
+            related_searches: Vec::new(),
+        };
+
+        let spoken = enrichment
+            .spoken_text("O que é JavaScript?")
+            .expect("spoken text");
+
+        assert!(spoken.contains("validar formulários"));
+        assert!(spoken.contains("Node.js"));
+        assert!(spoken.contains("frameworks"));
+        assert!(spoken.contains("chamadas assíncronas"));
+        assert!(spoken.chars().count() > 420);
+        assert!(spoken.chars().count() <= AI_OVERVIEW_SPEECH_MAX_CHARS + 48);
     }
 
     #[test]
@@ -1893,7 +2378,7 @@ mod tests {
             .spoken_text("Quando foi fundada a NASA?")
             .expect("spoken text");
         assert!(spoken.contains("29 de julho de 1958"));
-        assert!(spoken.chars().count() <= 180);
+        assert!(spoken.chars().count() <= DIRECT_ANSWER_SPEECH_MAX_CHARS);
     }
 
     #[test]
@@ -1914,7 +2399,7 @@ mod tests {
             .spoken_text("Quem foi Rousseau?")
             .expect("spoken text");
         assert!(spoken.contains("Jean-Jacques Rousseau foi"));
-        assert!(spoken.chars().count() <= 180);
+        assert!(spoken.chars().count() <= DIRECT_ANSWER_SPEECH_MAX_CHARS);
     }
 
     #[test]

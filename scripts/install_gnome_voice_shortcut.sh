@@ -64,9 +64,48 @@ fi
 cat >"$WRAPPER_PATH" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-mkdir -p "\${HOME}/.local/state/visionclip"
-printf '%s visionclip voice shortcut invoked\n' "\$(date --iso-8601=seconds)" >>"\${HOME}/.local/state/visionclip/voice-shortcut.log"
-exec "$VISIONCLIP_BIN" --voice-agent --speak "\$@"
+
+LOG_DIR="\${HOME}/.local/state/visionclip"
+LOG_FILE="\${LOG_DIR}/voice-shortcut.log"
+mkdir -p "\$LOG_DIR"
+
+import_user_env_var() {
+    local key="\$1"
+    if [[ -n "\${!key:-}" ]]; then
+        return
+    fi
+    if ! command -v systemctl >/dev/null 2>&1; then
+        return
+    fi
+
+    local line
+    while IFS= read -r line; do
+        case "\$line" in
+            "\${key}="*)
+                export "\$line"
+                return
+                ;;
+        esac
+    done < <(systemctl --user show-environment 2>/dev/null || true)
+}
+
+for key in DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS; do
+    import_user_env_var "\$key"
+done
+
+export PATH="\${PATH:-\${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin}"
+
+{
+    printf '%s visionclip voice shortcut invoked\n' "\$(date --iso-8601=seconds)"
+    printf 'binary=%s\n' "$VISIONCLIP_BIN"
+    printf 'env DISPLAY=%s WAYLAND_DISPLAY=%s XDG_SESSION_TYPE=%s XDG_CURRENT_DESKTOP=%s XDG_RUNTIME_DIR=%s\n' "\${DISPLAY:-}" "\${WAYLAND_DISPLAY:-}" "\${XDG_SESSION_TYPE:-}" "\${XDG_CURRENT_DESKTOP:-}" "\${XDG_RUNTIME_DIR:-}"
+} >>"\$LOG_FILE"
+
+if [[ -t 1 || -t 2 ]]; then
+    exec "$VISIONCLIP_BIN" --voice-agent --speak "\$@"
+else
+    exec "$VISIONCLIP_BIN" --voice-agent --speak "\$@" >>"\$LOG_FILE" 2>&1
+fi
 EOF
 chmod +x "$WRAPPER_PATH"
 
@@ -89,10 +128,13 @@ gsettings set "$SECONDARY_CUSTOM_KEYBINDING_SCHEMA" command "$WRAPPER_PATH"
 gsettings set "$SECONDARY_CUSTOM_KEYBINDING_SCHEMA" binding "$SECONDARY_SHORTCUT_BINDING"
 
 if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS PATH >/dev/null 2>&1 || true
     systemctl --user start org.gnome.SettingsDaemon.MediaKeys.target >/dev/null 2>&1 || true
+    systemctl --user restart org.gnome.SettingsDaemon.MediaKeys.service >/dev/null 2>&1 || true
 fi
 
 echo "Atalho do VisionClip configurado."
 echo "Binding: $RESOLVED_BINDING"
 echo "Fallback binding: $SECONDARY_SHORTCUT_BINDING"
 echo "Command: $WRAPPER_PATH"
+echo "Log: ${HOME}/.local/state/visionclip/voice-shortcut.log"

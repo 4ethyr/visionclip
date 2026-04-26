@@ -197,6 +197,7 @@ default_action = "explain"
 log_level = "info"
 
 [capture]
+# auto detecta portal, GNOME Shell D-Bus, gnome-screenshot, grim ou maim conforme a sessao.
 backend = "auto"
 prefer_portal = true
 capture_timeout_ms = $CAPTURE_TIMEOUT_MS
@@ -209,6 +210,7 @@ ocr_model = "$escaped_ocr_model_name"
 keep_alive = "15m"
 temperature = 0.1
 thinking_default = ""
+context_window_tokens = 8192
 
 [search]
 enabled = true
@@ -216,6 +218,9 @@ base_url = "https://www.google.com/search"
 request_timeout_ms = 10000
 max_results = 3
 open_browser = true
+rendered_ai_overview_listener = true
+rendered_ai_overview_wait_ms = 12000
+rendered_ai_overview_poll_interval_ms = 3000
 
 [audio]
 enabled = true
@@ -224,6 +229,8 @@ base_url = "http://$PIPER_HOST:$PIPER_PORT"
 default_voice = ""
 speak_actions = ["TranslatePtBr", "Explain", "SearchWeb", "OpenApplication"]
 player_command = "$escaped_player_command"
+request_timeout_ms = 60000
+playback_timeout_ms = 120000
 
 [voice]
 enabled = $( [[ "$VOICE_ENABLED" == "1" ]] && echo true || echo false )

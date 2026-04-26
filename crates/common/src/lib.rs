@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod capture_discovery;
 pub mod config;
 pub mod error;
 pub mod intent;
@@ -8,6 +9,11 @@ pub mod router;
 
 pub use actions::{
     builtin_action_specs, find_action_spec, ActionPermission, ActionSpec, RiskLevel,
+};
+pub use capture_discovery::{
+    discover_capture_backends, discover_rendered_capture_backends,
+    likely_gnome_shell_screenshot_available, summarize_capture_backends, CaptureBackendDescriptor,
+    CaptureBackendKind,
 };
 pub use config::AppConfig;
 pub use error::{AppError, AppResult};
