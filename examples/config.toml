@@ -3,6 +3,7 @@ default_action = "translate_ptbr"
 log_level = "info"
 
 [capture]
+# auto detecta portal, GNOME Shell D-Bus, gnome-screenshot, grim ou maim conforme a sessao.
 backend = "auto"
 prefer_portal = true
 capture_timeout_ms = 30000
@@ -15,6 +16,7 @@ ocr_model = "gemma4:e2b"
 keep_alive = "15m"
 temperature = 0.1
 thinking_default = ""
+context_window_tokens = 8192
 
 [search]
 enabled = true
@@ -24,6 +26,9 @@ fallback_base_url = "https://html.duckduckgo.com/html/"
 request_timeout_ms = 10000
 max_results = 3
 open_browser = true
+rendered_ai_overview_listener = true
+rendered_ai_overview_wait_ms = 12000
+rendered_ai_overview_poll_interval_ms = 3000
 
 [audio]
 enabled = true
@@ -32,6 +37,8 @@ base_url = "http://127.0.0.1:5000"
 default_voice = ""
 speak_actions = ["TranslatePtBr", "Explain", "SearchWeb", "OpenApplication"]
 player_command = "pw-play"
+request_timeout_ms = 60000
+playback_timeout_ms = 120000
 
 [voice]
 enabled = false

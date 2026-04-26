@@ -12,7 +12,7 @@ VisionClip é um serviço local para Linux que transforma screenshots em ações
 - `SearchWeb` agora gera a query, tenta enriquecer a resposta com scrape best-effort do Google e pode copiar um resumo inicial para o clipboard antes de abrir o navegador.
 - Integração com Ollama via `/api/chat`, com retry automático quando o modelo não suporta `think`.
 - Integração com Piper HTTP, com fallback de playback entre `paplay`, `pw-play` e `aplay`.
-- Captura automática com resolução de backend via config: portal com `gdbus`, `gnome-screenshot`, `grim` e `maim`.
+- Captura automática com resolução de backend via config: portal com `gdbus`, GNOME Shell Screenshot via D-Bus, `gnome-screenshot`, `grim` e `maim`.
 - Configuração local em `~/.config/visionclip/config.toml`.
 
 ## Arquitetura resumida
@@ -35,7 +35,8 @@ Nesta etapa, o projeto passa a validar o fluxo principal com `gemma4:e2b` tanto 
 - `gemma4:e2b`
 - Piper HTTP para áudio real, se você quiser TTS fora dos mocks de teste
 - Ferramentas nativas de desktop como `xdg-open`, `notify-send` e algum player de áudio suportado
-- Para captura automática: `gdbus`, `gnome-screenshot`, `grim` ou `maim`
+- Para captura automática: `gdbus` com portal/serviço nativo do desktop, ou ferramentas como `gnome-screenshot`, `grim` ou `maim`
+- Para observar a AI Overview renderizada no navegador em GNOME/Kali: GNOME Shell Screenshot via D-Bus, `gnome-screenshot`, `grim` ou `maim`
 
 ## Quick Start
 
@@ -108,6 +109,8 @@ bash scripts/install_gnome_voice_shortcut.sh '<Super>F12'
 
 O instalador configura `Super+F12` como atalho principal e `Super+Shift+F12` como fallback para o mesmo wrapper. Ao acionar o atalho, o wrapper executa `visionclip --voice-agent --speak`, abre a overlay de escuta e grava o comando de voz.
 
+O wrapper importa o ambiente gráfico do `systemd --user` antes de iniciar o binário, para que `DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR` e o barramento D-Bus estejam disponíveis quando o comando vier do GNOME. Logs de acionamento ficam em `~/.local/state/visionclip/voice-shortcut.log`.
+
 Exemplos de teste sem microfone:
 
 ```bash
@@ -151,9 +154,9 @@ Use `visionclip --doctor` para validar especificamente o fluxo operacional do cl
 - wrapper `~/.local/bin/visionclip-voice-search`
 - bindings GNOME `Super+F12` e `Super+Shift+F12`
 
-Use `visionclip-config models` para listar os modelos disponíveis no Ollama e ajustar `infer.model` com o nome exato do runtime. Nesta etapa, o default do projeto usa `model = "gemma4:e2b"`, `ocr_model = "gemma4:e2b"` e `thinking_default = ""`.
+Use `visionclip-config models` para listar os modelos disponíveis no Ollama e ajustar `infer.model` com o nome exato do runtime. Nesta etapa, o default do projeto usa `model = "gemma4:e2b"`, `ocr_model = "gemma4:e2b"`, `thinking_default = ""` e `context_window_tokens = 8192`.
 
-Quando nenhum `--image` ou `--capture-command` é informado, o launcher usa `capture.backend`. Em `auto`, o fluxo tenta portal com `gdbus` quando `prefer_portal = true` e, se necessário, cai para `gnome-screenshot`, `grim` ou `maim`, conforme a sessão e os binários disponíveis.
+Quando nenhum `--image` ou `--capture-command` é informado, o launcher usa `capture.backend`. Em `auto`, o fluxo tenta portal com `gdbus` quando `prefer_portal = true` e, se necessário, cai para GNOME Shell Screenshot via D-Bus, `gnome-screenshot`, `grim` ou `maim`, conforme a sessão e os mecanismos disponíveis no host.
 
 Em desktops Wayland via portal, a captura pode depender de uma confirmação explícita do usuário na janela do `xdg-desktop-portal`. Se esse diálogo não for concluído dentro do timeout configurado, o launcher retorna erro com o resumo dos backends de screenshot detectados para a sessão atual.
 
@@ -163,11 +166,21 @@ Com Piper HTTP ativo, o daemon pode responder em áudio para `TranslatePtBr`, `E
 
 Para `SearchWeb`, o daemon tenta falar o resumo enriquecido da busca quando esse material estiver disponivel; caso contrario, ele apenas confirma a abertura da pesquisa.
 
+O tempo de síntese e reprodução do TTS é configurável em `[audio]`. O padrão atual permite respostas mais longas sem cortar a fala antes do final:
+
+```toml
+[audio]
+request_timeout_ms = 60000
+playback_timeout_ms = 120000
+```
+
 ## Busca enriquecida
 
-O VisionClip tenta enriquecer `SearchWeb` com uma leitura inicial dos resultados do Google. Esse scrape e best-effort: quando houver bloco util equivalente a AI Overview/Visão geral criada por IA ou snippets organicos iniciais, o daemon monta uma síntese coesa para clipboard e TTS.
+O VisionClip tenta enriquecer `SearchWeb` com uma leitura inicial dos resultados do Google. Esse scrape e best-effort: quando houver bloco util equivalente a AI Overview/Visão geral criada por IA ou snippets organicos iniciais, o daemon monta contexto para clipboard e TTS.
 
-Quando uma Visão geral criada por IA estiver disponível no HTML retornado, ela é tratada como contexto auxiliar gerado pelo Google/Gemini, não como verdade final. O daemon limpa ruído de interface, gera uma síntese própria, inclui o contexto capturado e lista fontes orgânicas iniciais para validação. Se a busca falhar, expirar, exigir CAPTCHA/autenticação ou o Google não devolver HTML útil, o fluxo cai de volta para o comportamento básico de abrir a consulta no navegador.
+Quando uma Visão geral criada por IA estiver disponível no HTML retornado, ela é tratada como contexto auxiliar gerado pelo Google/Gemini, não como verdade final. O daemon limpa ruído de interface, envia o texto extraído ao modelo local, gera uma resposta fundamentada somente nesse contexto, inclui o contexto capturado e lista fontes orgânicas iniciais para validação. Se a busca falhar, expirar, exigir CAPTCHA/autenticação ou o Google não devolver HTML útil, o fluxo cai de volta para o comportamento básico de abrir a consulta no navegador.
+
+Se o Google renderizar a Visão geral criada por IA apenas dentro do navegador, o daemon inicia um listener curto após abrir a busca. Esse listener captura somente a tela visível da sessão do usuário com GNOME Shell Screenshot via D-Bus, `gnome-screenshot`, `grim` ou `maim`, aplica OCR local, extrai o bloco renderizado, pede ao modelo local uma resposta baseada nesse texto e fala essa resposta ao usuário. O arquivo temporário da captura fica em `XDG_RUNTIME_DIR/visionclip/rendered-search`, não em `/tmp`.
 
 As opcoes desse fluxo ficam em `[search]` na configuracao:
 
@@ -180,6 +193,9 @@ fallback_base_url = "https://html.duckduckgo.com/html/"
 request_timeout_ms = 10000
 max_results = 3
 open_browser = true
+rendered_ai_overview_listener = true
+rendered_ai_overview_wait_ms = 12000
+rendered_ai_overview_poll_interval_ms = 3000
 ```
 
 Exemplo de inicialização do Piper HTTP:
