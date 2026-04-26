@@ -5,8 +5,9 @@ mod search;
 use crate::linux_apps::open_application;
 use crate::search::{GoogleSearchClient, SearchEnrichment};
 use anyhow::{Context, Result};
-use std::{path::PathBuf, sync::Arc, time::Instant};
+use std::{future::Future, path::PathBuf, sync::Arc, time::Instant};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use visionclip_common::{
     read_message, write_message, Action, AppConfig, ApplicationLaunchJob, CaptureJob,
@@ -50,6 +51,7 @@ async fn main() -> Result<()> {
         } else {
             None
         },
+        tts_gate: TtsPlaybackGate::default(),
     });
 
     loop {
@@ -69,6 +71,19 @@ struct AppState {
     infer: OllamaBackend,
     search: Option<GoogleSearchClient>,
     piper: Option<PiperHttpClient>,
+    tts_gate: TtsPlaybackGate,
+}
+
+#[derive(Clone, Default)]
+struct TtsPlaybackGate {
+    lock: Arc<Mutex<()>>,
+}
+
+impl TtsPlaybackGate {
+    async fn run<T>(&self, operation: impl Future<Output = T>) -> T {
+        let _guard = self.lock.lock().await;
+        operation.await
+    }
 }
 
 async fn handle_connection(mut stream: UnixStream, state: Arc<AppState>) -> Result<()> {
@@ -131,6 +146,7 @@ async fn process_open_application(
     let message = result.message;
     let (tts_enqueue_ms, spoken) = enqueue_tts(
         state.piper.as_ref(),
+        &state.tts_gate,
         request_id,
         "OpenApplication",
         &message,
@@ -186,6 +202,7 @@ async fn process_open_url(state: &AppState, job: UrlOpenJob) -> Result<JobResult
     };
     let (tts_enqueue_ms, spoken) = enqueue_tts(
         state.piper.as_ref(),
+        &state.tts_gate,
         request_id,
         "OpenUrl",
         &message,
@@ -432,6 +449,7 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
             let speech_text = sanitize_for_speech(&job.action, &cleaned);
             let (tts_enqueue_ms, spoken) = enqueue_tts(
                 state.piper.as_ref(),
+                &state.tts_gate,
                 request_id,
                 action_name,
                 &speech_text,
@@ -617,6 +635,7 @@ async fn execute_search_query(
     );
     let (tts_enqueue_ms, spoken) = enqueue_tts(
         state.piper.as_ref(),
+        &state.tts_gate,
         request_id,
         Action::SearchWeb.as_str(),
         &tts_text,
@@ -663,6 +682,7 @@ fn spawn_rendered_ai_overview_listener(
         infer: state.infer.clone(),
     };
     let piper = state.piper.clone();
+    let tts_gate = state.tts_gate.clone();
 
     tokio::spawn(async move {
         let started_at = Instant::now();
@@ -706,6 +726,7 @@ fn spawn_rendered_ai_overview_listener(
                 let speech_text = sanitize_for_speech(&Action::SearchWeb, &speech_text);
                 let (tts_enqueue_ms, spoken) = enqueue_tts(
                     piper.as_ref(),
+                    &tts_gate,
                     job.request_id,
                     "SearchWebRenderedOverview",
                     &speech_text,
@@ -887,6 +908,7 @@ fn search_browser_fallback_speech(query: &str, search_blocked: bool) -> String {
 
 fn enqueue_tts(
     piper: Option<&PiperHttpClient>,
+    tts_gate: &TtsPlaybackGate,
     request_id: uuid::Uuid,
     action_name: &str,
     text: &str,
@@ -913,31 +935,44 @@ fn enqueue_tts(
 
     let enqueue_started_at = Instant::now();
     let action_name = action_name.to_string();
+    let tts_gate = tts_gate.clone();
 
     tokio::spawn(async move {
-        let tts_started_at = Instant::now();
-        match piper.synthesize(&text, None).await {
-            Ok(wav) => {
-                let tts_synthesize_ms = elapsed_ms(tts_started_at);
-                let dispatch_started_at = Instant::now();
-                if let Err(error) = piper.play_wav_detached(&wav) {
-                    warn!(?error, request_id = %request_id, action = %action_name, "failed to dispatch synthesized audio");
-                    return;
+        tts_gate
+            .run(async move {
+                let tts_started_at = Instant::now();
+                match piper.synthesize(&text, None).await {
+                    Ok(wav) => {
+                        let tts_synthesize_ms = elapsed_ms(tts_started_at);
+                        let playback_started_at = Instant::now();
+                        let piper_for_playback = piper.clone();
+                        match tokio::task::spawn_blocking(move || piper_for_playback.play_wav(&wav))
+                            .await
+                        {
+                            Ok(Ok(())) => {
+                                info!(
+                                    request_id = %request_id,
+                                    action = %action_name,
+                                    output_chars = text.chars().count(),
+                                    tts_synthesize_ms,
+                                    tts_playback_ms = elapsed_ms(playback_started_at),
+                                    "background TTS completed"
+                                );
+                            }
+                            Ok(Err(error)) => {
+                                warn!(?error, request_id = %request_id, action = %action_name, "failed to play synthesized audio");
+                            }
+                            Err(error) => {
+                                warn!(?error, request_id = %request_id, action = %action_name, "TTS playback task failed");
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        warn!(?error, request_id = %request_id, action = %action_name, "failed to synthesize audio");
+                    }
                 }
-
-                info!(
-                    request_id = %request_id,
-                    action = %action_name,
-                    output_chars = text.chars().count(),
-                    tts_synthesize_ms,
-                    tts_dispatch_ms = elapsed_ms(dispatch_started_at),
-                    "background TTS dispatched"
-                );
-            }
-            Err(error) => {
-                warn!(?error, request_id = %request_id, action = %action_name, "failed to synthesize audio");
-            }
-        }
+            })
+            .await;
     });
 
     (elapsed_ms(enqueue_started_at), true)
@@ -968,6 +1003,11 @@ fn elapsed_ms(started_at: Instant) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use tokio::time::{sleep, Duration};
 
     #[test]
     fn browser_url_validation_allows_http_urls_only() {
@@ -975,5 +1015,37 @@ mod tests {
         assert!(validate_browser_url("http://example.com").is_ok());
         assert!(validate_browser_url("file:///etc/passwd").is_err());
         assert!(validate_browser_url("https://example.com/a b").is_err());
+    }
+
+    #[tokio::test]
+    async fn tts_playback_gate_serializes_concurrent_jobs() {
+        let gate = TtsPlaybackGate::default();
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+
+        let first = spawn_gate_probe(gate.clone(), Arc::clone(&active), Arc::clone(&max_active));
+        let second = spawn_gate_probe(gate, Arc::clone(&active), Arc::clone(&max_active));
+
+        first.await.unwrap();
+        second.await.unwrap();
+
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
+
+    fn spawn_gate_probe(
+        gate: TtsPlaybackGate,
+        active: Arc<AtomicUsize>,
+        max_active: Arc<AtomicUsize>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            gate.run(async move {
+                let now_active = active.fetch_add(1, Ordering::SeqCst) + 1;
+                max_active.fetch_max(now_active, Ordering::SeqCst);
+                sleep(Duration::from_millis(50)).await;
+                active.fetch_sub(1, Ordering::SeqCst);
+            })
+            .await;
+        })
     }
 }
