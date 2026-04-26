@@ -104,7 +104,7 @@ Para instalar o atalho global no GNOME:
 ```bash
 cargo build --release --workspace --features gtk-overlay
 install -Dm755 target/release/visionclip ~/.local/bin/visionclip
-bash scripts/install_gnome_voice_shortcut.sh '<Super>F12'
+bash scripts/install_gnome_voice_shortcut.sh '<Shift>CapsLk'
 ```
 
 O instalador configura `Super+F12` como atalho principal, `Super+Shift+F12` como fallback e `Super+Alt+V` como fallback alternativo para o mesmo wrapper. Ao acionar o atalho, o wrapper executa `visionclip --voice-agent --speak`, abre a overlay de escuta e grava o comando de voz.
