@@ -136,6 +136,30 @@ pub fn builtin_action_specs() -> Vec<ActionSpec> {
             12_000,
         ),
         ActionSpec::new(
+            "open_url",
+            "Abre uma URL http/https no navegador padrao do usuario.",
+            RiskLevel::Level1,
+            vec![ActionPermission::DesktopLaunch, ActionPermission::Network],
+            json!({
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "label": {"type": "string"}
+                },
+                "required": ["url"],
+                "additionalProperties": false
+            }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "success": {"type": "boolean"},
+                    "message": {"type": "string"}
+                },
+                "required": ["success", "message"]
+            }),
+            5_000,
+        ),
+        ActionSpec::new(
             "capture_screen_context",
             "Captura texto visível por acessibilidade, DOM permitido, screenshot ou OCR local.",
             RiskLevel::Level2,
@@ -234,5 +258,14 @@ mod tests {
         assert!(spec
             .permissions
             .contains(&ActionPermission::ShellRestricted));
+    }
+
+    #[test]
+    fn open_url_uses_low_risk_desktop_and_network_permissions() {
+        let spec = find_action_spec("open_url").expect("action spec");
+        assert_eq!(spec.risk_level, RiskLevel::Level1);
+        assert!(!spec.requires_confirmation);
+        assert!(spec.permissions.contains(&ActionPermission::DesktopLaunch));
+        assert!(spec.permissions.contains(&ActionPermission::Network));
     }
 }

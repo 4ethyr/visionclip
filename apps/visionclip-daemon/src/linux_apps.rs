@@ -82,6 +82,23 @@ fn launch_well_known_app(query: &str) -> Result<Option<ApplicationLaunchResult>>
         }
     }
 
+    if matches!(
+        normalized.as_str(),
+        "settings" | "configuracoes" | "ajustes" | "gnomesettings"
+    ) {
+        let command = first_available(&[
+            "gnome-control-center",
+            "systemsettings",
+            "xfce4-settings-manager",
+        ])
+        .context("no supported settings application found")?;
+        spawn_detached(&command, &[])?;
+        return Ok(Some(ApplicationLaunchResult {
+            resolved_app: command.clone(),
+            message: "Abrindo as configurações.".into(),
+        }));
+    }
+
     Ok(None)
 }
 
@@ -307,6 +324,20 @@ fn app_aliases(query_norm: &str) -> Vec<String> {
         "chrome" | "googlechrome" => {
             aliases.extend(["chrome", "googlechrome"].map(str::to_string));
         }
+        "burp" | "burpsuite" | "burpsuitecommunity" => {
+            aliases.extend(["burp", "burpsuite", "burpsuitecommunity"].map(str::to_string));
+        }
+        "settings" | "configuracoes" | "ajustes" | "gnomesettings" => {
+            aliases.extend(
+                [
+                    "settings",
+                    "configuracoes",
+                    "preferences",
+                    "gnomecontrolcenter",
+                ]
+                .map(str::to_string),
+            );
+        }
         _ => {}
     }
     aliases.sort();
@@ -458,6 +489,65 @@ mod tests {
 
         let resolved = resolve_desktop_app("vscode", &apps).expect("resolved app");
         assert_eq!(resolved.desktop_id, "code");
+    }
+
+    #[test]
+    fn resolves_security_and_system_app_aliases() {
+        let apps = vec![
+            parse_desktop_app(
+                Path::new("/usr/share/applications/burpsuite.desktop"),
+                r#"
+                [Desktop Entry]
+                Type=Application
+                Name=Burp Suite Community Edition
+                Exec=burpsuite
+                Keywords=burp;proxy;security;
+                "#,
+            )
+            .unwrap(),
+            parse_desktop_app(
+                Path::new("/usr/share/applications/org.wireshark.Wireshark.desktop"),
+                r#"
+                [Desktop Entry]
+                Type=Application
+                Name=Wireshark
+                Exec=wireshark %f
+                Keywords=network;packet;
+                "#,
+            )
+            .unwrap(),
+            parse_desktop_app(
+                Path::new("/usr/share/applications/org.gnome.Settings.desktop"),
+                r#"
+                [Desktop Entry]
+                Type=Application
+                Name=Settings
+                Name[pt_BR]=Configurações
+                Exec=gnome-control-center
+                Keywords=settings;preferences;configuracoes;
+                "#,
+            )
+            .unwrap(),
+        ];
+
+        assert_eq!(
+            resolve_desktop_app("BurpSuite", &apps)
+                .expect("burp suite")
+                .desktop_id,
+            "burpsuite"
+        );
+        assert_eq!(
+            resolve_desktop_app("wireshark", &apps)
+                .expect("wireshark")
+                .desktop_id,
+            "org.wireshark.Wireshark"
+        );
+        assert_eq!(
+            resolve_desktop_app("configurações", &apps)
+                .expect("settings")
+                .desktop_id,
+            "org.gnome.Settings"
+        );
     }
 
     #[test]

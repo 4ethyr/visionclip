@@ -20,7 +20,7 @@ pub use error::{AppError, AppResult};
 pub use intent::{IntentDetection, IntentKind};
 pub use ipc::{
     read_message, write_message, Action, ApplicationLaunchJob, CaptureJob, HealthCheckJob,
-    JobResult, SessionType, VisionRequest, VoiceSearchJob,
+    JobResult, SessionType, UrlOpenJob, VisionRequest, VoiceSearchJob,
 };
 pub use portal::{
     current_desktops, screenshot_portal_backends_for_current_desktop, summarize_portal_backends,

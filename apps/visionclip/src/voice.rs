@@ -34,6 +34,11 @@ pub enum VoiceAgentCommand {
         transcript: String,
         app_name: String,
     },
+    OpenUrl {
+        transcript: String,
+        label: String,
+        url: String,
+    },
     SearchWeb {
         transcript: String,
         query: String,
@@ -80,11 +85,18 @@ pub async fn resolve_voice_agent_command(
             capture_and_transcribe(config).await?
         };
 
-    if let Some(app_name) = resolve_open_application_from_transcript(&transcript) {
-        return Ok(VoiceAgentCommand::OpenApplication {
-            transcript,
-            app_name,
-        });
+    if let Some(target) = resolve_open_target_from_transcript(&transcript) {
+        return match target {
+            VoiceOpenTarget::Application(app_name) => Ok(VoiceAgentCommand::OpenApplication {
+                transcript,
+                app_name,
+            }),
+            VoiceOpenTarget::Url { label, url } => Ok(VoiceAgentCommand::OpenUrl {
+                transcript,
+                label,
+                url,
+            }),
+        };
     }
 
     let query = resolve_search_query_from_transcript(&transcript)?;
@@ -451,20 +463,100 @@ fn resolve_search_query_from_transcript(transcript: &str) -> Result<String> {
     Ok(query)
 }
 
-fn resolve_open_application_from_transcript(transcript: &str) -> Option<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VoiceOpenTarget {
+    Application(String),
+    Url { label: String, url: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenSubjectMode {
+    Explicit,
+    Standalone,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KnownWebsite {
+    label: &'static str,
+    url: &'static str,
+}
+
+fn resolve_open_target_from_transcript(transcript: &str) -> Option<VoiceOpenTarget> {
     let raw = transcript.trim();
     if raw.is_empty() {
         return None;
     }
 
     let normalized = normalize_transcript(raw);
+    if let Some(subject) = extract_open_subject(raw, &normalized) {
+        return resolve_open_subject(&subject, OpenSubjectMode::Explicit);
+    }
+
+    if is_standalone_open_candidate(&normalized) {
+        return resolve_open_subject(raw, OpenSubjectMode::Standalone);
+    }
+
+    None
+}
+
+#[cfg(test)]
+fn resolve_open_application_from_transcript(transcript: &str) -> Option<String> {
+    match resolve_open_target_from_transcript(transcript) {
+        Some(VoiceOpenTarget::Application(app_name)) => Some(app_name),
+        _ => None,
+    }
+}
+
+fn extract_open_subject(raw: &str, normalized: &str) -> Option<String> {
     let prefixes = [
+        "por favor abra o aplicativo",
+        "por favor abra a aplicacao",
+        "por favor abra o programa",
+        "por favor abra o site do",
+        "por favor abra o site da",
+        "por favor abra o site de",
+        "por favor abra o site",
+        "por favor abra o",
+        "por favor abra a",
+        "por favor abra",
+        "abra o aplicativo",
+        "abra a aplicacao",
+        "abra o programa",
+        "abra o software",
+        "abra o site do",
+        "abra o site da",
+        "abra o site de",
+        "abra o site",
+        "abra a pagina",
         "abra o",
         "abra a",
         "abra",
+        "abre o aplicativo",
+        "abre a aplicacao",
+        "abre o programa",
+        "abre o site do",
+        "abre o site da",
+        "abre o site de",
+        "abre o site",
+        "abre o",
+        "abre a",
+        "abre",
         "abrir o",
         "abrir a",
         "abrir",
+        "acesse o",
+        "acesse a",
+        "acesse",
+        "acessa o",
+        "acessa a",
+        "acessa",
+        "acessar o",
+        "acessar a",
+        "acessar",
+        "entre no",
+        "entre na",
+        "entre em",
+        "ir para",
         "inicie o",
         "inicie a",
         "inicie",
@@ -480,9 +572,12 @@ fn resolve_open_application_from_transcript(transcript: &str) -> Option<String> 
 
     for prefix in prefixes {
         if normalized == prefix {
-            return None;
+            return Some(String::new());
         }
-        if normalized.starts_with(prefix) {
+        if normalized
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with(' '))
+        {
             let prefix_len = prefix.chars().count();
             let start = raw
                 .char_indices()
@@ -493,13 +588,196 @@ fn resolve_open_application_from_transcript(transcript: &str) -> Option<String> 
                 .trim()
                 .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '.' | ',' | ';' | ':'))
                 .to_string();
-            if !app_name.is_empty() {
-                return Some(app_name);
-            }
+            return Some(app_name);
         }
     }
 
     None
+}
+
+fn resolve_open_subject(subject: &str, mode: OpenSubjectMode) -> Option<VoiceOpenTarget> {
+    let cleaned = clean_open_subject(subject)?;
+    let normalized = normalize_transcript(&cleaned);
+
+    if let Some(website) = known_website(&normalized) {
+        return Some(VoiceOpenTarget::Url {
+            label: website.label.to_string(),
+            url: website.url.to_string(),
+        });
+    }
+
+    match mode {
+        OpenSubjectMode::Explicit => Some(VoiceOpenTarget::Application(cleaned)),
+        OpenSubjectMode::Standalone if is_known_standalone_application(&normalized) => {
+            Some(VoiceOpenTarget::Application(cleaned))
+        }
+        OpenSubjectMode::Standalone => None,
+    }
+}
+
+fn clean_open_subject(subject: &str) -> Option<String> {
+    let mut value = subject
+        .trim()
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '.' | ',' | ';' | ':'))
+        .to_string();
+    if value.is_empty() {
+        return None;
+    }
+
+    for qualifier in [
+        "o aplicativo",
+        "a aplicacao",
+        "o programa",
+        "o software",
+        "o site do",
+        "o site da",
+        "o site de",
+        "site do",
+        "site da",
+        "site de",
+        "a pagina do",
+        "a pagina da",
+        "a pagina de",
+        "pagina do",
+        "pagina da",
+        "pagina de",
+        "aplicativo",
+        "aplicacao",
+        "programa",
+        "software",
+        "site",
+        "pagina",
+        "do",
+        "da",
+        "de",
+        "o",
+        "a",
+        "os",
+        "as",
+    ] {
+        let normalized = normalize_transcript(&value);
+        if normalized == qualifier {
+            return None;
+        }
+        if normalized
+            .strip_prefix(qualifier)
+            .is_some_and(|rest| rest.starts_with(' '))
+        {
+            let qualifier_len = qualifier.chars().count();
+            let start = value
+                .char_indices()
+                .nth(qualifier_len)
+                .map(|(index, _)| index)
+                .unwrap_or(value.len());
+            value = value[start..].trim_start().to_string();
+            break;
+        }
+    }
+
+    (!value.is_empty()).then_some(value)
+}
+
+fn is_standalone_open_candidate(normalized: &str) -> bool {
+    known_website(normalized).is_some() || is_known_standalone_application(normalized)
+}
+
+fn is_known_standalone_application(normalized: &str) -> bool {
+    let compact = compact_normalized(normalized);
+    matches!(
+        compact.as_str(),
+        "terminal"
+            | "terminalemulator"
+            | "console"
+            | "shell"
+            | "navegador"
+            | "browser"
+            | "webbrowser"
+            | "firefox"
+            | "chrome"
+            | "chromium"
+            | "brave"
+            | "vscode"
+            | "code"
+            | "visualstudiocode"
+            | "burp"
+            | "burpsuite"
+            | "burpsuitecommunity"
+            | "wireshark"
+            | "antigravity"
+            | "steam"
+            | "configuracoes"
+            | "settings"
+            | "gnomesettings"
+            | "ajustes"
+    )
+}
+
+fn known_website(normalized: &str) -> Option<KnownWebsite> {
+    let compact = compact_normalized(normalized);
+    let target = match compact.as_str() {
+        "youtube" | "youtubecom" => KnownWebsite {
+            label: "YouTube",
+            url: "https://www.youtube.com/",
+        },
+        "youtubemusic" | "musicayoutube" => KnownWebsite {
+            label: "YouTube Music",
+            url: "https://music.youtube.com/",
+        },
+        "facebook" | "facebookcom" => KnownWebsite {
+            label: "Facebook",
+            url: "https://www.facebook.com/",
+        },
+        "linkedin" | "linkedincom" => KnownWebsite {
+            label: "LinkedIn",
+            url: "https://www.linkedin.com/",
+        },
+        "github" | "githubcom" => KnownWebsite {
+            label: "GitHub",
+            url: "https://github.com/",
+        },
+        "gitlab" | "gitlabcom" => KnownWebsite {
+            label: "GitLab",
+            url: "https://gitlab.com/",
+        },
+        "instagram" | "instagramcom" => KnownWebsite {
+            label: "Instagram",
+            url: "https://www.instagram.com/",
+        },
+        "reddit" | "redditcom" => KnownWebsite {
+            label: "Reddit",
+            url: "https://www.reddit.com/",
+        },
+        "stackoverflow" | "stackoverflowcom" => KnownWebsite {
+            label: "Stack Overflow",
+            url: "https://stackoverflow.com/",
+        },
+        "gmail" | "mailgoogle" | "googlemail" => KnownWebsite {
+            label: "Gmail",
+            url: "https://mail.google.com/",
+        },
+        "whatsapp" | "whatsappweb" => KnownWebsite {
+            label: "WhatsApp Web",
+            url: "https://web.whatsapp.com/",
+        },
+        "telegram" | "telegramweb" => KnownWebsite {
+            label: "Telegram Web",
+            url: "https://web.telegram.org/",
+        },
+        "google" | "googlecom" => KnownWebsite {
+            label: "Google",
+            url: "https://www.google.com/",
+        },
+        _ => return None,
+    };
+
+    Some(target)
+}
+
+fn compact_normalized(normalized: &str) -> String {
+    normalized
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect()
 }
 
 async fn run_shell_command(
@@ -765,6 +1043,74 @@ mod tests {
         assert_eq!(app_name, "VS Code");
     }
 
+    #[test]
+    fn resolves_standalone_known_app_from_voice_transcript() {
+        let cases = [
+            ("terminal", "terminal"),
+            ("vscode", "vscode"),
+            ("configurações", "configurações"),
+            ("BurpSuite", "BurpSuite"),
+            ("wireshark", "wireshark"),
+            ("antigravity", "antigravity"),
+            ("steam", "steam"),
+        ];
+
+        for (transcript, expected_app) in cases {
+            let app_name = resolve_open_application_from_transcript(transcript).unwrap();
+            assert_eq!(app_name, expected_app);
+        }
+    }
+
+    #[test]
+    fn resolves_common_open_application_phrases() {
+        let cases = [
+            ("abra o navegador", "navegador"),
+            ("abre o terminal", "terminal"),
+            ("abra o vscode", "vscode"),
+            ("abra o BurpSuite", "BurpSuite"),
+            ("abra o wireshark", "wireshark"),
+            ("abra antigravity", "antigravity"),
+            ("abra as configurações", "configurações"),
+            ("abra a steam", "steam"),
+        ];
+
+        for (transcript, expected_app) in cases {
+            let app_name = resolve_open_application_from_transcript(transcript).unwrap();
+            assert_eq!(app_name, expected_app);
+        }
+    }
+
+    #[test]
+    fn does_not_treat_general_questions_as_open_application() {
+        assert!(resolve_open_application_from_transcript("Quem foi Rousseau?").is_none());
+        assert!(resolve_open_application_from_transcript("O que é JavaScript?").is_none());
+        assert!(resolve_open_application_from_transcript("pesquise youtube").is_none());
+    }
+
+    #[test]
+    fn resolves_known_website_from_voice_transcript() {
+        let cases = [
+            ("youtube", "YouTube", "https://www.youtube.com/"),
+            (
+                "abra o site do LinkedIn",
+                "LinkedIn",
+                "https://www.linkedin.com/",
+            ),
+            ("facebook.com", "Facebook", "https://www.facebook.com/"),
+        ];
+
+        for (transcript, expected_label, expected_url) in cases {
+            let target = resolve_open_target_from_transcript(transcript).unwrap();
+            assert_eq!(
+                target,
+                VoiceOpenTarget::Url {
+                    label: expected_label.to_string(),
+                    url: expected_url.to_string()
+                }
+            );
+        }
+    }
+
     #[tokio::test]
     async fn voice_agent_prefers_open_application_intent() {
         let config = VoiceConfig {
@@ -787,6 +1133,34 @@ mod tests {
         match command {
             VoiceAgentCommand::OpenApplication { app_name, .. } => {
                 assert_eq!(app_name, "terminal");
+            }
+            other => panic!("unexpected voice agent command: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn voice_agent_prefers_open_url_intent_for_known_sites() {
+        let config = VoiceConfig {
+            enabled: false,
+            backend: "auto".into(),
+            target: String::new(),
+            overlay_enabled: true,
+            shortcut: "<Super>F12".into(),
+            record_duration_ms: 4_000,
+            sample_rate_hz: 16_000,
+            channels: 1,
+            record_command: String::new(),
+            transcribe_command: String::new(),
+            transcribe_timeout_ms: 60_000,
+        };
+
+        let command = resolve_voice_agent_command(&config, Some("youtube"))
+            .await
+            .unwrap();
+        match command {
+            VoiceAgentCommand::OpenUrl { label, url, .. } => {
+                assert_eq!(label, "YouTube");
+                assert_eq!(url, "https://www.youtube.com/");
             }
             other => panic!("unexpected voice agent command: {other:?}"),
         }

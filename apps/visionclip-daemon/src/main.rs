@@ -10,13 +10,13 @@ use tokio::net::{UnixListener, UnixStream};
 use tracing::{error, info, warn};
 use visionclip_common::{
     read_message, write_message, Action, AppConfig, ApplicationLaunchJob, CaptureJob,
-    HealthCheckJob, JobResult, VisionRequest, VoiceSearchJob,
+    HealthCheckJob, JobResult, UrlOpenJob, VisionRequest, VoiceSearchJob,
 };
 use visionclip_infer::{
     postprocess::{sanitize_for_speech, sanitize_output},
     InferenceBackend, InferenceInput, OllamaBackend,
 };
-use visionclip_output::{notify, open_search_query, ClipboardOwner};
+use visionclip_output::{notify, open_search_query, open_url, ClipboardOwner};
 use visionclip_tts::PiperHttpClient;
 
 #[tokio::main]
@@ -95,6 +95,7 @@ async fn process_request(state: &AppState, request: VisionRequest) -> Result<Job
         VisionRequest::Capture(job) => process_job(state, job).await,
         VisionRequest::VoiceSearch(job) => process_voice_search(state, job).await,
         VisionRequest::OpenApplication(job) => process_open_application(state, job).await,
+        VisionRequest::OpenUrl(job) => process_open_url(state, job).await,
         VisionRequest::HealthCheck(job) => process_health_check(job).await,
     }
 }
@@ -154,6 +155,71 @@ async fn process_open_application(
         message,
         spoken,
     })
+}
+
+async fn process_open_url(state: &AppState, job: UrlOpenJob) -> Result<JobResult> {
+    let request_id = job.request_id;
+    let total_started_at = Instant::now();
+    let label = job.label.trim();
+    let url = job.url.trim();
+    let speak_requested = state.config.action_should_speak("OpenUrl", job.speak)
+        || state
+            .config
+            .action_should_speak("OpenApplication", job.speak);
+
+    validate_browser_url(url)?;
+
+    info!(
+        request_id = %request_id,
+        transcript = ?job.transcript,
+        label,
+        url,
+        speak_requested,
+        "processing open url job"
+    );
+
+    open_url(url)?;
+    let message = if label.is_empty() {
+        "Abrindo o site.".to_string()
+    } else {
+        format!("Abrindo {label}.")
+    };
+    let (tts_enqueue_ms, spoken) = enqueue_tts(
+        state.piper.as_ref(),
+        request_id,
+        "OpenUrl",
+        &message,
+        None,
+        speak_requested,
+    );
+
+    let _ = notify("VisionClip", &message);
+
+    info!(
+        request_id = %request_id,
+        label,
+        url,
+        spoken,
+        tts_enqueue_ms,
+        total_ms = elapsed_ms(total_started_at),
+        "open url job completed"
+    );
+
+    Ok(JobResult::ActionStatus {
+        request_id,
+        message,
+        spoken,
+    })
+}
+
+fn validate_browser_url(url: &str) -> Result<()> {
+    if url.contains(char::is_whitespace) {
+        anyhow::bail!("refusing to open URL with whitespace");
+    }
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        anyhow::bail!("refusing to open non-http URL");
+    }
+    Ok(())
 }
 
 async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
@@ -897,4 +963,17 @@ fn cleanup_existing_socket(socket_path: &PathBuf) -> Result<()> {
 
 fn elapsed_ms(started_at: Instant) -> u64 {
     started_at.elapsed().as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_url_validation_allows_http_urls_only() {
+        assert!(validate_browser_url("https://www.youtube.com/").is_ok());
+        assert!(validate_browser_url("http://example.com").is_ok());
+        assert!(validate_browser_url("file:///etc/passwd").is_err());
+        assert!(validate_browser_url("https://example.com/a b").is_err());
+    }
 }

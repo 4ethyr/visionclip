@@ -74,6 +74,15 @@ pub struct ApplicationLaunchJob {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UrlOpenJob {
+    pub request_id: Uuid,
+    pub transcript: Option<String>,
+    pub label: String,
+    pub url: String,
+    pub speak: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthCheckJob {
     pub request_id: Uuid,
 }
@@ -83,6 +92,7 @@ pub enum VisionRequest {
     Capture(CaptureJob),
     VoiceSearch(VoiceSearchJob),
     OpenApplication(ApplicationLaunchJob),
+    OpenUrl(UrlOpenJob),
     HealthCheck(HealthCheckJob),
 }
 
@@ -162,6 +172,33 @@ mod tests {
 
         match decoded {
             VisionRequest::HealthCheck(job) => assert_eq!(job.request_id, request_id),
+            _ => panic!("unexpected decoded request"),
+        }
+    }
+
+    #[test]
+    fn open_url_request_roundtrips_through_bincode() {
+        let request_id = Uuid::new_v4();
+        let request = VisionRequest::OpenUrl(UrlOpenJob {
+            request_id,
+            transcript: Some("youtube".into()),
+            label: "YouTube".into(),
+            url: "https://www.youtube.com/".into(),
+            speak: true,
+        });
+        let payload = bincode::serde::encode_to_vec(&request, bincode::config::standard())
+            .expect("encode open url");
+        let (decoded, _): (VisionRequest, usize) =
+            bincode::serde::decode_from_slice(&payload, bincode::config::standard())
+                .expect("decode open url");
+
+        match decoded {
+            VisionRequest::OpenUrl(job) => {
+                assert_eq!(job.request_id, request_id);
+                assert_eq!(job.label, "YouTube");
+                assert_eq!(job.url, "https://www.youtube.com/");
+                assert!(job.speak);
+            }
             _ => panic!("unexpected decoded request"),
         }
     }

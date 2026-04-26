@@ -10,6 +10,10 @@ pub fn build_search_url(query: &str) -> String {
 
 pub fn open_search_query(query: &str) -> Result<()> {
     let url = build_search_url(query);
+    open_url(&url)
+}
+
+pub fn open_url(url: &str) -> Result<()> {
     Command::new("xdg-open")
         .arg(url)
         .spawn()

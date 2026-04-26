@@ -122,6 +122,8 @@ Exemplos de teste sem microfone:
 ```bash
 visionclip --voice-agent --voice-transcript 'Abra o terminal'
 visionclip --voice-agent --voice-transcript 'Abra o VS Code'
+visionclip --voice-agent --voice-transcript 'youtube'
+visionclip --voice-agent --voice-transcript 'abra o site do LinkedIn'
 visionclip --voice-agent --voice-transcript 'O que é JavaScript?'
 ```
 
@@ -132,7 +134,7 @@ visionclip --open-app terminal
 visionclip --open-app vscode
 ```
 
-O handler de abertura usa allowlists para casos conhecidos como terminal/navegador e resolução por arquivos `.desktop` com `gtk-launch`/`gio`. O LLM não executa shell arbitrário.
+O handler de abertura usa allowlists para casos conhecidos como terminal/navegador/configurações, resolução por arquivos `.desktop` com `gtk-launch`/`gio` e uma lista explícita de sites comuns que devem abrir no navegador padrão, como YouTube, Facebook e LinkedIn. O LLM não executa shell arbitrário.
 
 ## Diagnóstico e operação
 
@@ -168,7 +170,7 @@ Em desktops Wayland via portal, a captura pode depender de uma confirmação exp
 
 ## TTS
 
-Com Piper HTTP ativo, o daemon pode responder em áudio para `TranslatePtBr`, `Explain`, `SearchWeb` e `OpenApplication` quando `--speak` estiver ligado.
+Com Piper HTTP ativo, o daemon pode responder em áudio para `TranslatePtBr`, `Explain`, `SearchWeb`, `OpenApplication` e `OpenUrl` quando `--speak` estiver ligado.
 
 Para `SearchWeb`, o daemon tenta falar o resumo enriquecido da busca quando esse material estiver disponivel; caso contrario, ele apenas confirma a abertura da pesquisa.
 
