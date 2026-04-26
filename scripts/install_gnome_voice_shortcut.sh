@@ -23,6 +23,9 @@ normalize_binding() {
         "/+f12"|"slash+f12"|"slash + f12")
             echo "<Mod4>F12"
             ;;
+        "shift+capslk"|"shift + capslk"|"shift+capslock"|"shift + capslock"|"shift+caps_lock"|"shift + caps_lock")
+            echo "<Shift>Caps_Lock"
+            ;;
         *)
             echo "${value//<Super>/<Mod4>}"
             ;;
