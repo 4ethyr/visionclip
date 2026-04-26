@@ -18,10 +18,10 @@ normalize_binding() {
     local lowered="${value,,}"
     case "$lowered" in
         "/+f12"|"slash+f12"|"slash + f12")
-            echo "<Super>F12"
+            echo "<Mod4>F12"
             ;;
         *)
-            echo "$value"
+            echo "${value//<Super>/<Mod4>}"
             ;;
     esac
 }
@@ -110,10 +110,13 @@ EOF
 chmod +x "$WRAPPER_PATH"
 
 RESOLVED_BINDING="$(normalize_binding "$SHORTCUT_BINDING")"
-if [[ "$RESOLVED_BINDING" != "$SHORTCUT_BINDING" ]]; then
+RESOLVED_SECONDARY_BINDING="$(normalize_binding "$SECONDARY_SHORTCUT_BINDING")"
+case "${SHORTCUT_BINDING,,}" in
+    "/+f12"|"slash+f12"|"slash + f12")
     echo "Aviso: o GNOME nao aceita o atalho global '$SHORTCUT_BINDING' com duas teclas normais."
     echo "Usando '$RESOLVED_BINDING' como padrao compativel."
-fi
+        ;;
+esac
 
 CURRENT_BINDINGS="$(gsettings get "$CUSTOM_KEYBINDINGS_SCHEMA" custom-keybindings)"
 UPDATED_BINDINGS="$(append_custom_keybinding_path "$CURRENT_BINDINGS" "$CUSTOM_KEYBINDING_PATH")"
@@ -125,7 +128,7 @@ gsettings set "$CUSTOM_KEYBINDING_SCHEMA" command "$WRAPPER_PATH"
 gsettings set "$CUSTOM_KEYBINDING_SCHEMA" binding "$RESOLVED_BINDING"
 gsettings set "$SECONDARY_CUSTOM_KEYBINDING_SCHEMA" name "$SHORTCUT_NAME (fallback)"
 gsettings set "$SECONDARY_CUSTOM_KEYBINDING_SCHEMA" command "$WRAPPER_PATH"
-gsettings set "$SECONDARY_CUSTOM_KEYBINDING_SCHEMA" binding "$SECONDARY_SHORTCUT_BINDING"
+gsettings set "$SECONDARY_CUSTOM_KEYBINDING_SCHEMA" binding "$RESOLVED_SECONDARY_BINDING"
 
 if command -v systemctl >/dev/null 2>&1; then
     systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS PATH >/dev/null 2>&1 || true
@@ -135,6 +138,6 @@ fi
 
 echo "Atalho do VisionClip configurado."
 echo "Binding: $RESOLVED_BINDING"
-echo "Fallback binding: $SECONDARY_SHORTCUT_BINDING"
+echo "Fallback binding: $RESOLVED_SECONDARY_BINDING"
 echo "Command: $WRAPPER_PATH"
 echo "Log: ${HOME}/.local/state/visionclip/voice-shortcut.log"
