@@ -1,6 +1,6 @@
 # VisionClip
 
-VisionClip é um serviço local para Linux que transforma screenshots em ações úteis com IA local. O projeto combina captura de tela, inferência multimodal, integração com clipboard, pesquisa web e resposta por áudio, com foco em privacidade, autonomia local e integração nativa com o desktop.
+VisionClip é um serviço local para Linux que transforma seus modelos locais em um assistente de AI, realiza pesquisas, traduz frases, abre programas e explica screenshots. O projeto combina captura de tela, inferência multimodal, integração com clipboard, pesquisa web, comandos de voz e resposta por áudio, com foco em privacidade, autonomia local e integração nativa com o desktop.
 
 ## O que o projeto entrega hoje
 
