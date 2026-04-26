@@ -21,6 +21,9 @@ const GNOME_MEDIA_KEYS_SCHEMA: &str =
     "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-voice-search/";
 const GNOME_SECONDARY_MEDIA_KEYS_SCHEMA: &str =
     "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-voice-search-shift/";
+const TERTIARY_VOICE_SHORTCUT: &str = "<Super><Alt>v";
+const GNOME_TERTIARY_MEDIA_KEYS_SCHEMA: &str =
+    "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-voice-search-super-alt-v/";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CheckStatus {
@@ -553,6 +556,53 @@ fn check_gnome_shortcuts(voice: &VoiceConfig) -> Vec<DoctorCheck> {
             Err(error) => {
                 DoctorCheck::warn("gnome-cmd2", format!("fallback comando nao lido: {error}"))
             }
+        },
+    );
+
+    checks.push(
+        match gsettings_get(GNOME_TERTIARY_MEDIA_KEYS_SCHEMA, "binding") {
+            Ok(value)
+                if normalize_accelerator_aliases(&strip_gsettings_quotes(&value))
+                    == normalize_accelerator_aliases(TERTIARY_VOICE_SHORTCUT) =>
+            {
+                DoctorCheck::ok(
+                    "gnome-key3",
+                    format!("fallback alt ativo: {}", strip_gsettings_quotes(&value)),
+                )
+            }
+            Ok(value) => DoctorCheck::warn(
+                "gnome-key3",
+                format!(
+                    "fallback alt atual {}, esperado {}",
+                    value.trim(),
+                    TERTIARY_VOICE_SHORTCUT
+                ),
+            ),
+            Err(error) => {
+                DoctorCheck::warn("gnome-key3", format!("fallback alt nao lido: {error}"))
+            }
+        },
+    );
+
+    checks.push(
+        match gsettings_get(GNOME_TERTIARY_MEDIA_KEYS_SCHEMA, "command") {
+            Ok(value) if strip_gsettings_quotes(&value).ends_with(VOICE_WRAPPER_NAME) => {
+                DoctorCheck::ok(
+                    "gnome-cmd3",
+                    format!("fallback alt comando: {}", value.trim()),
+                )
+            }
+            Ok(value) => DoctorCheck::warn(
+                "gnome-cmd3",
+                format!(
+                    "fallback alt nao aponta para {VOICE_WRAPPER_NAME}: {}",
+                    value.trim()
+                ),
+            ),
+            Err(error) => DoctorCheck::warn(
+                "gnome-cmd3",
+                format!("fallback alt comando nao lido: {error}"),
+            ),
         },
     );
 
