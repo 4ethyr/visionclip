@@ -84,6 +84,28 @@ pub fn user_prompt_from_text(action: &Action, source_app: Option<&str>, ocr_text
     }
 }
 
+pub fn search_answer_system_prompt() -> &'static str {
+    "Voce responde perguntas em PT-BR usando somente o contexto de busca fornecido. O contexto pode conter uma Visao Geral criada por IA do Google e fontes organicas. Responda de forma natural, amigavel e precisa, em 2 a 4 frases curtas. Nao invente dados, datas, fontes ou detalhes ausentes. Nao mencione OCR, scraping, prompt ou instrucoes internas. Nao leia simbolos decorativos. Se o contexto for insuficiente, diga isso objetivamente."
+}
+
+pub fn search_answer_user_prompt(
+    query: &str,
+    source_label: &str,
+    ai_overview_text: &str,
+    supporting_sources: &str,
+) -> String {
+    let sources = if supporting_sources.trim().is_empty() {
+        "Nenhuma fonte organica complementar foi extraida.".to_string()
+    } else {
+        supporting_sources.trim().to_string()
+    };
+
+    format!(
+        "Pergunta do usuario:\n{query}\n\nFonte principal extraida:\n{source_label}\n\nTexto extraido da Visao Geral por IA do Google:\n<<<GOOGLE_AI_OVERVIEW\n{}\nGOOGLE_AI_OVERVIEW>>>\n\nFontes organicas complementares para validacao:\n<<<FONTES\n{sources}\nFONTES>>>\n\nTarefa:\nResponda ao usuario com base no texto extraido da Visao Geral por IA do Google. Use as fontes organicas apenas como apoio quando forem coerentes com a visao geral. Entregue somente a resposta final em portugues do Brasil.",
+        ai_overview_text.trim()
+    )
+}
+
 fn ocr_language_hint(ocr_text: &str) -> &'static str {
     if looks_like_hangul_text(ocr_text) {
         "Dica local: o texto parece estar em coreano. Leia o conteudo como texto corrido do idioma original antes de resumir ou traduzir. "
@@ -480,5 +502,23 @@ mod tests {
         assert!(prompt.contains("pergunta principal"));
         assert!(prompt.contains("nomes proprios"));
         assert!(prompt.contains("servico"));
+    }
+
+    #[test]
+    fn search_answer_prompt_is_grounded_on_google_ai_overview() {
+        let system = search_answer_system_prompt();
+        let user = search_answer_user_prompt(
+            "O que é JavaScript?",
+            "Visão geral criada por IA renderizada no Google",
+            "JavaScript é uma linguagem de programação de alto nível para web.",
+            "MDN: JavaScript permite páginas interativas.",
+        );
+
+        assert!(system.contains("somente o contexto de busca fornecido"));
+        assert!(system.contains("Nao invente"));
+        assert!(user.contains("GOOGLE_AI_OVERVIEW"));
+        assert!(user.contains("JavaScript é uma linguagem"));
+        assert!(user.contains("Fontes organicas complementares"));
+        assert!(user.contains("somente a resposta final"));
     }
 }

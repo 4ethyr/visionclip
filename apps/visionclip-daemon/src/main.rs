@@ -1,8 +1,9 @@
 mod linux_apps;
+mod rendered_search;
 mod search;
 
 use crate::linux_apps::open_application;
-use crate::search::GoogleSearchClient;
+use crate::search::{GoogleSearchClient, SearchEnrichment};
 use anyhow::{Context, Result};
 use std::{path::PathBuf, sync::Arc, time::Instant};
 use tokio::net::{UnixListener, UnixStream};
@@ -485,8 +486,26 @@ async fn execute_search_query(
                     .as_ref()
                     .map(|value| value.chars().count())
                     .unwrap_or_default();
-                search_spoken_text = enrichment.spoken_text(query);
-                search_summary = enrichment.clipboard_text(query);
+                if let Some(answer) = generate_google_ai_overview_answer(
+                    &state.infer,
+                    request_id,
+                    query,
+                    &enrichment,
+                    "Visão Geral por IA extraída do Google Search",
+                )
+                .await
+                {
+                    search_spoken_text = Some(answer.clone());
+                    search_summary = Some(clipboard_text_for_google_ai_answer(
+                        query,
+                        &answer,
+                        &enrichment,
+                        "Visão Geral por IA extraída do Google Search",
+                    ));
+                } else {
+                    search_spoken_text = enrichment.spoken_text(query);
+                    search_summary = enrichment.clipboard_text(query);
+                }
             }
             Err(error) => {
                 search_fetch_ms = elapsed_ms(search_started_at);
@@ -509,6 +528,9 @@ async fn execute_search_query(
     }
     if state.config.search.open_browser {
         open_search_query(query)?;
+        if ai_overview_chars == 0 {
+            spawn_rendered_ai_overview_listener(state, request_id, query, speak_requested);
+        }
     }
     let _ = notify(
         "VisionClip",
@@ -556,6 +578,221 @@ async fn execute_search_query(
         output_ms,
         tts_enqueue_ms,
     })
+}
+
+fn spawn_rendered_ai_overview_listener(
+    state: &AppState,
+    request_id: uuid::Uuid,
+    query: &str,
+    speak_requested: bool,
+) {
+    if !state.config.search.rendered_ai_overview_listener {
+        return;
+    }
+
+    let job = rendered_search::RenderedSearchJob {
+        request_id,
+        query: query.to_string(),
+        search: state.config.search.clone(),
+        infer: state.infer.clone(),
+    };
+    let piper = state.piper.clone();
+
+    tokio::spawn(async move {
+        let started_at = Instant::now();
+        match rendered_search::wait_for_rendered_ai_overview(&job).await {
+            Ok(Some(result)) => {
+                let grounded_answer = generate_google_ai_overview_answer(
+                    &job.infer,
+                    job.request_id,
+                    &job.query,
+                    &result.enrichment,
+                    "Visão Geral por IA renderizada no Google Search",
+                )
+                .await;
+
+                let summary = if let Some(answer) = grounded_answer.as_ref() {
+                    Some(clipboard_text_for_google_ai_answer(
+                        &job.query,
+                        answer,
+                        &result.enrichment,
+                        "Visão Geral por IA renderizada no Google Search",
+                    ))
+                } else {
+                    result.enrichment.clipboard_text(&job.query)
+                };
+
+                if let Some(summary) = summary {
+                    if let Err(error) =
+                        ClipboardOwner::new().and_then(|clipboard| clipboard.set_text(&summary))
+                    {
+                        warn!(
+                            ?error,
+                            request_id = %job.request_id,
+                            "failed to copy rendered AI overview summary"
+                        );
+                    }
+                }
+
+                let speech_text = grounded_answer
+                    .or_else(|| result.enrichment.spoken_text(&job.query))
+                    .unwrap_or_else(|| "Encontrei a visão geral criada por IA do Google, mas não consegui gerar uma resposta confiável com esse trecho.".to_string());
+                let speech_text = sanitize_for_speech(&Action::SearchWeb, &speech_text);
+                let (tts_enqueue_ms, spoken) = enqueue_tts(
+                    piper.as_ref(),
+                    job.request_id,
+                    "SearchWebRenderedOverview",
+                    &speech_text,
+                    None,
+                    speak_requested,
+                );
+                let _ = notify(
+                    "VisionClip",
+                    "Visão geral criada por IA detectada na página renderizada.",
+                );
+
+                info!(
+                    request_id = %job.request_id,
+                    query = %job.query,
+                    attempts = result.attempts,
+                    ocr_chars = result.ocr_chars,
+                    ai_overview_chars = result
+                        .enrichment
+                        .ai_overview
+                        .as_ref()
+                        .map(|value| value.chars().count())
+                        .unwrap_or_default(),
+                    capture_backend = result.capture_backend,
+                    spoken,
+                    tts_enqueue_ms,
+                    total_ms = elapsed_ms(started_at),
+                    "rendered AI overview listener completed"
+                );
+            }
+            Ok(None) => {
+                debug_rendered_ai_overview_not_found(job.request_id, &job.query, started_at);
+            }
+            Err(error) => {
+                warn!(
+                    ?error,
+                    request_id = %job.request_id,
+                    query = %job.query,
+                    total_ms = elapsed_ms(started_at),
+                    "rendered AI overview listener failed"
+                );
+            }
+        }
+    });
+}
+
+async fn generate_google_ai_overview_answer(
+    infer: &OllamaBackend,
+    request_id: uuid::Uuid,
+    query: &str,
+    enrichment: &SearchEnrichment,
+    source_label: &str,
+) -> Option<String> {
+    let overview = enrichment
+        .ai_overview
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let supporting_sources = supporting_sources_text(enrichment);
+
+    match infer
+        .answer_search_from_context(
+            format!("{request_id}-google-ai-overview-answer"),
+            query,
+            source_label,
+            overview,
+            &supporting_sources,
+        )
+        .await
+    {
+        Ok(output) => {
+            let answer = sanitize_output(&Action::Explain, &output.text);
+            if answer.trim().is_empty() {
+                warn!(
+                    request_id = %request_id,
+                    query = %query,
+                    "grounded Google AI overview answer was empty"
+                );
+                None
+            } else {
+                Some(answer)
+            }
+        }
+        Err(error) => {
+            warn!(
+                ?error,
+                request_id = %request_id,
+                query = %query,
+                "failed to generate grounded Google AI overview answer"
+            );
+            None
+        }
+    }
+}
+
+fn clipboard_text_for_google_ai_answer(
+    query: &str,
+    answer: &str,
+    enrichment: &SearchEnrichment,
+    source_label: &str,
+) -> String {
+    let mut sections = vec![
+        format!("Pesquisa: {query}"),
+        format!(
+            "Resposta baseada na Visão Geral por IA do Google:\n{}",
+            answer.trim()
+        ),
+    ];
+
+    if let Some(overview) = enrichment.ai_overview.as_ref() {
+        sections.push(format!(
+            "Contexto extraído de {source_label}:\n{}",
+            overview.trim()
+        ));
+    }
+
+    let sources = supporting_sources_text(enrichment);
+    if !sources.is_empty() {
+        sections.push(format!("Fontes orgânicas complementares:\n{sources}"));
+    }
+
+    sections.join("\n\n")
+}
+
+fn supporting_sources_text(enrichment: &SearchEnrichment) -> String {
+    enrichment
+        .snippets
+        .iter()
+        .take(3)
+        .enumerate()
+        .map(|(index, item)| {
+            if item.snippet.trim().is_empty() {
+                format!("{}. {} ({})", index + 1, item.title, item.domain)
+            } else {
+                format!(
+                    "{}. {} ({}) - {}",
+                    index + 1,
+                    item.title,
+                    item.domain,
+                    item.snippet
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn debug_rendered_ai_overview_not_found(request_id: uuid::Uuid, query: &str, started_at: Instant) {
+    info!(
+        request_id = %request_id,
+        query = %query,
+        total_ms = elapsed_ms(started_at),
+        "rendered AI overview listener finished without visible AI overview"
+    );
 }
 
 fn search_browser_fallback_summary(query: &str, search_blocked: bool) -> String {
