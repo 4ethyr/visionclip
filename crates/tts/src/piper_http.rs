@@ -28,9 +28,10 @@ struct PiperSynthesisRequest<'a> {
 
 impl PiperHttpClient {
     pub fn new(config: AudioConfig) -> Self {
+        let request_timeout = Duration::from_millis(config.request_timeout_ms.max(1_000));
         Self {
             client: Client::builder()
-                .timeout(Duration::from_secs(20))
+                .timeout(request_timeout)
                 .build()
                 .unwrap_or_else(|_| Client::new()),
             config,
@@ -86,8 +87,9 @@ impl PiperHttpClient {
         fs::write(&temp_path, wav_bytes).context("failed to write temporary WAV file")?;
 
         let player = preferred_player(&self.config);
+        let playback_timeout = Duration::from_millis(self.config.playback_timeout_ms.max(1_000));
         thread::spawn(move || {
-            play_with_timeout(&player, &temp_path, Duration::from_secs(20));
+            play_with_timeout(&player, &temp_path, playback_timeout);
 
             let _ = fs::remove_file(&temp_path);
         });
