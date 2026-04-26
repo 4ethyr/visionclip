@@ -182,6 +182,8 @@ request_timeout_ms = 60000
 playback_timeout_ms = 120000
 ```
 
+O daemon serializa a reprodução de áudio: se outra ação com `--speak` terminar enquanto uma fala ainda está tocando, a nova resposta aguarda a anterior terminar em vez de abrir outro player por cima.
+
 ## Busca enriquecida
 
 O VisionClip tenta enriquecer `SearchWeb` com uma leitura inicial dos resultados do Google. Esse scrape e best-effort: quando houver bloco util equivalente a AI Overview/Visão geral criada por IA ou snippets organicos iniciais, o daemon monta contexto para clipboard e TTS.
