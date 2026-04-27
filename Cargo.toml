@@ -1,8 +1,10 @@
 [workspace]
 members = [
   "apps/visionclip",
+  "apps/coddy",
   "apps/visionclip-daemon",
   "apps/visionclip-config",
+  "crates/coddy-core",
   "crates/common",
   "crates/infer",
   "crates/output",
@@ -24,6 +26,7 @@ base64 = "0.22"
 bincode = { version = "2.0", features = ["serde"] }
 bytes = "1.7"
 clap = { version = "4.5", features = ["derive"] }
+coddy-core = { path = "crates/coddy-core" }
 directories = "5.0"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 scraper = "0.24"

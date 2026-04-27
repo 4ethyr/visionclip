@@ -88,12 +88,20 @@ pub struct HealthCheckJob {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplCommandJob {
+    pub request_id: Uuid,
+    pub command: coddy_core::ReplCommand,
+    pub speak: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum VisionRequest {
     Capture(CaptureJob),
     VoiceSearch(VoiceSearchJob),
     OpenApplication(ApplicationLaunchJob),
     OpenUrl(UrlOpenJob),
     HealthCheck(HealthCheckJob),
+    ReplCommand(ReplCommandJob),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,6 +185,56 @@ mod tests {
     }
 
     #[test]
+    fn legacy_vision_request_variant_tags_remain_stable() {
+        let request_id = Uuid::nil();
+
+        assert_eq!(
+            encoded_variant_tag(&VisionRequest::Capture(CaptureJob {
+                request_id,
+                action: Action::CopyText,
+                mime_type: "image/png".into(),
+                image_bytes: Vec::new(),
+                session_type: SessionType::Unknown,
+                speak: false,
+                source_app: None,
+            })),
+            0
+        );
+        assert_eq!(
+            encoded_variant_tag(&VisionRequest::VoiceSearch(VoiceSearchJob {
+                request_id,
+                transcript: "teste".into(),
+                query: "teste".into(),
+                speak: false,
+            })),
+            1
+        );
+        assert_eq!(
+            encoded_variant_tag(&VisionRequest::OpenApplication(ApplicationLaunchJob {
+                request_id,
+                transcript: None,
+                app_name: "terminal".into(),
+                speak: false,
+            })),
+            2
+        );
+        assert_eq!(
+            encoded_variant_tag(&VisionRequest::OpenUrl(UrlOpenJob {
+                request_id,
+                transcript: None,
+                label: "Example".into(),
+                url: "https://example.com".into(),
+                speak: false,
+            })),
+            3
+        );
+        assert_eq!(
+            encoded_variant_tag(&VisionRequest::HealthCheck(HealthCheckJob { request_id })),
+            4
+        );
+    }
+
+    #[test]
     fn open_url_request_roundtrips_through_bincode() {
         let request_id = Uuid::new_v4();
         let request = VisionRequest::OpenUrl(UrlOpenJob {
@@ -201,5 +259,43 @@ mod tests {
             }
             _ => panic!("unexpected decoded request"),
         }
+    }
+
+    #[test]
+    fn repl_command_request_roundtrips_through_bincode() {
+        let request_id = Uuid::new_v4();
+        let request = VisionRequest::ReplCommand(ReplCommandJob {
+            request_id,
+            command: coddy_core::ReplCommand::VoiceTurn {
+                transcript_override: Some("quem foi rousseau?".to_string()),
+            },
+            speak: true,
+        });
+        let payload = bincode::serde::encode_to_vec(&request, bincode::config::standard())
+            .expect("encode repl command");
+        let (decoded, _): (VisionRequest, usize) =
+            bincode::serde::decode_from_slice(&payload, bincode::config::standard())
+                .expect("decode repl command");
+
+        match decoded {
+            VisionRequest::ReplCommand(job) => {
+                assert_eq!(job.request_id, request_id);
+                assert!(job.speak);
+                assert_eq!(
+                    job.command,
+                    coddy_core::ReplCommand::VoiceTurn {
+                        transcript_override: Some("quem foi rousseau?".to_string()),
+                    }
+                );
+            }
+            _ => panic!("unexpected decoded request"),
+        }
+    }
+
+    fn encoded_variant_tag(request: &VisionRequest) -> u8 {
+        *bincode::serde::encode_to_vec(request, bincode::config::standard())
+            .expect("encode request")
+            .first()
+            .expect("encoded request has variant tag")
     }
 }

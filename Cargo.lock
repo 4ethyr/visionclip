@@ -284,6 +284,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "coddy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "gtk4",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "visionclip-common",
+]
+
+[[package]]
+name = "coddy-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2665,6 +2689,7 @@ name = "visionclip-common"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "coddy-core",
  "directories",
  "serde",
  "serde_json",

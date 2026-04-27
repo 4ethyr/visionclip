@@ -20,10 +20,15 @@ pub use error::{AppError, AppResult};
 pub use intent::{IntentDetection, IntentKind};
 pub use ipc::{
     read_message, write_message, Action, ApplicationLaunchJob, CaptureJob, HealthCheckJob,
-    JobResult, SessionType, UrlOpenJob, VisionRequest, VoiceSearchJob,
+    JobResult, ReplCommandJob, SessionType, UrlOpenJob, VisionRequest, VoiceSearchJob,
 };
 pub use portal::{
     current_desktops, screenshot_portal_backends_for_current_desktop, summarize_portal_backends,
     PortalBackendDescriptor,
 };
 pub use router::{AgentDecision, ProposedAction};
+
+pub use coddy_core::{
+    ContextPolicy, ReplCommand, ReplEvent, ReplIntent, SearchResultContext, ShortcutConflictPolicy,
+    ShortcutDecision,
+};

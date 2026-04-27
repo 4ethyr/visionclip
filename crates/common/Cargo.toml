@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 bincode.workspace = true
+coddy-core.workspace = true
 directories.workspace = true
 serde.workspace = true
 serde_json.workspace = true
