@@ -1,5 +1,37 @@
 # Plano de Implementação
 
+## MVP Vertical
+
+O primeiro MVP deve provar o caminho mais crítico para a experiência do usuário antes de avançar para o modo desktop app completo:
+
+```text
+atalho global -> overlay listening -> transcript mock/real -> intent -> resposta textual -> TTS serializado -> logs/diagnóstico
+```
+
+Escopo do MVP:
+
+- `coddy voice --overlay` instalado e acionável pelo desktop.
+- Lock de concorrência para impedir duas sessões de voz simultâneas.
+- Overlay transparente em estado `listening` antes de ASR/LLM.
+- `coddy shortcuts test` para validar bind, overlay, lock, socket e ambiente gráfico.
+- `coddy ask` com transcript textual para testar o router sem microfone.
+- `SearchResultContext` mockado para validar síntese baseada em fatos.
+- TTS reaproveitando a fila serializada existente.
+
+Fora do MVP:
+
+- modo advanced completo;
+- edição agentic de arquivos;
+- RAG persistente;
+- Monaco/diff viewer;
+- gerenciador visual de modelos.
+
+Critério de saída do MVP:
+
+- um usuário em GNOME/Kali pressiona o atalho, vê a overlay, fala uma pergunta curta, recebe texto e áudio sem concorrência;
+- o mesmo fluxo passa com transcript mockado em teste automatizado;
+- falha de atalho ou daemon gera diagnóstico acionável, não silêncio.
+
 ## Fase 0: Fundamentos de Domínio
 
 Objetivo: criar contratos antes de UI.
@@ -25,15 +57,24 @@ Entregáveis:
 
 - `VisionRequest::ReplCommand`
 - eventos progressivos
+- `ShortcutTriggered`, `OverlayShown` e eventos de busca/contexto
 - screen classification inicial
 - endpoint de sessão
 - integração com captura/OCR atual
 - TTS serializado reaproveitado
+- `CoddyShortcutBroker` com lock de sessão ativa
+- `coddy doctor shortcuts`
+- `coddy shortcuts install`
+- `coddy shortcuts test`
 
 Critério de aceite:
 
 - CLI consegue enviar `coddy ask "explique a tela"` com transcript mockado.
 - Testes cobrem `Practice`, `UnknownAssessment`, `RestrictedAssessment`.
+- pressionar o atalho dispara overlay `listening` antes de ASR/LLM;
+- segundo acionamento durante fala não cria duas vozes simultâneas;
+- logs de atalho incluem binding, comando, run id e resultado.
+- `coddy shortcuts test` valida overlay, lock, socket do daemon e ambiente gráfico sem chamar LLM.
 
 ## Fase 2: Frontend Base
 
@@ -87,6 +128,7 @@ Entregáveis:
 
 - `ScreenKind` classifier
 - extração de blocos de código
+- extração de `ScreenRegion` com bounding boxes, confiança e fonte
 - linguagem por heurística + Tree-sitter
 - detecção de erro/stack trace
 - prompt `DebugCode`
@@ -98,7 +140,31 @@ Critério de aceite:
 - precisão aceitável documentada.
 - nenhum teste real de terceiros precisa ser usado.
 
-## Fase 5: Assessment Assistant
+## Fase 5: Web Search e AI Overview Visível
+
+Objetivo: responder pesquisas usando contexto real extraído da busca e da página visível.
+
+Entregáveis:
+
+- `SearchResultContext`
+- extrator de resultados orgânicos
+- detector de região `AiOverview`
+- `SearchExtractionPolicy`
+- listener de renderização com timeout configurável
+- fixtures de páginas/renderizações com e sem AI Overview
+- prompt de síntese baseado em fontes
+- fallback para busca tradicional quando AI Overview não existir
+
+Critério de aceite:
+
+- resposta menciona conteúdo extraído quando `ai_overview_text` existir;
+- resposta não usa template se a extração falhar;
+- fontes orgânicas são preservadas no contexto;
+- não tenta contornar CAPTCHA, autenticação, paywall ou bloqueio técnico;
+- TTS fala a síntese completa dentro do limite de contexto configurado.
+- testes de fixture verificam que fatos específicos da AI Overview aparecem na resposta final.
+
+## Fase 6: Assessment Assistant
 
 Objetivo: múltipla escolha e coding practice com integridade.
 
@@ -118,7 +184,7 @@ Critério de aceite:
 - em `RestrictedAssessment`, não responde alternativa final.
 - em `UnknownAssessment`, pede confirmação antes de resposta direta.
 
-## Fase 6: Advanced Desktop App
+## Fase 7: Advanced Desktop App
 
 Objetivo: app completo.
 
@@ -139,7 +205,7 @@ Critério de aceite:
 - model manager lista modelos locais.
 - settings persistem em config.
 
-## Fase 7: Agentic Code Workflows
+## Fase 8: Agentic Code Workflows
 
 Objetivo: permitir mudanças de código com aprovação.
 
@@ -172,6 +238,9 @@ Critério de aceite:
 ## Branches Sugeridas
 
 - `feat/coddy-core-session-domain`
+- `feat/coddy-shortcut-broker`
+- `feat/coddy-voice-overlay-mvp`
+- `feat/coddy-search-context`
 - `feat/coddy-floating-terminal`
 - `feat/coddy-assessment-policy`
 - `feat/coddy-screen-code-understanding`
@@ -181,11 +250,15 @@ Critério de aceite:
 ## Ordem Recomendada
 
 1. `coddy-core`
-2. daemon events
-3. frontend base
-4. floating terminal
-5. screen/code understanding
-6. assessment policy
-7. advanced app
+2. broker de atalho + lock de concorrência
+3. daemon events + `coddy shortcuts test`
+4. overlay/listening MVP
+5. `coddy ask` e transcript mockado
+6. `SearchResultContext` + síntese mockada
+7. frontend base
+8. floating terminal
+9. screen/code understanding
+10. assessment policy
+11. advanced app
 
 Essa ordem reduz risco porque valida o domínio e a integração antes de investir pesado em UI avançada.

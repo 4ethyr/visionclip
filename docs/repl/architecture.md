@@ -44,10 +44,59 @@ Novo app Tauri recomendado para o modo desktop app e para o binário `coddy`.
 Responsabilidades:
 
 - Criar janelas desktop: `main`, `floating-terminal`, `settings`, `model-manager`.
-- Registrar atalhos quando o app estiver ativo.
+- Registrar atalhos do app quando ativo e delegar o atalho global ao broker/fallback do desktop.
 - Conectar UI TypeScript com o daemon.
 - Encapsular permissões nativas.
 - Controlar transparência, blur, always-on-top e focus behavior.
+
+### Atalho Global e Listener Residente
+
+O atalho de voz não deve depender da janela principal estar aberta. O Coddy precisa de um caminho residente e observável:
+
+```text
+GNOME/Tauri shortcut -> coddy voice --overlay -> CoddyShortcutBroker -> visionclip-daemon -> overlay listening -> ASR -> router
+```
+
+Componentes:
+
+- `coddy voice --overlay`: comando leve instalado em `~/.local/bin`, acionado pelo bind do desktop.
+- `CoddyShortcutBroker`: mediador com lock de sessão ativa, responsável por decidir se inicia, ignora, cancela ou substitui uma execução.
+- `VoiceOverlay`: janela transparente always-on-top que aparece antes do ASR iniciar, com estado `listening`, `transcribing`, `thinking`, `speaking` e `error`.
+- `coddy doctor shortcuts`: diagnóstico de bind, comando instalado, permissões, sessão GNOME, variáveis `DISPLAY`, `WAYLAND_DISPLAY` e `DBUS_SESSION_BUS_ADDRESS`.
+
+MVP recomendado:
+
+- O bind do GNOME chama `coddy voice --overlay`.
+- O comando cria um lock não bloqueante em `XDG_RUNTIME_DIR/visionclip/coddy-voice.lock`.
+- Se não houver sessão ativa, mostra overlay e envia `VoiceTurn` ao daemon.
+- Se houver sessão ativa, aplica `ShortcutConflictPolicy`.
+- A evolução posterior pode manter um broker residente via `systemd --user`, mas o contrato externo do comando permanece o mesmo.
+
+```rust
+pub enum ShortcutConflictPolicy {
+    IgnoreWhileBusy,
+    StopSpeakingAndListen,
+    CancelRunAndListen,
+}
+
+pub enum ShortcutDecision {
+    StartListening { run_id: RunId },
+    IgnoredBusy { active_run_id: RunId },
+    StoppedSpeaking { previous_run_id: RunId, next_run_id: RunId },
+    CancelledRun { previous_run_id: RunId, next_run_id: RunId },
+    Failed { reason: String },
+}
+```
+
+Estratégia Linux:
+
+- GNOME/Kali/Ubuntu/Debian: instalar bind via `gsettings org.gnome.settings-daemon.plugins.media-keys custom-keybindings`.
+- App Tauri residente: registrar atalho via plugin quando disponível, mas manter GNOME Media Keys como fallback.
+- Conflito de atalho: detectar quando o bind não chama o comando e sugerir tecla alternativa.
+- Logs: gravar cada acionamento em `~/.local/state/visionclip/coddy-shortcut.log` com `run_id`, binding, comando e resultado.
+- Concorrência: se houver voz/TTS/execução ativa, o segundo acionamento deve cancelar, pausar ou ignorar conforme preferência, nunca iniciar duas falas simultâneas.
+
+Critério mínimo: pressionar o atalho configurado deve abrir a overlay em estado `listening` antes de qualquer chamada ao modelo.
 
 ### Superfície de Comandos `coddy`
 
@@ -68,6 +117,9 @@ coddy screen choice           # captura tela e extrai questão/opções
 coddy voice                   # push-to-talk com overlay
 coddy models                  # lista modelos locais e status
 coddy doctor                  # diagnóstico específico do REPL/UI
+coddy doctor shortcuts        # valida bind, comando, ambiente gráfico e último acionamento
+coddy shortcuts install       # instala/repara bind global do desktop
+coddy shortcuts test          # simula acionamento e valida overlay/listening sem falar com LLM
 coddy settings                # abre configurações
 ```
 
@@ -227,8 +279,17 @@ pub enum SessionStatus {
 O daemon deve emitir eventos granulares, não apenas resposta final.
 
 ```rust
+pub enum ShortcutSource {
+    GnomeMediaKeys,
+    TauriGlobalShortcut,
+    Cli,
+    SystemdUserService,
+}
+
 pub enum ReplEvent {
     SessionStarted { session_id: SessionId },
+    ShortcutTriggered { binding: String, source: ShortcutSource },
+    OverlayShown { mode: ReplMode },
     VoiceListeningStarted,
     VoiceTranscriptPartial { text: String },
     VoiceTranscriptFinal { text: String },
@@ -237,6 +298,8 @@ pub enum ReplEvent {
     IntentDetected { intent: ReplIntent, confidence: f32 },
     PolicyEvaluated { policy: AssistancePolicy, allowed: bool },
     ModelSelected { model: String },
+    SearchStarted { query: String, provider: String },
+    SearchContextExtracted { provider: String, organic_results: usize, ai_overview_present: bool },
     TokenDelta { run_id: RunId, text: String },
     ToolStarted { name: String },
     ToolCompleted { name: String, status: ToolStatus },
@@ -364,12 +427,128 @@ pub struct ScreenUnderstandingContext {
     pub source_app: Option<String>,
     pub visible_text: String,
     pub detected_kind: ScreenKind,
+    pub regions: Vec<ScreenRegion>,
     pub code_blocks: Vec<CodeBlock>,
     pub question: Option<QuestionBlock>,
     pub multiple_choice_options: Vec<ChoiceOption>,
     pub terminal_blocks: Vec<TerminalBlock>,
     pub confidence: f32,
 }
+
+pub struct ScreenRegion {
+    pub id: String,
+    pub kind: ScreenRegionKind,
+    pub text: String,
+    pub bounding_box: BoundingBox,
+    pub confidence: f32,
+    pub source: ExtractionSource,
+}
+
+pub enum ScreenRegionKind {
+    AiOverview,
+    SearchResult,
+    Question,
+    Choice,
+    Code,
+    Terminal,
+    BrowserAddress,
+    Documentation,
+    Unknown,
+}
+
+pub enum ExtractionSource {
+    Accessibility,
+    BrowserDom,
+    ScreenshotOcr,
+    UserProvidedText,
+}
+
+pub struct BoundingBox {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+```
+
+## Busca Web e Visão Geral por IA Visível
+
+O Coddy deve responder pesquisas com base no contexto encontrado, não em templates. Quando o usuário pesquisar no Google e houver uma Visão Geral por IA renderizada na página, o sistema pode usar esse conteúdo como fonte auxiliar, desde que ele esteja visível na sessão do usuário e sem contornar bloqueios, autenticação, CAPTCHA ou paywall.
+
+Regras de extração:
+
+- Usar apenas conteúdo visível ao usuário ou retornado por provedores configurados.
+- Não automatizar bypass de CAPTCHA, paywall, login, consent wall ou bloqueio técnico.
+- Preferir DOM/acessibilidade quando a página permitir; usar OCR local quando o conteúdo só estiver disponível visualmente.
+- Tratar AI Overview como fonte auxiliar, não como verdade absoluta.
+- Quando `ai_overview_text` existir, a resposta deve derivar fatos desse texto e preservar divergências ou incertezas.
+- Quando a extração falhar, responder com erro útil ou fallback baseado em resultados orgânicos; nunca preencher com template genérico.
+
+Pipeline:
+
+1. Gerar query limpa a partir do pedido do usuário.
+2. Executar busca pelo provedor configurado ou capturar página já aberta.
+3. Aguardar renderização de blocos relevantes por tempo limitado.
+4. Extrair texto visível por DOM permitido, acessibilidade ou OCR.
+5. Classificar regiões como `AiOverview`, resultado orgânico, snippets, fontes e links.
+6. Validar o resumo com resultados orgânicos quando possível.
+7. Gerar resposta coesa, citando que parte do contexto veio da visão geral visível quando aplicável.
+8. Enviar resposta para texto e TTS, respeitando limite de fala e cancelamento.
+
+```rust
+pub struct SearchResultContext {
+    pub query: String,
+    pub provider: SearchProvider,
+    pub organic_results: Vec<SearchResultItem>,
+    pub ai_overview_text: Option<String>,
+    pub ai_overview_sources: Vec<SearchResultItem>,
+    pub visible_text: String,
+    pub captured_at: DateTime<Utc>,
+    pub confidence: f32,
+    pub source_urls: Vec<String>,
+    pub extraction_method: ExtractionSource,
+}
+
+pub struct SearchResultItem {
+    pub title: String,
+    pub url: String,
+    pub snippet: String,
+    pub rank: usize,
+    pub source_quality: SourceQuality,
+}
+
+pub enum SearchExtractionPolicy {
+    RenderedVisibleOnly,
+    ProviderApiOnly,
+    HybridVisibleThenOrganic,
+}
+
+pub enum SourceQuality {
+    Primary,
+    Official,
+    ReputableSecondary,
+    UserGenerated,
+    Unknown,
+}
+```
+
+Prompt interno para síntese:
+
+```text
+Você responde uma pesquisa usando apenas o SearchResultContext.
+
+Prioridade:
+1. Se ai_overview_text existir, extraia os pontos principais dele.
+2. Use organic_results para validar, complementar ou apontar incerteza.
+3. Não invente fatos, datas, fontes ou links.
+4. Se o contexto for insuficiente, diga isso claramente.
+5. Responda em pt-BR natural, sem mencionar símbolos markdown desnecessários.
+
+Retorne:
+- resumo curto;
+- pontos principais;
+- ressalva de fonte quando usar Visão Geral por IA visível;
+- fontes relevantes quando disponíveis.
 ```
 
 ## Política de Segurança
@@ -396,13 +575,21 @@ Para modo agentic, qualquer execução local deve exibir:
 
 ## Baixa Latência
 
-Metas iniciais:
+As metas devem separar caminho quente e caminho frio. O usuário percebe o atalho como quebrado quando não há feedback visual imediato; por isso a overlay precisa aparecer antes de modelo, OCR ou ASR.
 
-- Abrir floating terminal: menos de 150 ms após atalho.
-- Início de gravação: menos de 250 ms após UI visível.
-- Transcrição curta local: menos de 1500 ms após fala.
-- Primeira resposta textual: menos de 2500 ms para perguntas simples.
-- Primeiro áudio: menos de 3500 ms quando TTS ligado.
+Metas em caminho quente, com daemon e broker residentes:
+
+- Atalho até overlay visível: menos de 150 ms.
+- Overlay até início de gravação: menos de 250 ms.
+- Transcrição curta local após fim da fala: menos de 1500 ms.
+- Primeira resposta textual para perguntas simples: menos de 2500 ms.
+- Primeiro áudio quando TTS está aquecido: menos de 3500 ms.
+
+Metas em caminho frio, após boot ou sem daemon ativo:
+
+- Atalho até overlay visível com bootstrap: menos de 900 ms.
+- Bootstrap do daemon/broker: menos de 2500 ms.
+- Diagnóstico acionável se o daemon não subir: menos de 5000 ms.
 
 Estratégias:
 

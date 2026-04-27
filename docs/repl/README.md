@@ -45,12 +45,27 @@ O foco é auxiliar dúvidas técnicas, estudo, depuração, explicação de cód
 O Coddy não deve ser apenas uma tela bonita sobre o daemon atual. Ele deve ser uma camada de orquestração com estado próprio:
 
 - Captura contexto de tela/código.
+- Extrai contexto de buscas e regiões visíveis, incluindo Visão Geral por IA quando renderizada ao usuário.
 - Classifica intenção.
 - Envia tarefas ao daemon/LLM.
 - Exibe streaming parcial.
 - Permite interromper, pausar, reenviar e auditar.
 - Respeita permissões e integridade de assessments.
 - Mantém baixa latência, com degradação graciosa para modelos locais menores.
+
+## Primeiro Marco
+
+O primeiro marco de desenvolvimento deve ser o MVP de voz:
+
+- atalho global confiável no GNOME/Kali;
+- overlay transparente em estado `listening`;
+- transcript real ou mockado;
+- router com resposta textual;
+- TTS serializado sem sobreposição;
+- diagnóstico `coddy doctor shortcuts`;
+- busca com contexto mockado antes de depender de Google real.
+
+Esse marco valida a experiência central antes do modo desktop app avançado.
 
 ## Princípios
 

@@ -124,6 +124,7 @@ Componentes:
 O terminal flutuante deve:
 
 - abrir com atalho;
+- exibir estado `listening` imediatamente após o atalho, antes de qualquer resposta do modelo;
 - ficar centralizado ou próximo ao cursor, configurável;
 - ser always-on-top quando permitido;
 - ter fundo transparente real;
@@ -142,6 +143,7 @@ O terminal flutuante deve:
 - `thinking`: skeleton ou "thinking trace" curto.
 - `streaming`: tokens aparecem incrementalmente.
 - `speaking`: ícone de alto-falante com pulso.
+- `busy`: sessão ativa detectada; mostrar ação tomada, como "fala interrompida" ou "atalho ignorado".
 - `blocked`: badge de política com explicação curta.
 - `error`: vermelho desaturado, sem alarmismo visual.
 
@@ -316,6 +318,20 @@ Requisitos:
 - Leitores de tela para status: `listening`, `thinking`, `speaking`, `blocked`.
 - Não depender apenas de cor para status.
 
+## Diagnóstico de Atalhos
+
+`coddy doctor shortcuts` deve ter uma saída legível na UI e na CLI:
+
+- bind instalado;
+- comando resolvido;
+- binário executável;
+- socket do daemon acessível;
+- ambiente gráfico detectado;
+- último acionamento com timestamp;
+- correção sugerida quando algo falhar.
+
+Na UI, falhas de atalho devem aparecer como cards acionáveis, não apenas logs.
+
 ## Conteúdo e Tom
 
 O agent CLI deve responder de forma curta quando a ação for simples:
@@ -339,6 +355,8 @@ Posso ajudar com a abordagem e os conceitos, mas não posso indicar a resposta f
 ## Critérios de Aceite UI
 
 - Floating terminal abre em menos de 150 ms após atalho em host com daemon ativo.
+- Atalho global funciona com app fechado via broker residente ou fallback GNOME Media Keys.
+- Se o atalho falhar, `coddy doctor shortcuts` mostra causa e correção sugerida.
 - Fundo transparente funciona em GNOME/Kali no modo overlay/app quando suportado.
 - Opacity e blur são configuráveis.
 - Input não perde foco durante streaming.
