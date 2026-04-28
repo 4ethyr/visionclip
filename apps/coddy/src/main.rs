@@ -42,6 +42,8 @@ enum Command {
         #[arg(long, default_value_t = false)]
         overlay: bool,
     },
+    StopSpeaking,
+    StopActiveRun,
     Shortcuts {
         #[command(subcommand)]
         command: ShortcutCommand,
@@ -149,6 +151,14 @@ async fn main() -> Result<()> {
             .await?;
             print_job_result(result)
         }
+        Some(Command::StopSpeaking) => {
+            let result = coddy_client(&config)?.stop_speaking().await?;
+            print_job_result(result)
+        }
+        Some(Command::StopActiveRun) => {
+            let result = coddy_client(&config)?.stop_active_run().await?;
+            print_job_result(result)
+        }
         Some(Command::Shortcuts {
             command: ShortcutCommand::Test,
         }) => run_shortcuts_test(&config).await,
@@ -173,7 +183,7 @@ async fn main() -> Result<()> {
             command: DoctorCommand::Shortcuts,
         }) => run_shortcuts_doctor(&config).await,
         None => {
-            println!("Use `coddy ask`, `coddy voice`, `coddy session snapshot`, `coddy shortcuts test` ou `coddy doctor shortcuts`.");
+            println!("Use `coddy ask`, `coddy voice`, `coddy stop-speaking`, `coddy stop-active-run`, `coddy session snapshot`, `coddy shortcuts test` ou `coddy doctor shortcuts`.");
             Ok(())
         }
     }
@@ -442,6 +452,20 @@ mod tests {
             }
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn parses_stop_commands() {
+        let stop_speaking =
+            Cli::try_parse_from(["coddy", "stop-speaking"]).expect("parse stop-speaking");
+        assert!(matches!(stop_speaking.command, Some(Command::StopSpeaking)));
+
+        let stop_active_run =
+            Cli::try_parse_from(["coddy", "stop-active-run"]).expect("parse stop-active-run");
+        assert!(matches!(
+            stop_active_run.command,
+            Some(Command::StopActiveRun)
+        ));
     }
 
     #[test]
