@@ -92,26 +92,9 @@ export function registerIpcHandlers(): void {
     ])
 
     activeStreams.set(streamId, child)
+    void pumpWatchStream(streamId, child)
 
-    // Read lines and push to ALL renderer windows
-    const rl = createInterface({ input: child.stdout!, crlfDelay: Infinity })
-    for await (const line of rl) {
-      try {
-        const parsed = JSON.parse(line)
-        for (const win of BrowserWindow.getAllWindows()) {
-          win.webContents.send('repl:watch-event', { streamId, ...parsed })
-        }
-      } catch {
-        // non-JSON line — ignore
-      }
-    }
-
-    // Stream ended naturally
-    for (const win of BrowserWindow.getAllWindows()) {
-      win.webContents.send('repl:watch-event', { streamId, done: true })
-    }
-
-    activeStreams.delete(streamId)
+    return { streamId }
   })
 
   ipcMain.handle('repl:watch-close', async (_event, streamId: string) => {
@@ -143,14 +126,13 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle('repl:stop-speaking', async () => {
-    const child = coddySpawn(['ask', '/stop'])
+    const child = coddySpawn(['stop-speaking'])
     await readJson(child)
     return { ok: true }
   })
 
   ipcMain.handle('repl:stop-active-run', async () => {
-    // StopSpeaking also interrupts the active run in current daemon
-    const child = coddySpawn(['ask', '/stop'])
+    const child = coddySpawn(['stop-active-run'])
     await readJson(child)
     return { ok: true }
   })
@@ -170,6 +152,30 @@ export function cleanupStreams(): void {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+async function pumpWatchStream(streamId: string, child: ChildProcess): Promise<void> {
+  try {
+    const stdout = child.stdout
+    if (!stdout) return
+
+    const rl = createInterface({ input: stdout, crlfDelay: Infinity })
+    for await (const line of rl) {
+      try {
+        const parsed = JSON.parse(line)
+        for (const win of BrowserWindow.getAllWindows()) {
+          win.webContents.send('repl:watch-event', { streamId, ...parsed })
+        }
+      } catch {
+        // non-JSON line - ignore daemon logs or progress text
+      }
+    }
+  } finally {
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send('repl:watch-event', { streamId, done: true })
+    }
+    activeStreams.delete(streamId)
+  }
+}
 
 function normalizeCommandResult(raw: unknown): {
   text?: string
