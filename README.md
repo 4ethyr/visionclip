@@ -99,6 +99,16 @@ Defaults importantes desses helpers:
 - usam `gemma4:e2b` tambem como OCR por padrao
 - configuram `capture_timeout_ms = 60000`
 
+## Segredos locais
+
+Arquivos `openrouter*` na raiz do repositório são tratados como locais e ignorados pelo Git. Antes de commitar, rode:
+
+```bash
+./scripts/guard_no_secrets.sh
+```
+
+Esse script falha se detectar padrões de chave OpenRouter em arquivos rastreados ou staged.
+
 ## Voz e agente local
 
 O modo `--voice-agent` captura a fala, resolve uma intenção local simples e decide entre abrir aplicativo ou pesquisar na web. Ele é o caminho usado pelo atalho global instalado pelo script `scripts/install_gnome_voice_shortcut.sh`.

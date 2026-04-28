@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Agentic Execution Mode</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&amp;family=JetBrains+Mono:wght@400&amp;family=Manrope:wght@400;500;600&amp;family=Space+Grotesk:wght@500;700;900&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            "colors": {
+                    "surface-container-highest": "#353534",
+                    "on-tertiary-fixed-variant": "#474746",
+                    "on-surface-variant": "#b9cacb",
+                    "surface-container-high": "#2a2a2a",
+                    "surface-bright": "#3a3939",
+                    "primary-container": "#00f0ff",
+                    "on-surface": "#e5e2e1",
+                    "tertiary-container": "#dcd9d8",
+                    "on-primary-fixed-variant": "#004f54",
+                    "surface-variant": "#353534",
+                    "surface-container-low": "#1c1b1b",
+                    "primary-fixed-dim": "#00dbe9",
+                    "on-secondary-container": "#fff6fc",
+                    "primary-fixed": "#7df4ff",
+                    "surface-container-lowest": "#0e0e0e",
+                    "on-secondary-fixed": "#320047",
+                    "on-error": "#690005",
+                    "on-secondary": "#520072",
+                    "surface-dim": "#131313",
+                    "secondary-container": "#b600f8",
+                    "on-primary-container": "#006970",
+                    "surface": "#131313",
+                    "error-container": "#93000a",
+                    "surface-tint": "#00dbe9",
+                    "background": "#131313",
+                    "on-tertiary-container": "#5f5e5e",
+                    "outline": "#849495",
+                    "on-secondary-fixed-variant": "#74009f",
+                    "surface-container": "#201f1f",
+                    "error": "#ffb4ab",
+                    "secondary-fixed-dim": "#ebb2ff",
+                    "inverse-surface": "#e5e2e1",
+                    "inverse-on-surface": "#313030",
+                    "tertiary": "#f8f5f5",
+                    "tertiary-fixed": "#e5e2e1",
+                    "secondary-fixed": "#f8d8ff",
+                    "on-error-container": "#ffdad6",
+                    "on-primary-fixed": "#002022",
+                    "on-tertiary-fixed": "#1c1b1b",
+                    "on-background": "#e5e2e1",
+                    "on-tertiary": "#313030",
+                    "tertiary-fixed-dim": "#c8c6c5",
+                    "primary": "#dbfcff",
+                    "on-primary": "#00363a",
+                    "inverse-primary": "#006970",
+                    "secondary": "#ebb2ff",
+                    "outline-variant": "#3b494b"
+            },
+            "borderRadius": {
+                    "DEFAULT": "0.125rem",
+                    "lg": "0.25rem",
+                    "xl": "0.5rem",
+                    "full": "0.75rem"
+            },
+            "spacing": {
+                    "md": "24px",
+                    "base": "8px",
+                    "lg": "48px",
+                    "xs": "4px",
+                    "margin": "24px",
+                    "xl": "80px",
+                    "sm": "12px",
+                    "gutter": "16px"
+            },
+            "fontFamily": {
+                    "label-sm": [
+                            "Inter"
+                    ],
+                    "headline-md": [
+                            "Space Grotesk"
+                    ],
+                    "code-md": [
+                            "JetBrains Mono"
+                    ],
+                    "body-base": [
+                            "Manrope"
+                    ],
+                    "display-lg": [
+                            "Space Grotesk"
+                    ]
+            },
+            "fontSize": {
+                    "label-sm": [
+                            "12px",
+                            {
+                                    "lineHeight": "1",
+                                    "letterSpacing": "0.05em",
+                                    "fontWeight": "600"
+                            }
+                    ],
+                    "headline-md": [
+                            "24px",
+                            {
+                                    "lineHeight": "1.2",
+                                    "fontWeight": "500"
+                            }
+                    ],
+                    "code-md": [
+                            "14px",
+                            {
+                                    "lineHeight": "1.5",
+                                    "fontWeight": "400"
+                            }
+                    ],
+                    "body-base": [
+                            "16px",
+                            {
+                                    "lineHeight": "1.6",
+                                    "fontWeight": "400"
+                            }
+                    ],
+                    "display-lg": [
+                            "48px",
+                            {
+                                    "lineHeight": "1.1",
+                                    "letterSpacing": "-0.02em",
+                                    "fontWeight": "700"
+                            }
+                    ]
+            }
+        },
+        }
+      }
+    </script>
+</head>
+<body class="bg-background text-on-surface h-screen w-full overflow-hidden flex font-body-base text-body-base">
+<!-- SideNavBar -->
+<nav class="hidden md:flex flex-col fixed left-0 top-0 h-screen z-40 bg-zinc-950/40 backdrop-blur-2xl border-r border-white/5 shadow-xl w-[240px]">
+<!-- Header -->
+<div class="p-6 border-b border-white/5 flex items-center gap-4">
+<div class="w-10 h-10 rounded-full bg-surface-container-high flex items-center justify-center border border-outline-variant/30 overflow-hidden shrink-0">
+<img alt="Agent Pulse" class="w-full h-full object-cover" data-alt="Abstract 3d render of a glowing futuristic ai core in dark studio lighting" src="https://lh3.googleusercontent.com/aida-public/AB6AXuDw77s2NRQf2CtNzbbyDul6q_4X5BY--FFVdt3Habagm0MMv2YkgOBM1M_j2s_ia30M7ogM38vWuj6FBy9k5UJVy6waOdgJExh9dKK834aPPWJocsoE5IGNMQhaO3F1Hod7kL9v8zBG2fTRig-fqqBdjDcgIt6k7FGUCXL4StVDaql_1HQPHW0YrwQ2wi-AWZXJKRZAeENEgzcCKBheG1-gsy1-gqhHsPHSDxurkK2dpka4EP0OST3_-sNs1D1h1ioZZ8KKf4e-qpe4"/>
+</div>
+<div>
+<h2 class="font-headline-md text-headline-md text-cyan-400 font-black tracking-tight text-sm">SYSTEM_REPL</h2>
+<p class="font-label-sm text-label-sm text-on-surface-variant mt-1 opacity-70">V_4.0.2_ACTIVE</p>
+</div>
+</div>
+<!-- Main Tabs -->
+<div class="flex-1 py-4 flex flex-col gap-1 px-2">
+<a class="font-label-sm text-label-sm tracking-widest uppercase text-cyan-400 bg-cyan-400/5 border-r-2 border-cyan-400 flex items-center px-4 py-3 gap-3 transition-all" href="#">
+<span class="material-symbols-outlined text-[18px]">terminal</span>
+<span>Terminal</span>
+</a>
+<a class="font-label-sm text-label-sm tracking-widest uppercase text-zinc-600 flex items-center px-4 py-3 gap-3 hover:bg-white/5 hover:text-zinc-200 transition-all duration-300 ease-in-out" href="#">
+<span class="material-symbols-outlined text-[18px]">folder_open</span>
+<span>Workspace</span>
+</a>
+<a class="font-label-sm text-label-sm tracking-widest uppercase text-zinc-600 flex items-center px-4 py-3 gap-3 hover:bg-white/5 hover:text-zinc-200 transition-all duration-300 ease-in-out" href="#">
+<span class="material-symbols-outlined text-[18px]">hub</span>
+<span>Neural_Link</span>
+</a>
+<a class="font-label-sm text-label-sm tracking-widest uppercase text-zinc-600 flex items-center px-4 py-3 gap-3 hover:bg-white/5 hover:text-zinc-200 transition-all duration-300 ease-in-out" href="#">
+<span class="material-symbols-outlined text-[18px]">history</span>
+<span>History</span>
+</a>
+</div>
+<!-- Footer Tabs -->
+<div class="py-4 border-t border-white/5 flex flex-col gap-1 px-2 mt-auto">
+<a class="font-label-sm text-label-sm tracking-widest uppercase text-zinc-600 flex items-center px-4 py-3 gap-3 hover:bg-white/5 hover:text-zinc-200 transition-all duration-300 ease-in-out" href="#">
+<span class="material-symbols-outlined text-[18px]">settings</span>
+<span>Config</span>
+</a>
+<a class="font-label-sm text-label-sm tracking-widest uppercase text-zinc-600 flex items-center px-4 py-3 gap-3 hover:bg-white/5 hover:text-zinc-200 transition-all duration-300 ease-in-out" href="#">
+<span class="material-symbols-outlined text-[18px]">menu_book</span>
+<span>Docs</span>
+</a>
+</div>
+</nav>
+<!-- Main Content Wrapper -->
+<main class="flex-1 flex flex-col md:ml-[240px] h-screen relative">
+<!-- TopAppBar -->
+<header class="flex justify-between items-center h-12 px-6 w-full bg-zinc-950/60 backdrop-blur-lg border-b border-white/10 shadow-none z-30 shrink-0">
+<div class="flex items-center gap-4">
+<h1 class="text-lg font-bold tracking-tighter text-cyan-400 drop-shadow-[0_0_8px_rgba(0,240,255,0.5)] uppercase">AETHER_CORE</h1>
+</div>
+<div class="flex items-center gap-6 font-['Space_Grotesk'] text-xs tracking-widest uppercase">
+<span class="text-cyan-400 font-bold hidden sm:inline-block">LOCAL_SLM_V2</span>
+<div class="flex items-center gap-4 text-zinc-500">
+<span class="material-symbols-outlined cursor-pointer active:scale-95 hover:text-cyan-300 transition-colors duration-200 text-[18px]">wifi_tethering</span>
+<span class="material-symbols-outlined cursor-pointer active:scale-95 hover:text-cyan-300 transition-colors duration-200 text-[18px]">terminal</span>
+<span class="material-symbols-outlined cursor-pointer active:scale-95 hover:text-cyan-300 transition-colors duration-200 text-[18px]">notifications</span>
+</div>
+</div>
+</header>
+<!-- Split View Canvas -->
+<div class="flex-1 flex flex-col lg:flex-row overflow-hidden p-margin gap-gutter w-full max-w-[1600px] mx-auto">
+<!-- Left Pane: Conversation & Task Tree -->
+<section class="flex-1 flex flex-col min-w-[400px] bg-surface-container/60 backdrop-blur-[20px] rounded-xl border border-white/10 overflow-hidden shadow-[0_20px_40px_rgba(0,0,0,0.4)]">
+<!-- Conversation Header Area / Task Tree -->
+<div class="p-6 border-b border-white/5 bg-gradient-to-br from-surface-container-high/80 to-transparent relative overflow-hidden">
+<!-- Glassmorphic Aurora gradient -->
+<div class="absolute -top-10 -right-10 w-40 h-40 bg-secondary-container/20 rounded-full blur-[40px] pointer-events-none"></div>
+<h3 class="font-label-sm text-label-sm text-primary uppercase mb-4 flex items-center gap-2">
+<span class="material-symbols-outlined text-[16px]">account_tree</span>
+                        Plan of Attack
+                    </h3>
+<!-- Visual Task Tree -->
+<div class="flex flex-col gap-0 pl-2">
+<!-- Completed Step -->
+<div class="flex gap-4 relative">
+<div class="w-px h-full bg-outline-variant absolute left-[5px] top-4"></div>
+<div class="w-3 h-3 rounded-full border border-outline-variant bg-surface-dim z-10 mt-1.5 flex items-center justify-center shrink-0">
+<div class="w-1.5 h-1.5 bg-outline rounded-full"></div>
+</div>
+<div class="pb-4">
+<p class="font-code-md text-code-md text-on-surface-variant line-through opacity-70">Analyze project structure</p>
+</div>
+</div>
+<!-- Current Pulsing Step -->
+<div class="flex gap-4 relative">
+<div class="w-px h-full bg-outline-variant absolute left-[5px] top-4"></div>
+<div class="w-3 h-3 rounded-full border border-primary-container bg-surface-dim z-10 mt-1.5 flex items-center justify-center shrink-0 shadow-[0_0_8px_rgba(0,240,255,0.6)]">
+<div class="w-1.5 h-1.5 bg-primary-container rounded-full"></div>
+</div>
+<div class="pb-4">
+<p class="font-code-md text-code-md text-primary font-bold">Install required dependencies via NPM</p>
+<p class="font-label-sm text-label-sm text-on-surface-variant mt-1">Awaiting execution authorization...</p>
+</div>
+</div>
+<!-- Pending Step -->
+<div class="flex gap-4 relative">
+<div class="w-3 h-3 rounded-full border border-outline-variant bg-surface-dim z-10 mt-1.5 flex items-center justify-center shrink-0">
+</div>
+<div>
+<p class="font-code-md text-code-md text-on-surface-variant opacity-50">Refactor auth module</p>
+</div>
+</div>
+</div>
+</div>
+<!-- Chat Messages -->
+<div class="flex-1 overflow-y-auto p-6 flex flex-col gap-6">
+<!-- AI Message -->
+<div class="flex gap-4">
+<div class="w-8 h-8 rounded bg-surface-container-high border border-white/10 flex items-center justify-center shrink-0">
+<span class="material-symbols-outlined text-[16px] text-cyan-400">smart_toy</span>
+</div>
+<div class="flex-1 bg-surface-container-low/80 backdrop-blur-md rounded-lg rounded-tl-none p-4 border border-white/5">
+<p class="font-body-base text-body-base text-on-surface leading-relaxed">I have analyzed the current workspace. To proceed with the authentication refactor, we first need to ensure the latest cryptographic libraries are installed. I have prepared the command sequence.</p>
+</div>
+</div>
+<!-- Streaming Indicator -->
+<div class="flex gap-4 items-start">
+<div class="w-8 h-8 rounded bg-surface-container-high border border-white/10 flex items-center justify-center shrink-0 opacity-50">
+<span class="material-symbols-outlined text-[16px] text-primary">data_usage</span>
+</div>
+<div class="flex-1">
+<p class="font-label-sm text-label-sm text-primary mb-2 flex items-center gap-2 uppercase tracking-widest">
+                                Listening to terminal output...
+                            </p>
+<!-- Skeleton Text Effect -->
+<div class="space-y-2 max-w-sm">
+<div class="h-3 bg-surface-container-high/50 rounded w-full"></div>
+<div class="h-3 bg-surface-container-high/50 rounded w-5/6"></div>
+<div class="h-3 bg-surface-container-high/50 rounded w-4/6"></div>
+</div>
+</div>
+</div>
+</div>
+<!-- Chat Input Area -->
+<div class="p-4 border-t border-white/5 bg-surface-container-highest/50">
+<div class="relative flex items-center">
+<span class="text-primary font-code-md absolute left-4">&gt;</span>
+<input class="w-full bg-transparent border-0 border-b border-outline-variant/50 focus:border-primary-container focus:ring-0 text-on-surface font-code-md text-code-md py-3 pl-8 pr-10 placeholder-on-surface-variant/50 focus:shadow-[0_1px_4px_rgba(0,240,255,0.2)] transition-all" placeholder="Instruct the agent..." type="text"/>
+<button class="absolute right-2 p-2 text-on-surface-variant hover:text-primary transition-colors">
+<span class="material-symbols-outlined text-[20px]">send</span>
+</button>
+</div>
+</div>
+</section>
+<!-- Right Pane: Terminal & Controls -->
+<section class="flex-1 flex flex-col min-w-[400px] bg-[#0c0c0c] rounded-xl border border-white/5 overflow-hidden shadow-inner">
+<!-- Terminal Header -->
+<div class="h-10 bg-surface-container-lowest border-b border-white/5 flex items-center px-4 justify-between shrink-0">
+<div class="flex items-center gap-2">
+<span class="w-2.5 h-2.5 rounded-full bg-outline-variant/50"></span>
+<span class="w-2.5 h-2.5 rounded-full bg-outline-variant/50"></span>
+<span class="w-2.5 h-2.5 rounded-full bg-outline-variant/50"></span>
+</div>
+<span class="font-code-md text-[11px] text-on-surface-variant/60 tracking-wider">BASH_EXEC_ENVIRONMENT</span>
+</div>
+<!-- Terminal Content -->
+<div class="flex-1 p-6 overflow-y-auto font-code-md text-code-md text-on-surface-variant leading-relaxed">
+<div class="opacity-70 mb-4">
+<span class="text-cyan-400">root@aether-core</span>:<span class="text-secondary-fixed">~/workspace/project</span>$ ls -la<br/>
+                        total 128<br/>
+                        drwxr-xr-x   8 root root  4096 Oct 24 10:15 .<br/>
+                        drwxr-xr-x   3 root root  4096 Oct 24 09:00 ..<br/>
+                        -rw-r--r--   1 root root  1024 Oct 24 10:15 package.json<br/>
+                        drwxr-xr-x 452 root root 12288 Oct 24 10:16 node_modules<br/>
+</div>
+<div class="mb-4">
+<span class="text-cyan-400">root@aether-core</span>:<span class="text-secondary-fixed">~/workspace/project</span>$ <span class="text-primary-container">npm install crypto-js jsonwebtoken @types/jsonwebtoken</span><br/>
+<span class="text-on-surface opacity-50 block mt-2">Ready to execute command. Awaiting authorization.</span>
+</div>
+<!-- Blinking cursor simulation (static) -->
+<div class="inline-block w-2 h-4 bg-primary-container opacity-80 align-middle"></div>
+</div>
+<!-- Guardrail Action Bar -->
+<div class="p-6 bg-surface-container-lowest/80 backdrop-blur-md border-t border-white/5 flex items-center justify-end gap-4 shrink-0">
+<button class="px-6 py-2.5 font-label-sm text-label-sm uppercase tracking-widest text-error/80 hover:text-error hover:bg-error/10 border border-transparent rounded transition-colors duration-200">
+                        Cancel
+                    </button>
+<button class="px-6 py-2.5 font-label-sm text-label-sm uppercase tracking-widest text-cyan-400 border border-cyan-400 hover:shadow-[0_0_12px_rgba(0,240,255,0.3)] bg-transparent rounded flex items-center gap-2 transition-all duration-200">
+<span class="material-symbols-outlined text-[18px]">security</span>
+                        Authorize Execution
+                    </button>
+</div>
+</section>
+</div>
+</main>
+</body></html>

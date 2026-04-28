@@ -4,3 +4,9 @@
 /tools/piper-voices/
 /tools/stt-cache/
 /print.png
+.aider*
+/openrouter*
+node_modules/
+dist/
+apps/*/node_modules/
+apps/*/dist/

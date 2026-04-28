@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Aether Core REPL</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&amp;family=Space+Grotesk:wght@400;500;700;900&amp;family=Manrope:wght@400;500;600;700&amp;family=Inter:wght@400;500;600;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "secondary": "#ebb2ff",
+                        "surface": "#131313",
+                        "on-surface-variant": "#b9cacb",
+                        "tertiary-container": "#dcd9d8",
+                        "surface-container": "#201f1f",
+                        "on-secondary-container": "#fff6fc",
+                        "background": "#131313",
+                        "surface-bright": "#3a3939",
+                        "on-surface": "#e5e2e1",
+                        "on-tertiary-fixed": "#1c1b1b",
+                        "surface-variant": "#353534",
+                        "on-tertiary-fixed-variant": "#474746",
+                        "primary-fixed": "#7df4ff",
+                        "tertiary-fixed": "#e5e2e1",
+                        "surface-container-lowest": "#0e0e0e",
+                        "secondary-fixed-dim": "#ebb2ff",
+                        "tertiary": "#f8f5f5",
+                        "on-secondary": "#520072",
+                        "surface-container-highest": "#353534",
+                        "on-primary-fixed-variant": "#004f54",
+                        "on-tertiary-container": "#5f5e5e",
+                        "on-error": "#690005",
+                        "on-primary": "#00363a",
+                        "primary-container": "#00f0ff",
+                        "on-error-container": "#ffdad6",
+                        "inverse-on-surface": "#313030",
+                        "outline-variant": "#3b494b",
+                        "tertiary-fixed-dim": "#c8c6c5",
+                        "error-container": "#93000a",
+                        "on-primary-container": "#006970",
+                        "primary-fixed-dim": "#00dbe9",
+                        "secondary-container": "#b600f8",
+                        "primary": "#dbfcff",
+                        "surface-dim": "#131313",
+                        "outline": "#849495",
+                        "surface-container-low": "#1c1b1b",
+                        "surface-container-high": "#2a2a2a",
+                        "secondary-fixed": "#f8d8ff",
+                        "on-secondary-fixed-variant": "#74009f",
+                        "inverse-surface": "#e5e2e1",
+                        "on-secondary-fixed": "#320047",
+                        "surface-tint": "#00dbe9",
+                        "on-background": "#e5e2e1",
+                        "on-tertiary": "#313030",
+                        "error": "#ffb4ab",
+                        "inverse-primary": "#006970",
+                        "on-primary-fixed": "#002022"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.125rem",
+                        "lg": "0.25rem",
+                        "xl": "0.5rem",
+                        "full": "0.75rem"
+                    },
+                    "spacing": {
+                        "margin": "24px",
+                        "base": "8px",
+                        "lg": "48px",
+                        "md": "24px",
+                        "xs": "4px",
+                        "sm": "12px",
+                        "gutter": "16px",
+                        "xl": "80px"
+                    },
+                    "fontFamily": {
+                        "code-md": ["JetBrains Mono", "monospace"],
+                        "display-lg": ["Space Grotesk", "sans-serif"],
+                        "body-base": ["Manrope", "sans-serif"],
+                        "headline-md": ["Space Grotesk", "sans-serif"],
+                        "label-sm": ["Inter", "sans-serif"]
+                    },
+                    "fontSize": {
+                        "code-md": ["14px", { "lineHeight": "1.5", "fontWeight": "400" }],
+                        "display-lg": ["48px", { "lineHeight": "1.1", "letterSpacing": "-0.02em", "fontWeight": "700" }],
+                        "body-base": ["16px", { "lineHeight": "1.6", "fontWeight": "400" }],
+                        "headline-md": ["24px", { "lineHeight": "1.2", "fontWeight": "500" }],
+                        "label-sm": ["12px", { "lineHeight": "1", "letterSpacing": "0.05em", "fontWeight": "600" }]
+                    }
+                }
+            }
+        }
+    </script>
+<style>
+        .aurora-gradient {
+            background: radial-gradient(circle at top right, rgba(182, 0, 248, 0.15), transparent 40%),
+                        radial-gradient(circle at bottom left, rgba(0, 240, 255, 0.1), transparent 40%);
+        }
+        .code-bg {
+            background: #0d0d0d;
+        }
+        /* Scrollbar styling for that minimal technical feel */
+        ::-webkit-scrollbar {
+            width: 4px;
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: rgba(182, 0, 248, 0.3);
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body class="bg-background text-on-background font-body-base text-body-base min-h-screen flex overflow-hidden">
+<!-- SideNavBar -->
+<nav class="hidden md:flex flex-col fixed left-0 top-0 h-screen z-40 bg-zinc-950/40 backdrop-blur-2xl border-r border-zinc-800/50 w-[240px] shadow-xl border-r border-white/5 transition-all duration-300 ease-in-out">
+<div class="flex items-center px-6 py-lg gap-3 border-b border-white/5">
+<div class="w-8 h-8 rounded-full bg-primary/20 border border-primary flex items-center justify-center text-primary-fixed">
+<span class="material-symbols-outlined" data-icon="memory" style="font-size: 18px;">memory</span>
+</div>
+<div>
+<h1 class="text-primary-fixed font-headline-md text-headline-md tracking-tighter">SYSTEM_REPL</h1>
+<p class="font-label-sm text-label-sm text-zinc-500 uppercase tracking-widest mt-1">V_4.0.2_ACTIVE</p>
+</div>
+</div>
+<div class="flex-1 py-6 space-y-1">
+<a class="text-primary-fixed bg-primary-fixed/5 border-r-2 border-primary-fixed flex items-center px-4 py-3 gap-3 transition-all font-label-sm text-label-sm uppercase tracking-widest hover:bg-white/5 hover:text-zinc-200" href="#">
+<span class="material-symbols-outlined" data-icon="terminal">terminal</span>
+                Terminal
+            </a>
+<a class="text-zinc-600 flex items-center px-4 py-3 gap-3 font-label-sm text-label-sm uppercase tracking-widest hover:bg-white/5 hover:text-zinc-200" href="#">
+<span class="material-symbols-outlined" data-icon="folder_open">folder_open</span>
+                Workspace
+            </a>
+<a class="text-zinc-600 flex items-center px-4 py-3 gap-3 font-label-sm text-label-sm uppercase tracking-widest hover:bg-white/5 hover:text-zinc-200" href="#">
+<span class="material-symbols-outlined" data-icon="hub">hub</span>
+                Neural_Link
+            </a>
+<a class="text-zinc-600 flex items-center px-4 py-3 gap-3 font-label-sm text-label-sm uppercase tracking-widest hover:bg-white/5 hover:text-zinc-200" href="#">
+<span class="material-symbols-outlined" data-icon="history">history</span>
+                History
+            </a>
+</div>
+<div class="py-6 border-t border-white/5 space-y-1">
+<a class="text-zinc-600 flex items-center px-4 py-3 gap-3 font-label-sm text-label-sm uppercase tracking-widest hover:bg-white/5 hover:text-zinc-200" href="#">
+<span class="material-symbols-outlined" data-icon="settings">settings</span>
+                Config
+            </a>
+<a class="text-zinc-600 flex items-center px-4 py-3 gap-3 font-label-sm text-label-sm uppercase tracking-widest hover:bg-white/5 hover:text-zinc-200" href="#">
+<span class="material-symbols-outlined" data-icon="menu_book">menu_book</span>
+                Docs
+            </a>
+</div>
+</nav>
+<!-- Main Content Area -->
+<main class="flex-1 flex flex-col md:ml-[240px] h-screen relative bg-[url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4IiBoZWlnaHQ9IjgiPgo8cmVjdCB3aWR0aD0iOCIgaGVpZ2h0PSI4IiBmaWxsPSIjMTMxMzEzIj48L3JlY3Q+CjxwYXRoIGQ9Ik0wIDBMOCA4Wk04IDBMMCA4WiIgc3Ryb2tlPSIjMWExYTGEIiBzdHJva2Utd2lkdGg9IjAuNSI+PC9wYXRoPgo8L3N2Zz4=')] bg-repeat">
+<!-- TopAppBar -->
+<header class="flex justify-between items-center h-12 px-6 w-full bg-zinc-950/60 backdrop-blur-lg border-b border-zinc-800/50 border-b border-white/10 shadow-none z-30 sticky top-0">
+<div class="flex items-center gap-4">
+<span class="text-lg font-bold tracking-tighter text-primary-fixed drop-shadow-[0_0_8px_rgba(0,240,255,0.5)]">AETHER_CORE</span>
+<div class="hidden md:flex items-center gap-2 bg-surface-container/50 px-3 py-1 rounded border border-white/5">
+<div class="w-2 h-2 rounded-full bg-primary-fixed animate-pulse"></div>
+<span class="font-code-md text-code-md text-zinc-400 text-[10px]">LOCAL_SLM_V2</span>
+<span class="material-symbols-outlined text-zinc-500 text-[14px]" data-icon="expand_more">expand_more</span>
+</div>
+</div>
+<div class="flex items-center gap-4">
+<button class="text-zinc-500 hover:text-primary-fixed transition-colors duration-200 cursor-pointer active:scale-95">
+<span class="material-symbols-outlined" data-icon="wifi_tethering">wifi_tethering</span>
+</button>
+<button class="text-zinc-500 hover:text-primary-fixed transition-colors duration-200 cursor-pointer active:scale-95">
+<span class="material-symbols-outlined" data-icon="terminal">terminal</span>
+</button>
+<button class="text-zinc-500 hover:text-primary-fixed transition-colors duration-200 cursor-pointer active:scale-95 relative">
+<span class="material-symbols-outlined" data-icon="notifications">notifications</span>
+<span class="absolute top-0 right-0 w-2 h-2 bg-secondary-container rounded-full"></span>
+</button>
+</div>
+</header>
+<!-- Chat / Timeline Area -->
+<div class="flex-1 overflow-y-auto p-gutter pb-[120px] aurora-gradient">
+<div class="max-w-4xl mx-auto space-y-lg">
+<!-- System Prompt / Intro -->
+<div class="flex justify-center my-lg">
+<div class="px-4 py-2 bg-surface-container/40 border border-white/5 rounded backdrop-blur-md text-center">
+<p class="font-code-md text-code-md text-zinc-500 text-[12px]">SESSION_INITIALIZED // [14:02:45 UTC]</p>
+</div>
+</div>
+<!-- User Command -->
+<div class="flex items-start gap-4">
+<div class="w-8 h-8 rounded bg-surface-container-high border border-outline-variant flex items-center justify-center shrink-0">
+<span class="material-symbols-outlined text-on-surface text-[18px]" data-icon="person">person</span>
+</div>
+<div class="flex-1 mt-1">
+<div class="font-code-md text-code-md text-primary-fixed mb-1 flex items-center gap-2">
+<span>&gt;</span>
+<span class="text-on-surface">find all python files and refactor the auth logic</span>
+</div>
+</div>
+</div>
+<!-- Agentic State Micro-cards -->
+<div class="flex items-start gap-4 ml-12">
+<div class="flex flex-col gap-2 relative before:content-[''] before:absolute before:left-[11px] before:top-4 before:bottom-0 before:w-[1px] before:bg-white/10">
+<!-- State 1 -->
+<div class="flex items-center gap-3 bg-surface-container/60 backdrop-blur-md border border-white/5 rounded px-3 py-2 w-max relative z-10">
+<span class="material-symbols-outlined text-secondary-container text-[16px] animate-pulse" data-icon="search">search</span>
+<span class="font-code-md text-code-md text-zinc-400 text-[12px]">Analyzing repository [34 files scanned]...</span>
+</div>
+<!-- State 2 -->
+<div class="flex items-center gap-3 bg-surface-container/60 backdrop-blur-md border border-white/5 rounded px-3 py-2 w-max relative z-10 mt-2">
+<span class="material-symbols-outlined text-primary-fixed text-[16px] animate-[spin_3s_linear_infinite]" data-icon="settings">settings</span>
+<span class="font-code-md text-code-md text-zinc-400 text-[12px]">Refactoring src/core/auth.py...</span>
+</div>
+</div>
+</div>
+<!-- AI Response -->
+<div class="flex items-start gap-4 relative">
+<div class="w-8 h-8 rounded bg-primary-container/10 border border-primary-container flex items-center justify-center shrink-0 relative z-10 shadow-[0_0_15px_rgba(0,240,255,0.2)]">
+<span class="material-symbols-outlined text-primary-fixed text-[18px]" data-icon="smart_toy">smart_toy</span>
+</div>
+<div class="flex-1 bg-surface-container/80 backdrop-blur-xl border border-white/10 rounded p-6 shadow-2xl relative overflow-hidden">
+<!-- Subtle corner glow -->
+<div class="absolute -top-10 -right-10 w-32 h-32 bg-secondary-container/20 rounded-full blur-3xl"></div>
+<p class="font-body-base text-body-base text-on-surface mb-4">
+                            I've analyzed the repository and located the main authentication logic in <code class="text-primary-fixed font-code-md bg-white/5 px-1 rounded">src/core/auth.py</code>. I have refactored it to use the new token-based implementation per system guidelines.
+                        </p>
+<!-- Code Block -->
+<div class="rounded-lg border border-outline-variant overflow-hidden code-bg">
+<div class="flex items-center justify-between px-4 py-2 border-b border-outline-variant bg-surface-container-low">
+<span class="font-code-md text-code-md text-zinc-400 text-[12px]">src/core/auth.py</span>
+<button class="text-zinc-500 hover:text-on-surface transition-colors">
+<span class="material-symbols-outlined text-[16px]" data-icon="content_copy">content_copy</span>
+</button>
+</div>
+<div class="p-4 overflow-x-auto">
+<pre class="font-code-md text-code-md text-zinc-300"><code class="language-python"><span class="text-[#ebb2ff]">import</span> jwt
+<span class="text-[#ebb2ff]">from</span> datetime <span class="text-[#ebb2ff]">import</span> datetime, timedelta
+<span class="text-[#ebb2ff]">from</span> typing <span class="text-[#ebb2ff]">import</span> Optional, Dict, Any
+
+<span class="text-[#ebb2ff]">class</span> <span class="text-[#7df4ff]">AuthManager</span>:
+    <span class="text-[#ebb2ff]">def</span> <span class="text-[#00dbe9]">__init__</span>(<span class="text-zinc-300">self, secret_key: str</span>):
+        self.secret = secret_key
+        self.algo = <span class="text-[#b600f8]">'HS256'</span>
+
+    <span class="text-[#ebb2ff]">def</span> <span class="text-[#00dbe9]">generate_token</span>(<span class="text-zinc-300">self, user_id: str, expiry_hours: int = 24</span>) -&gt; str:
+        <span class="text-zinc-500">"""Generates a new JWT access token."""</span>
+        payload = {
+            <span class="text-[#b600f8]">'sub'</span>: user_id,
+            <span class="text-[#b600f8]">'exp'</span>: datetime.utcnow() + timedelta(hours=expiry_hours),
+            <span class="text-[#b600f8]">'iat'</span>: datetime.utcnow()
+        }
+        <span class="text-[#ebb2ff]">return</span> jwt.encode(payload, self.secret, algorithm=self.algo)
+</code></pre>
+</div>
+</div>
+<div class="mt-4 flex gap-2">
+<button class="px-3 py-1.5 border border-primary-fixed/30 rounded text-primary-fixed font-label-sm text-label-sm uppercase tracking-widest hover:bg-primary-fixed/10 hover:border-primary-fixed hover:shadow-[0_0_8px_rgba(0,240,255,0.3)] transition-all">
+                                Apply Changes
+                            </button>
+<button class="px-3 py-1.5 border border-white/10 rounded text-zinc-400 font-label-sm text-label-sm uppercase tracking-widest hover:bg-white/5 hover:text-on-surface transition-all">
+                                Explain Logic
+                            </button>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- Floating Input Bar -->
+<div class="absolute bottom-md left-0 w-full px-md flex justify-center pointer-events-none z-30">
+<div class="w-full max-w-3xl bg-surface-container/90 backdrop-blur-2xl border border-white/15 rounded-full p-2 flex items-center shadow-[0_20px_40px_rgba(0,0,0,0.6)] pointer-events-auto">
+<button class="w-10 h-10 rounded-full flex items-center justify-center text-zinc-400 hover:text-primary-fixed hover:bg-white/5 transition-colors shrink-0">
+<span class="material-symbols-outlined" data-icon="attach_file">attach_file</span>
+</button>
+<div class="flex-1 px-4 flex items-center gap-2 border-b border-primary-fixed/30 mx-2 focus-within:border-primary-fixed focus-within:shadow-[0_1px_0_rgba(0,240,255,0.5)] transition-all">
+<span class="font-code-md text-code-md text-primary-fixed">&gt;</span>
+<input class="w-full bg-transparent border-none focus:ring-0 text-zinc-500 font-code-md text-code-md placeholder-zinc-600 italic" disabled="" type="text" value="Thinking..."/>
+<span class="w-1.5 h-4 bg-primary-fixed animate-pulse"></span>
+</div>
+<button class="w-10 h-10 rounded-full flex items-center justify-center text-zinc-400 hover:text-primary-fixed hover:bg-white/5 transition-colors shrink-0">
+<span class="material-symbols-outlined" data-icon="mic">mic</span>
+</button>
+<button class="w-10 h-10 rounded-full bg-primary-fixed/10 border border-primary-fixed text-primary-fixed flex items-center justify-center hover:bg-primary-fixed hover:text-surface transition-colors shrink-0 ml-1">
+<span class="material-symbols-outlined" data-icon="stop">stop</span>
+</button>
+</div>
+</div>
+</main>
+</body></html>

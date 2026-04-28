@@ -55,7 +55,7 @@ Objetivo: daemon passa a entender comandos do Coddy.
 
 Entregáveis:
 
-- `VisionRequest::ReplCommand`
+- `CoddyRequest::Command` no protocolo direto do REPL
 - eventos progressivos
 - `ShortcutTriggered`, `OverlayShown` e eventos de busca/contexto
 - screen classification inicial

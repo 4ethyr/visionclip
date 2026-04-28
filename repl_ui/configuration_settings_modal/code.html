@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Aether Terminal - Settings</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400&amp;family=Space+Grotesk:wght@500;700&amp;family=Manrope:wght@400&amp;family=Inter:wght@600&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            "colors": {
+                    "secondary": "#ebb2ff",
+                    "surface": "#131313",
+                    "on-surface-variant": "#b9cacb",
+                    "tertiary-container": "#dcd9d8",
+                    "surface-container": "#201f1f",
+                    "on-secondary-container": "#fff6fc",
+                    "background": "#131313",
+                    "surface-bright": "#3a3939",
+                    "on-surface": "#e5e2e1",
+                    "on-tertiary-fixed": "#1c1b1b",
+                    "surface-variant": "#353534",
+                    "on-tertiary-fixed-variant": "#474746",
+                    "primary-fixed": "#7df4ff",
+                    "tertiary-fixed": "#e5e2e1",
+                    "surface-container-lowest": "#0e0e0e",
+                    "secondary-fixed-dim": "#ebb2ff",
+                    "tertiary": "#f8f5f5",
+                    "on-secondary": "#520072",
+                    "surface-container-highest": "#353534",
+                    "on-primary-fixed-variant": "#004f54",
+                    "on-tertiary-container": "#5f5e5e",
+                    "on-error": "#690005",
+                    "on-primary": "#00363a",
+                    "primary-container": "#00f0ff",
+                    "on-error-container": "#ffdad6",
+                    "inverse-on-surface": "#313030",
+                    "outline-variant": "#3b494b",
+                    "tertiary-fixed-dim": "#c8c6c5",
+                    "error-container": "#93000a",
+                    "on-primary-container": "#006970",
+                    "primary-fixed-dim": "#00dbe9",
+                    "secondary-container": "#b600f8",
+                    "primary": "#dbfcff",
+                    "surface-dim": "#131313",
+                    "outline": "#849495",
+                    "surface-container-low": "#1c1b1b",
+                    "surface-container-high": "#2a2a2a",
+                    "secondary-fixed": "#f8d8ff",
+                    "on-secondary-fixed-variant": "#74009f",
+                    "inverse-surface": "#e5e2e1",
+                    "on-secondary-fixed": "#320047",
+                    "surface-tint": "#00dbe9",
+                    "on-background": "#e5e2e1",
+                    "on-tertiary": "#313030",
+                    "error": "#ffb4ab",
+                    "inverse-primary": "#006970",
+                    "on-primary-fixed": "#002022"
+            },
+            "borderRadius": {
+                    "DEFAULT": "0.125rem",
+                    "lg": "0.25rem",
+                    "xl": "0.5rem",
+                    "full": "0.75rem"
+            },
+            "spacing": {
+                    "margin": "24px",
+                    "base": "8px",
+                    "lg": "48px",
+                    "md": "24px",
+                    "xs": "4px",
+                    "sm": "12px",
+                    "gutter": "16px",
+                    "xl": "80px"
+            },
+            "fontFamily": {
+                    "code-md": [
+                            "JetBrains Mono"
+                    ],
+                    "display-lg": [
+                            "Space Grotesk"
+                    ],
+                    "body-base": [
+                            "Manrope"
+                    ],
+                    "headline-md": [
+                            "Space Grotesk"
+                    ],
+                    "label-sm": [
+                            "Inter"
+                    ]
+            },
+            "fontSize": {
+                    "code-md": [
+                            "14px",
+                            {
+                                    "lineHeight": "1.5",
+                                    "fontWeight": "400"
+                            }
+                    ],
+                    "display-lg": [
+                            "48px",
+                            {
+                                    "lineHeight": "1.1",
+                                    "letterSpacing": "-0.02em",
+                                    "fontWeight": "700"
+                            }
+                    ],
+                    "body-base": [
+                            "16px",
+                            {
+                                    "lineHeight": "1.6",
+                                    "fontWeight": "400"
+                            }
+                    ],
+                    "headline-md": [
+                            "24px",
+                            {
+                                    "lineHeight": "1.2",
+                                    "fontWeight": "500"
+                            }
+                    ],
+                    "label-sm": [
+                            "12px",
+                            {
+                                    "lineHeight": "1",
+                                    "letterSpacing": "0.05em",
+                                    "fontWeight": "600"
+                            }
+                    ]
+            }
+    },
+        },
+      }
+    </script>
+<style>
+        .glass-panel {
+            background-color: rgba(32, 31, 31, 0.8);
+            backdrop-filter: blur(30px);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+        }
+        .ai-glow {
+            box-shadow: 0 0 20px rgba(0, 240, 255, 0.1);
+        }
+        .ai-gradient-corner {
+            background: radial-gradient(circle at top right, rgba(182, 0, 248, 0.15), transparent 40%);
+        }
+        .input-glow:focus {
+            border-bottom-color: #00f0ff;
+            box-shadow: 0 1px 0 0 #00f0ff;
+            outline: none;
+        }
+    </style>
+</head>
+<body class="bg-surface text-on-surface h-screen w-screen overflow-hidden flex font-body-base">
+<!-- Background Context (Terminal REPL Simulation) -->
+<div class="absolute inset-0 z-0 flex flex-col p-margin opacity-30 pointer-events-none">
+<div class="font-code-md text-code-md text-primary-fixed mb-xs">AETHER_CORE v4.0.2</div>
+<div class="font-code-md text-code-md text-on-surface-variant mb-base">&gt; Initializing neural links...</div>
+<div class="font-code-md text-code-md text-on-surface-variant mb-base">&gt; Loading workspace configurations...</div>
+<div class="font-code-md text-code-md text-secondary-fixed-dim mb-base">&gt; SYSTEM_REPL READY</div>
+<div class="font-code-md text-code-md flex items-center">
+<span class="text-primary mr-2">&gt;</span>
+<span class="animate-pulse w-2 h-5 bg-primary block"></span>
+</div>
+</div>
+<!-- Modal Overlay Container -->
+<div class="fixed inset-0 z-50 flex items-center justify-center p-margin bg-background/60 backdrop-blur-sm">
+<!-- Modal Content -->
+<div class="glass-panel w-full max-w-2xl max-h-[921px] flex flex-col rounded-xl overflow-hidden shadow-[0_20px_40px_rgba(0,0,0,0.4)]">
+<!-- Modal Header -->
+<div class="flex justify-between items-center px-lg py-md border-b border-white/10 ai-gradient-corner">
+<div>
+<h2 class="font-headline-md text-headline-md text-primary tracking-tight">System Configuration</h2>
+<p class="font-code-md text-code-md text-on-surface-variant mt-xs">AETHER_CORE // Environment Settings</p>
+</div>
+<button class="text-on-surface-variant hover:text-primary transition-colors duration-200">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 0;">close</span>
+</button>
+</div>
+<!-- Modal Body (Scrollable) -->
+<div class="flex-1 overflow-y-auto p-lg space-y-lg custom-scrollbar">
+<!-- Section: AI Connections -->
+<div class="space-y-md">
+<h3 class="font-label-sm text-label-sm text-secondary tracking-widest uppercase border-b border-white/5 pb-xs">Neural Links</h3>
+<div class="space-y-sm">
+<label class="block">
+<span class="font-code-md text-code-md text-on-surface block mb-xs">OpenAI API Key</span>
+<div class="flex items-center">
+<span class="text-primary mr-sm">&gt;</span>
+<input class="w-full bg-transparent border-0 border-b border-white/20 px-0 py-xs text-on-surface font-code-md text-code-md input-glow focus:ring-0 placeholder-on-surface-variant/50" placeholder="Enter API Key" type="password" value="sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"/>
+</div>
+</label>
+<label class="block">
+<span class="font-code-md text-code-md text-on-surface block mb-xs">Anthropic API Key</span>
+<div class="flex items-center">
+<span class="text-primary mr-sm">&gt;</span>
+<input class="w-full bg-transparent border-0 border-b border-white/20 px-0 py-xs text-on-surface font-code-md text-code-md input-glow focus:ring-0 placeholder-on-surface-variant/50" placeholder="Enter API Key" type="password"/>
+</div>
+</label>
+</div>
+</div>
+<!-- Section: Local Model Daemon -->
+<div class="space-y-md">
+<h3 class="font-label-sm text-label-sm text-secondary tracking-widest uppercase border-b border-white/5 pb-xs">Local Execution</h3>
+<div class="flex items-center justify-between p-md border border-white/10 rounded bg-surface/50">
+<div>
+<div class="font-code-md text-code-md text-on-surface">Local Model Daemon</div>
+<div class="font-code-md text-code-md text-on-surface-variant text-sm mt-xs">Enable SLM processing (requires 8GB+ RAM)</div>
+</div>
+<label class="relative inline-flex items-center cursor-pointer">
+<input checked="" class="sr-only peer" type="checkbox" value=""/>
+<div class="w-11 h-6 bg-surface-container-high peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-on-surface after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-container"></div>
+</label>
+</div>
+</div>
+<!-- Section: Model Parameters -->
+<div class="space-y-md">
+<h3 class="font-label-sm text-label-sm text-secondary tracking-widest uppercase border-b border-white/5 pb-xs">Parameters</h3>
+<div class="grid grid-cols-1 md:grid-cols-2 gap-lg">
+<div class="space-y-sm">
+<div class="flex justify-between items-end mb-xs">
+<label class="font-code-md text-code-md text-on-surface">Temperature</label>
+<span class="font-code-md text-code-md text-primary">0.7</span>
+</div>
+<input class="w-full h-1 bg-surface-container-high rounded-full appearance-none cursor-pointer accent-primary" max="2" min="0" step="0.1" type="range" value="0.7"/>
+</div>
+<div class="space-y-sm">
+<div class="flex justify-between items-end mb-xs">
+<label class="font-code-md text-code-md text-on-surface">Max Tokens</label>
+<span class="font-code-md text-code-md text-primary">4096</span>
+</div>
+<input class="w-full h-1 bg-surface-container-high rounded-full appearance-none cursor-pointer accent-primary" max="8192" min="256" step="256" type="range" value="4096"/>
+</div>
+</div>
+</div>
+<!-- Section: Environment Paths -->
+<div class="space-y-md">
+<h3 class="font-label-sm text-label-sm text-secondary tracking-widest uppercase border-b border-white/5 pb-xs">Environment</h3>
+<div class="space-y-sm">
+<label class="block">
+<span class="font-code-md text-code-md text-on-surface block mb-xs">Workspace Root</span>
+<div class="flex items-center">
+<span class="text-primary mr-sm">&gt;</span>
+<input class="w-full bg-transparent border-0 border-b border-white/20 px-0 py-xs text-on-surface font-code-md text-code-md input-glow focus:ring-0 placeholder-on-surface-variant/50" type="text" value="/users/agent/projects/aether"/>
+</div>
+</label>
+</div>
+</div>
+</div>
+<!-- Modal Footer -->
+<div class="px-lg py-md border-t border-white/10 flex justify-end gap-md bg-surface-container/50">
+<button class="font-label-sm text-label-sm text-on-surface hover:text-primary transition-colors duration-200 uppercase tracking-widest px-md py-sm">
+                    Cancel
+                </button>
+<button class="font-label-sm text-label-sm text-primary uppercase tracking-widest border border-primary px-lg py-sm hover:shadow-[0_0_15px_rgba(0,240,255,0.3)] transition-shadow duration-300 bg-transparent">
+                    Save Config
+                </button>
+</div>
+</div>
+</div>
+</body></html>

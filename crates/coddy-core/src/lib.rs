@@ -2,6 +2,7 @@ pub mod assessment;
 pub mod command;
 pub mod context;
 pub mod event;
+pub mod event_broker;
 pub mod event_log;
 pub mod policy;
 pub mod search;
@@ -16,6 +17,7 @@ pub use context::{
     ScreenUnderstandingContext, TerminalBlock,
 };
 pub use event::{ReplEvent, ReplIntent, ShortcutSource, ToolStatus};
+pub use event_broker::{ReplEventBroker, ReplEventSubscription};
 pub use event_log::{ReplEventEnvelope, ReplEventLog, ReplSessionSnapshot};
 pub use policy::{evaluate_assistance, evaluate_shortcut_conflict};
 pub use search::{

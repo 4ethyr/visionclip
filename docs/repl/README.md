@@ -11,6 +11,8 @@ Convenção proposta:
 - Binário do REPL: `coddy`
 - App desktop: `apps/coddy`
 - Core de domínio: `crates/coddy-core`
+- Contratos IPC: `crates/coddy-ipc`
+- Cliente de transporte: `crates/coddy-client`
 - Frontend TypeScript: `apps/coddy/src`
 - Nome de produto na UI: `Coddy`
 - Referências antigas como `aether_cli`, `Aether Terminal` ou `AETHER_CORE`: tratar como protótipos/placeholder visual, não como marca final.
@@ -34,6 +36,12 @@ O foco é auxiliar dúvidas técnicas, estudo, depuração, explicação de cód
 ## Documentos
 
 - [Arquitetura](architecture.md): módulos Rust/TypeScript, IPC, eventos, estados do REPL, integração com daemon, voz, imagem e modelos locais.
+- [Contratos do Backend](backend-contracts.md): implementação atual do backend Coddy, comandos CLI, IPC, snapshots, eventos incrementais e integração prevista com o frontend.
+- [Contrato Wire](coddy-wire-contract.md): framing bincode, magic `CDDY`, versionamento e regras de compatibilidade cross-repo.
+- [Coddy Client](coddy-client.md): adapter de transporte para CLI/UI consumir o daemon via snapshot, eventos, stream e comandos.
+- [Próximos Passos do Backend](backend-next-steps.md): fases técnicas para stream, `coddy-ipc`, cliente, persistência, UI e separação de repositório.
+- [Plano de Desacoplamento](coddy-decoupling-plan.md): caminho para mover Coddy para um repositório próprio mantendo integração estável com VisionClip.
+- [OpenAPI/Swagger](openapi/README.md): especificação HTTP proposta para bridge Tauri/Swagger/OpenAI Actions baseada nos contratos Rust atuais.
 - [UX/UI](ui-ux-spec.md): análise dos protótipos em `repl_ui`, adaptação da identidade para Coddy, tokens de design, modos simples/advanced, animações e comportamento responsivo.
 - [Assistente de Assessments](assessment-assistant.md): interpretação de screenshots, múltipla escolha, código, política de integridade e prompts internos.
 - [Plano de Implementação](implementation-plan.md): fases TDD, entregáveis, milestones, riscos e critérios de aceite.

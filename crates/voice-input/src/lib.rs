@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -10,10 +11,53 @@ use tokio::{
 };
 use tracing::{info, warn};
 use uuid::Uuid;
-use visionclip_common::config::VoiceConfig;
 use which::which;
 
-pub async fn capture_and_transcribe(config: &VoiceConfig) -> Result<String> {
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VoiceInputConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_voice_backend")]
+    pub backend: String,
+    #[serde(default)]
+    pub target: String,
+    #[serde(default = "default_true")]
+    pub overlay_enabled: bool,
+    #[serde(default = "default_voice_shortcut")]
+    pub shortcut: String,
+    #[serde(default = "default_voice_record_duration_ms")]
+    pub record_duration_ms: u64,
+    #[serde(default = "default_voice_sample_rate_hz")]
+    pub sample_rate_hz: u32,
+    #[serde(default = "default_voice_channels")]
+    pub channels: u16,
+    #[serde(default)]
+    pub record_command: String,
+    #[serde(default)]
+    pub transcribe_command: String,
+    #[serde(default = "default_voice_transcribe_timeout_ms")]
+    pub transcribe_timeout_ms: u64,
+}
+
+impl Default for VoiceInputConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backend: default_voice_backend(),
+            target: String::new(),
+            overlay_enabled: default_true(),
+            shortcut: default_voice_shortcut(),
+            record_duration_ms: default_voice_record_duration_ms(),
+            sample_rate_hz: default_voice_sample_rate_hz(),
+            channels: default_voice_channels(),
+            record_command: String::new(),
+            transcribe_command: String::new(),
+            transcribe_timeout_ms: default_voice_transcribe_timeout_ms(),
+        }
+    }
+}
+
+pub async fn capture_and_transcribe(config: &VoiceInputConfig) -> Result<String> {
     if !config.enabled {
         anyhow::bail!(
             "voice input is disabled in config; enable [voice].enabled or pass a transcript for testing"
@@ -50,7 +94,7 @@ pub fn runtime_voice_path(extension: &str) -> Result<PathBuf> {
     Ok(voice_dir.join(format!("voice-{}.{}", Uuid::new_v4(), extension)))
 }
 
-pub async fn record_voice_sample(config: &VoiceConfig, wav_path: &Path) -> Result<()> {
+pub async fn record_voice_sample(config: &VoiceInputConfig, wav_path: &Path) -> Result<()> {
     let duration_ms = config.record_duration_ms.max(1_000);
 
     if !config.record_command.trim().is_empty() {
@@ -113,7 +157,7 @@ pub async fn record_voice_sample(config: &VoiceConfig, wav_path: &Path) -> Resul
 }
 
 pub async fn transcribe_voice_sample(
-    config: &VoiceConfig,
+    config: &VoiceInputConfig,
     wav_path: &Path,
     transcript_path: &Path,
 ) -> Result<String> {
@@ -167,7 +211,7 @@ pub async fn transcribe_voice_sample(
 }
 
 async fn record_with_arecord_if_available(
-    config: &VoiceConfig,
+    config: &VoiceInputConfig,
     wav_path: &Path,
     duration_ms: u64,
 ) -> Result<()> {
@@ -274,7 +318,7 @@ fn render_template(
     template: &str,
     wav_path: &Path,
     transcript_path: Option<&Path>,
-    config: &VoiceConfig,
+    config: &VoiceInputConfig,
 ) -> String {
     let duration_s = config.record_duration_ms.div_ceil(1_000).to_string();
 
@@ -306,6 +350,34 @@ fn render_command(program: &str, args: &[String]) -> String {
     } else {
         format!("{program} {}", args.join(" "))
     }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_voice_backend() -> String {
+    "auto".to_string()
+}
+
+fn default_voice_shortcut() -> String {
+    "<Super>F12".to_string()
+}
+
+fn default_voice_record_duration_ms() -> u64 {
+    4_000
+}
+
+fn default_voice_sample_rate_hz() -> u32 {
+    16_000
+}
+
+fn default_voice_channels() -> u16 {
+    1
+}
+
+fn default_voice_transcribe_timeout_ms() -> u64 {
+    60_000
 }
 
 #[cfg(test)]
@@ -361,8 +433,8 @@ mod tests {
         );
     }
 
-    fn test_voice_config() -> VoiceConfig {
-        VoiceConfig {
+    fn test_voice_config() -> VoiceInputConfig {
+        VoiceInputConfig {
             enabled: true,
             backend: "auto".into(),
             target: String::new(),

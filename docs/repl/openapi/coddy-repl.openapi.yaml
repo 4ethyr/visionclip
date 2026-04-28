@@ -1,0 +1,876 @@
+openapi: 3.1.0
+info:
+  title: Coddy REPL Local API
+  version: 0.1.0
+  summary: Local API contract for the Coddy REPL backend.
+  description: |
+    Proposed HTTP/OpenAPI contract for a future local bridge over the current
+    VisionClip Unix socket IPC. The running implementation currently uses
+    length-prefixed bincode messages through the daemon socket; this file is
+    the Swagger/OpenAPI documentation for frontend clients, tests and future
+    Tauri or HTTP adapters.
+  license:
+    name: GNU AGPLv3
+servers:
+  - url: http://127.0.0.1:4777
+    description: Proposed loopback bridge. Not active in the current runtime.
+tags:
+  - name: Session
+    description: Session snapshots and incremental event history.
+  - name: Commands
+    description: Structured REPL commands.
+  - name: Voice
+    description: Voice turns and speech control.
+paths:
+  /v1/repl/session:
+    get:
+      tags:
+        - Session
+      operationId: getReplSessionSnapshot
+      summary: Get the current REPL session snapshot.
+      description: |
+        Mirrors the current IPC request `CoddyRequest::SessionSnapshot`.
+        Clients should store `last_sequence` and then call `/v1/repl/events`
+        for incremental updates.
+      responses:
+        "200":
+          description: Current REPL session snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReplSessionSnapshot"
+        "500":
+          $ref: "#/components/responses/Error"
+  /v1/repl/events:
+    get:
+      tags:
+        - Session
+      operationId: listReplEvents
+      summary: List events after a sequence number.
+      description: |
+        Mirrors the current IPC request `CoddyRequest::Events`.
+        Returns all events with `sequence > after_sequence`.
+      parameters:
+        - name: after_sequence
+          in: query
+          required: false
+          description: Last sequence already applied by the client.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            default: 0
+      responses:
+        "200":
+          description: Incremental REPL events.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReplEventsResponse"
+        "500":
+          $ref: "#/components/responses/Error"
+  /v1/repl/events/stream:
+    get:
+      tags:
+        - Session
+      operationId: streamReplEvents
+      summary: Stream REPL events after a sequence number.
+      description: |
+        Proposed HTTP/SSE equivalent of the current IPC request
+        `CoddyRequest::EventStream`. Each SSE `data` frame contains one
+        `ReplEventStreamFrame` encoded as JSON. Clients should reconnect with
+        the latest applied `last_sequence` after disconnects.
+      parameters:
+        - name: after_sequence
+          in: query
+          required: false
+          description: Last sequence already applied by the client.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            default: 0
+      responses:
+        "200":
+          description: Server-sent event stream with incremental REPL events.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              examples:
+                event:
+                  value: |
+                    event: repl.event
+                    data: {"last_sequence":13,"event":{"sequence":13,"session_id":"00000000-0000-0000-0000-000000000000","run_id":null,"captured_at_unix_ms":1775000000000,"event":"VoiceListeningStarted"}}
+        "500":
+          $ref: "#/components/responses/Error"
+  /v1/repl/commands:
+    post:
+      tags:
+        - Commands
+      operationId: sendReplCommand
+      summary: Send a structured REPL command.
+      description: Mirrors `CoddyRequest::Command`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReplCommandRequest"
+            examples:
+              ask:
+                value:
+                  speak: true
+                  command:
+                    Ask:
+                      text: "Quem foi Rousseau?"
+                      context_policy: "NoScreen"
+      responses:
+        "200":
+          description: Command result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CoddyResult"
+        "400":
+          $ref: "#/components/responses/Error"
+        "500":
+          $ref: "#/components/responses/Error"
+  /v1/repl/voice-turns:
+    post:
+      tags:
+        - Voice
+      operationId: submitVoiceTurn
+      summary: Submit a voice transcript to the REPL router.
+      description: |
+        The current CLI captures audio client-side and sends
+        `ReplCommand::VoiceTurn { transcript_override: Some(text) }`.
+        A future HTTP bridge should keep the same behavior unless it owns
+        native microphone permissions.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VoiceTurnRequest"
+            examples:
+              search:
+                value:
+                  speak: true
+                  transcript: "Quem foi Rousseau?"
+              openWebsite:
+                value:
+                  speak: true
+                  transcript: "youtube"
+      responses:
+        "200":
+          description: Voice turn result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CoddyResult"
+        "400":
+          $ref: "#/components/responses/Error"
+        "500":
+          $ref: "#/components/responses/Error"
+  /v1/repl/speech/stop:
+    post:
+      tags:
+        - Voice
+      operationId: stopReplSpeech
+      summary: Stop or request cancellation of current speech.
+      description: Mirrors `ReplCommand::StopSpeaking`.
+      responses:
+        "200":
+          description: Speech stop status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionStatusResult"
+        "500":
+          $ref: "#/components/responses/Error"
+  /v1/repl/runs/{run_id}/stop:
+    post:
+      tags:
+        - Commands
+      operationId: stopReplRun
+      summary: Stop an active REPL run.
+      description: Mirrors `ReplCommand::StopActiveRun`.
+      parameters:
+        - name: run_id
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/Uuid"
+      responses:
+        "200":
+          description: Run stop status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionStatusResult"
+        "404":
+          $ref: "#/components/responses/Error"
+        "500":
+          $ref: "#/components/responses/Error"
+components:
+  responses:
+    Error:
+      description: Structured error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResult"
+  schemas:
+    Uuid:
+      type: string
+      format: uuid
+    ReplSessionSnapshot:
+      type: object
+      required:
+        - session
+        - last_sequence
+      properties:
+        session:
+          $ref: "#/components/schemas/ReplSession"
+        last_sequence:
+          type: integer
+          format: int64
+          minimum: 0
+    ReplEventsResponse:
+      type: object
+      required:
+        - events
+        - last_sequence
+      properties:
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReplEventEnvelope"
+        last_sequence:
+          type: integer
+          format: int64
+          minimum: 0
+    ReplEventStreamFrame:
+      type: object
+      required:
+        - event
+        - last_sequence
+      properties:
+        event:
+          $ref: "#/components/schemas/ReplEventEnvelope"
+        last_sequence:
+          type: integer
+          format: int64
+          minimum: 0
+    ReplSession:
+      type: object
+      required:
+        - id
+        - mode
+        - status
+        - policy
+        - selected_model
+        - voice
+        - screen_context
+        - workspace_context
+        - messages
+        - active_run
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        mode:
+          $ref: "#/components/schemas/ReplMode"
+        status:
+          $ref: "#/components/schemas/SessionStatus"
+        policy:
+          $ref: "#/components/schemas/AssessmentPolicy"
+        selected_model:
+          $ref: "#/components/schemas/ModelRef"
+        voice:
+          $ref: "#/components/schemas/VoiceState"
+        screen_context:
+          anyOf:
+            - $ref: "#/components/schemas/ScreenUnderstandingContext"
+            - type: "null"
+        workspace_context:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContextItem"
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReplMessage"
+        active_run:
+          anyOf:
+            - $ref: "#/components/schemas/Uuid"
+            - type: "null"
+    ReplMode:
+      type: string
+      enum:
+        - FloatingTerminal
+        - DesktopApp
+    SessionStatus:
+      type: string
+      enum:
+        - Idle
+        - Listening
+        - Transcribing
+        - CapturingScreen
+        - BuildingContext
+        - Thinking
+        - Streaming
+        - Speaking
+        - AwaitingConfirmation
+        - Error
+    AssessmentPolicy:
+      type: string
+      enum:
+        - Practice
+        - PermittedAi
+        - SyntaxOnly
+        - RestrictedAssessment
+        - UnknownAssessment
+    ModelRef:
+      type: object
+      required:
+        - provider
+        - name
+      properties:
+        provider:
+          type: string
+          examples:
+            - ollama
+        name:
+          type: string
+          examples:
+            - gemma4:e2b
+    VoiceState:
+      type: object
+      required:
+        - enabled
+        - speaking
+        - muted
+      properties:
+        enabled:
+          type: boolean
+        speaking:
+          type: boolean
+        muted:
+          type: boolean
+    ContextItem:
+      type: object
+      required:
+        - id
+        - label
+        - sensitive
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        sensitive:
+          type: boolean
+    ReplMessage:
+      type: object
+      required:
+        - id
+        - role
+        - text
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        role:
+          type: string
+          enum:
+            - user
+            - assistant
+            - system
+            - tool
+        text:
+          type: string
+    ScreenUnderstandingContext:
+      type: object
+      description: Minimal placeholder for the richer Rust screen context.
+      additionalProperties: true
+    ReplEventEnvelope:
+      type: object
+      required:
+        - sequence
+        - session_id
+        - run_id
+        - captured_at_unix_ms
+        - event
+      properties:
+        sequence:
+          type: integer
+          format: int64
+          minimum: 1
+        session_id:
+          $ref: "#/components/schemas/Uuid"
+        run_id:
+          anyOf:
+            - $ref: "#/components/schemas/Uuid"
+            - type: "null"
+        captured_at_unix_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        event:
+          $ref: "#/components/schemas/ReplEvent"
+    ReplEvent:
+      oneOf:
+        - $ref: "#/components/schemas/SessionStartedEvent"
+        - $ref: "#/components/schemas/RunStartedEvent"
+        - $ref: "#/components/schemas/ShortcutTriggeredEvent"
+        - $ref: "#/components/schemas/OverlayShownEvent"
+        - $ref: "#/components/schemas/VoiceListeningStartedEvent"
+        - $ref: "#/components/schemas/VoiceTranscriptPartialEvent"
+        - $ref: "#/components/schemas/VoiceTranscriptFinalEvent"
+        - $ref: "#/components/schemas/SearchStartedEvent"
+        - $ref: "#/components/schemas/SearchContextExtractedEvent"
+        - $ref: "#/components/schemas/IntentDetectedEvent"
+        - $ref: "#/components/schemas/TokenDeltaEvent"
+        - $ref: "#/components/schemas/MessageAppendedEvent"
+        - $ref: "#/components/schemas/ToolStartedEvent"
+        - $ref: "#/components/schemas/ToolCompletedEvent"
+        - $ref: "#/components/schemas/TtsQueuedEvent"
+        - $ref: "#/components/schemas/TtsStartedEvent"
+        - $ref: "#/components/schemas/TtsCompletedEvent"
+        - $ref: "#/components/schemas/RunCompletedEvent"
+        - $ref: "#/components/schemas/ErrorEvent"
+    SessionStartedEvent:
+      type: object
+      required:
+        - SessionStarted
+      properties:
+        SessionStarted:
+          type: object
+          required:
+            - session_id
+          properties:
+            session_id:
+              $ref: "#/components/schemas/Uuid"
+    RunStartedEvent:
+      type: object
+      required:
+        - RunStarted
+      properties:
+        RunStarted:
+          type: object
+          required:
+            - run_id
+          properties:
+            run_id:
+              $ref: "#/components/schemas/Uuid"
+    ShortcutTriggeredEvent:
+      type: object
+      required:
+        - ShortcutTriggered
+      properties:
+        ShortcutTriggered:
+          type: object
+          required:
+            - binding
+            - source
+          properties:
+            binding:
+              type: string
+            source:
+              type: string
+              enum:
+                - GnomeMediaKeys
+                - TauriGlobalShortcut
+                - Cli
+                - SystemdUserService
+    OverlayShownEvent:
+      type: object
+      required:
+        - OverlayShown
+      properties:
+        OverlayShown:
+          type: object
+          required:
+            - mode
+          properties:
+            mode:
+              $ref: "#/components/schemas/ReplMode"
+    VoiceListeningStartedEvent:
+      type: object
+      required:
+        - VoiceListeningStarted
+      properties:
+        VoiceListeningStarted:
+          type: object
+          maxProperties: 0
+    VoiceTranscriptPartialEvent:
+      type: object
+      required:
+        - VoiceTranscriptPartial
+      properties:
+        VoiceTranscriptPartial:
+          type: object
+          required:
+            - text
+          properties:
+            text:
+              type: string
+    VoiceTranscriptFinalEvent:
+      type: object
+      required:
+        - VoiceTranscriptFinal
+      properties:
+        VoiceTranscriptFinal:
+          type: object
+          required:
+            - text
+          properties:
+            text:
+              type: string
+    SearchStartedEvent:
+      type: object
+      required:
+        - SearchStarted
+      properties:
+        SearchStarted:
+          type: object
+          required:
+            - query
+            - provider
+          properties:
+            query:
+              type: string
+            provider:
+              type: string
+    SearchContextExtractedEvent:
+      type: object
+      required:
+        - SearchContextExtracted
+      properties:
+        SearchContextExtracted:
+          type: object
+          required:
+            - provider
+            - organic_results
+            - ai_overview_present
+          properties:
+            provider:
+              type: string
+            organic_results:
+              type: integer
+              minimum: 0
+            ai_overview_present:
+              type: boolean
+    IntentDetectedEvent:
+      type: object
+      required:
+        - IntentDetected
+      properties:
+        IntentDetected:
+          type: object
+          required:
+            - intent
+            - confidence
+          properties:
+            intent:
+              $ref: "#/components/schemas/ReplIntent"
+            confidence:
+              type: number
+              format: float
+              minimum: 0
+              maximum: 1
+    TokenDeltaEvent:
+      type: object
+      required:
+        - TokenDelta
+      properties:
+        TokenDelta:
+          type: object
+          required:
+            - run_id
+            - text
+          properties:
+            run_id:
+              $ref: "#/components/schemas/Uuid"
+            text:
+              type: string
+    MessageAppendedEvent:
+      type: object
+      required:
+        - MessageAppended
+      properties:
+        MessageAppended:
+          type: object
+          required:
+            - message
+          properties:
+            message:
+              $ref: "#/components/schemas/ReplMessage"
+    ToolStartedEvent:
+      type: object
+      required:
+        - ToolStarted
+      properties:
+        ToolStarted:
+          type: object
+          required:
+            - name
+          properties:
+            name:
+              type: string
+    ToolCompletedEvent:
+      type: object
+      required:
+        - ToolCompleted
+      properties:
+        ToolCompleted:
+          type: object
+          required:
+            - name
+            - status
+          properties:
+            name:
+              type: string
+            status:
+              type: string
+              enum:
+                - Succeeded
+                - Failed
+                - Cancelled
+    TtsQueuedEvent:
+      type: object
+      required:
+        - TtsQueued
+      properties:
+        TtsQueued:
+          type: object
+          maxProperties: 0
+    TtsStartedEvent:
+      type: object
+      required:
+        - TtsStarted
+      properties:
+        TtsStarted:
+          type: object
+          maxProperties: 0
+    TtsCompletedEvent:
+      type: object
+      required:
+        - TtsCompleted
+      properties:
+        TtsCompleted:
+          type: object
+          maxProperties: 0
+    RunCompletedEvent:
+      type: object
+      required:
+        - RunCompleted
+      properties:
+        RunCompleted:
+          type: object
+          required:
+            - run_id
+          properties:
+            run_id:
+              $ref: "#/components/schemas/Uuid"
+    ErrorEvent:
+      type: object
+      required:
+        - Error
+      properties:
+        Error:
+          type: object
+          required:
+            - code
+            - message
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+    ReplIntent:
+      type: string
+      enum:
+        - AskTechnicalQuestion
+        - ExplainScreen
+        - ExplainCode
+        - DebugCode
+        - SolvePracticeQuestion
+        - MultipleChoiceAssist
+        - GenerateTestCases
+        - ExplainTerminalError
+        - SearchDocs
+        - OpenApplication
+        - OpenWebsite
+        - ConfigureModel
+        - ManageContext
+        - AgenticCodeChange
+        - Unknown
+    ReplCommandRequest:
+      type: object
+      required:
+        - command
+        - speak
+      properties:
+        command:
+          $ref: "#/components/schemas/ReplCommand"
+        speak:
+          type: boolean
+    ReplCommand:
+      oneOf:
+        - $ref: "#/components/schemas/AskCommand"
+        - $ref: "#/components/schemas/VoiceTurnCommand"
+        - $ref: "#/components/schemas/StopSpeakingCommand"
+        - $ref: "#/components/schemas/StopActiveRunCommand"
+    AskCommand:
+      type: object
+      required:
+        - Ask
+      properties:
+        Ask:
+          type: object
+          required:
+            - text
+            - context_policy
+          properties:
+            text:
+              type: string
+            context_policy:
+              type: string
+              enum:
+                - NoScreen
+                - VisibleScreen
+                - WorkspaceOnly
+                - ScreenAndWorkspace
+    VoiceTurnCommand:
+      type: object
+      required:
+        - VoiceTurn
+      properties:
+        VoiceTurn:
+          type: object
+          required:
+            - transcript_override
+          properties:
+            transcript_override:
+              anyOf:
+                - type: string
+                - type: "null"
+    StopSpeakingCommand:
+      type: object
+      required:
+        - StopSpeaking
+      properties:
+        StopSpeaking:
+          type: object
+          maxProperties: 0
+    StopActiveRunCommand:
+      type: object
+      required:
+        - StopActiveRun
+      properties:
+        StopActiveRun:
+          type: object
+          maxProperties: 0
+    VoiceTurnRequest:
+      type: object
+      required:
+        - transcript
+        - speak
+      properties:
+        transcript:
+          type: string
+        speak:
+          type: boolean
+    CoddyResult:
+      oneOf:
+        - $ref: "#/components/schemas/ClipboardTextResult"
+        - $ref: "#/components/schemas/BrowserQueryResult"
+        - $ref: "#/components/schemas/ActionStatusResult"
+        - $ref: "#/components/schemas/ErrorResult"
+        - $ref: "#/components/schemas/ReplSessionSnapshotResult"
+        - $ref: "#/components/schemas/ReplEventsResult"
+    ClipboardTextResult:
+      type: object
+      required:
+        - request_id
+        - text
+        - spoken
+      properties:
+        request_id:
+          $ref: "#/components/schemas/Uuid"
+        text:
+          type: string
+        spoken:
+          type: boolean
+    BrowserQueryResult:
+      type: object
+      required:
+        - request_id
+        - query
+        - summary
+        - spoken
+      properties:
+        request_id:
+          $ref: "#/components/schemas/Uuid"
+        query:
+          type: string
+        summary:
+          anyOf:
+            - type: string
+            - type: "null"
+        spoken:
+          type: boolean
+    ActionStatusResult:
+      type: object
+      required:
+        - request_id
+        - message
+        - spoken
+      properties:
+        request_id:
+          $ref: "#/components/schemas/Uuid"
+        message:
+          type: string
+        spoken:
+          type: boolean
+    ErrorResult:
+      type: object
+      required:
+        - request_id
+        - code
+        - message
+      properties:
+        request_id:
+          $ref: "#/components/schemas/Uuid"
+        code:
+          type: string
+        message:
+          type: string
+    ReplSessionSnapshotResult:
+      type: object
+      required:
+        - request_id
+        - snapshot
+      properties:
+        request_id:
+          $ref: "#/components/schemas/Uuid"
+        snapshot:
+          $ref: "#/components/schemas/ReplSessionSnapshot"
+    ReplEventsResult:
+      type: object
+      required:
+        - request_id
+        - events
+        - last_sequence
+      properties:
+        request_id:
+          $ref: "#/components/schemas/Uuid"
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReplEventEnvelope"
+        last_sequence:
+          type: integer
+          format: int64
+          minimum: 0
