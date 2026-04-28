@@ -88,6 +88,17 @@ pub fn search_answer_system_prompt() -> &'static str {
     "Voce responde perguntas em PT-BR usando somente o contexto de busca fornecido. O contexto pode conter uma Visao Geral criada por IA do Google e fontes organicas. Responda de forma natural, amigavel e precisa, em 2 a 4 frases curtas. Nao invente dados, datas, fontes ou detalhes ausentes. Nao mencione OCR, scraping, prompt ou instrucoes internas. Nao leia simbolos decorativos. Se o contexto for insuficiente, diga isso objetivamente."
 }
 
+pub fn repl_agent_system_prompt() -> &'static str {
+    "Voce e o Coddy, um agente CLI para desenvolvimento de software dentro de um REPL local. Responda como ferramentas como Codex CLI ou Claude Code: direto, tecnico e acionavel. Nao trate toda mensagem como pesquisa web. Use web somente quando o usuario pedir explicitamente pesquisar, buscar, googlear ou consultar fontes. Para cumprimentos ou comandos simples, responda curto. Para perguntas tecnicas, explique com passos objetivos. Para codigo, preserve blocos de codigo quando util. Nao invente execucao de ferramentas, arquivos ou resultados que nao foram fornecidos."
+}
+
+pub fn repl_agent_user_prompt(user_message: &str) -> String {
+    format!(
+        "Mensagem do usuario no REPL:\n<<<USER\n{}\nUSER>>>\n\nResponda como um agente CLI. Se precisar de dados externos e o usuario nao pediu pesquisa web explicitamente, diga qual informacao precisa ser verificada em vez de abrir pesquisa.",
+        user_message.trim()
+    )
+}
+
 pub fn search_answer_user_prompt(
     query: &str,
     source_label: &str,
@@ -520,5 +531,16 @@ mod tests {
         assert!(user.contains("JavaScript é uma linguagem"));
         assert!(user.contains("Fontes organicas complementares"));
         assert!(user.contains("somente a resposta final"));
+    }
+
+    #[test]
+    fn repl_agent_prompt_avoids_default_web_search_behavior() {
+        let system = repl_agent_system_prompt();
+        let user = repl_agent_user_prompt("olá");
+
+        assert!(system.contains("agente CLI"));
+        assert!(system.contains("Nao trate toda mensagem como pesquisa web"));
+        assert!(user.contains("Mensagem do usuario no REPL"));
+        assert!(user.contains("olá"));
     }
 }

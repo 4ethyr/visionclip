@@ -73,6 +73,7 @@ pub enum ReplEvent {
         policy: crate::AssessmentPolicy,
         allowed: bool,
     },
+    ConfirmationDismissed,
     ModelSelected {
         model: crate::ModelRef,
         role: crate::ModelRole,

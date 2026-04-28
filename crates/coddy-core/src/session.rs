@@ -118,8 +118,16 @@ impl ReplSession {
             crate::ReplEvent::IntentDetected { .. } => {
                 self.status = SessionStatus::Thinking;
             }
-            crate::ReplEvent::PolicyEvaluated { policy, .. } => {
+            crate::ReplEvent::PolicyEvaluated { policy, allowed } => {
                 self.policy = *policy;
+                if !allowed && *policy == crate::AssessmentPolicy::UnknownAssessment {
+                    self.status = SessionStatus::AwaitingConfirmation;
+                }
+            }
+            crate::ReplEvent::ConfirmationDismissed => {
+                if self.status == SessionStatus::AwaitingConfirmation {
+                    self.status = SessionStatus::Idle;
+                }
             }
             crate::ReplEvent::ModelSelected { model, role } => {
                 if *role == crate::ModelRole::Chat {

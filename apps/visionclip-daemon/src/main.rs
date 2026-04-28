@@ -20,10 +20,11 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use visionclip_common::{
-    resolve_voice_turn_intent, write_message, Action, AppConfig, ApplicationLaunchJob, CaptureJob,
-    HealthCheckJob, JobResult, ModelRef, ReplCommand, ReplEvent, ReplEventBroker,
-    ReplEventEnvelope, ReplEventSubscription, ReplIntent, ReplMessage, ReplMode, ReplSession,
-    ToolStatus, UrlOpenJob, VisionRequest, VoiceSearchJob, VoiceTurnIntent,
+    evaluate_assistance, resolve_voice_turn_intent, write_message, Action, AppConfig,
+    ApplicationLaunchJob, CaptureJob, HealthCheckJob, JobResult, ModelRef, ReplCommand, ReplEvent,
+    ReplEventBroker, ReplEventEnvelope, ReplEventSubscription, ReplIntent, ReplMessage, ReplMode,
+    ReplSession, RequestedHelp, ScreenAssistMode, ToolStatus, UrlOpenJob, VisionRequest,
+    VoiceSearchJob, VoiceTurnIntent,
 };
 use visionclip_infer::{
     postprocess::{sanitize_for_speech, sanitize_output},
@@ -533,8 +534,8 @@ async fn process_repl_command(state: &AppState, job: ReplCommandJob) -> Result<J
 
     match job.command {
         ReplCommand::Ask { text, .. } => {
-            let query = sanitize_output(&Action::SearchWeb, &text);
-            if query.trim().is_empty() {
+            let command_text = text.trim().to_string();
+            if command_text.is_empty() {
                 record_repl_event(
                     state,
                     ReplEvent::Error {
@@ -563,7 +564,92 @@ async fn process_repl_command(state: &AppState, job: ReplCommandJob) -> Result<J
                     message: ReplMessage {
                         id: uuid::Uuid::new_v4(),
                         role: "user".to_string(),
-                        text,
+                        text: command_text.clone(),
+                    },
+                },
+                Some(request_id),
+            )
+            .await;
+
+            if let Some(query) = explicit_repl_web_search_query(&command_text) {
+                record_repl_event(
+                    state,
+                    ReplEvent::IntentDetected {
+                        intent: ReplIntent::SearchDocs,
+                        confidence: 0.9,
+                    },
+                    Some(request_id),
+                )
+                .await;
+
+                let speak_requested = state
+                    .config
+                    .action_should_speak(Action::SearchWeb.as_str(), job.speak);
+                let search_result = execute_search_query(
+                    state,
+                    request_id,
+                    &query,
+                    speak_requested,
+                    total_started_at,
+                )
+                .await?;
+                record_repl_browser_query_response(
+                    state,
+                    request_id,
+                    &query,
+                    &search_result.summary,
+                )
+                .await;
+                record_repl_event(
+                    state,
+                    ReplEvent::RunCompleted { run_id: request_id },
+                    Some(request_id),
+                )
+                .await;
+
+                return Ok(JobResult::BrowserQuery {
+                    request_id,
+                    query,
+                    summary: search_result.summary,
+                    spoken: search_result.spoken,
+                });
+            }
+
+            record_repl_event(
+                state,
+                ReplEvent::IntentDetected {
+                    intent: ReplIntent::AskTechnicalQuestion,
+                    confidence: 0.84,
+                },
+                Some(request_id),
+            )
+            .await;
+
+            let output = state
+                .infer
+                .answer_repl_turn(format!("{request_id}-repl-agent"), &command_text)
+                .await?;
+            let answer = sanitize_output(&Action::Explain, &output.text);
+            let speak_requested = state
+                .config
+                .action_should_speak(Action::Explain.as_str(), job.speak);
+            let speech_text = sanitize_for_speech(&Action::Explain, &answer);
+            let (_, spoken) = enqueue_tts(
+                state.piper.as_ref(),
+                &state.tts_gate,
+                request_id,
+                Action::Explain.as_str(),
+                &speech_text,
+                None,
+                speak_requested,
+            );
+            record_repl_event(
+                state,
+                ReplEvent::MessageAppended {
+                    message: ReplMessage {
+                        id: uuid::Uuid::new_v4(),
+                        role: "assistant".to_string(),
+                        text: answer.clone(),
                     },
                 },
                 Some(request_id),
@@ -571,32 +657,15 @@ async fn process_repl_command(state: &AppState, job: ReplCommandJob) -> Result<J
             .await;
             record_repl_event(
                 state,
-                ReplEvent::IntentDetected {
-                    intent: ReplIntent::SearchDocs,
-                    confidence: 0.72,
-                },
-                Some(request_id),
-            )
-            .await;
-
-            let speak_requested = state
-                .config
-                .action_should_speak(Action::SearchWeb.as_str(), job.speak);
-            let search_result =
-                execute_search_query(state, request_id, &query, speak_requested, total_started_at)
-                    .await?;
-            record_repl_event(
-                state,
                 ReplEvent::RunCompleted { run_id: request_id },
                 Some(request_id),
             )
             .await;
 
-            Ok(JobResult::BrowserQuery {
+            Ok(JobResult::ClipboardText {
                 request_id,
-                query,
-                summary: search_result.summary,
-                spoken: search_result.spoken,
+                text: answer,
+                spoken,
             })
         }
         ReplCommand::VoiceTurn {
@@ -746,6 +815,9 @@ async fn process_repl_command(state: &AppState, job: ReplCommandJob) -> Result<J
                         },
                     )
                     .await;
+                    if let Ok(JobResult::BrowserQuery { query, summary, .. }) = &result {
+                        record_repl_browser_query_response(state, request_id, query, summary).await;
+                    }
                     record_repl_event(
                         state,
                         ReplEvent::RunCompleted { run_id: request_id },
@@ -804,10 +876,48 @@ async fn process_repl_command(state: &AppState, job: ReplCommandJob) -> Result<J
         | ReplCommand::StopActiveRun
         | ReplCommand::OpenUi { .. }
         | ReplCommand::SelectModel { .. }
-        | ReplCommand::CaptureAndExplain { .. }) => {
+        | ReplCommand::CaptureAndExplain { .. }
+        | ReplCommand::DismissConfirmation) => {
             Ok(process_repl_local_command(state, request_id, command).await)
         }
     }
+}
+
+fn explicit_repl_web_search_query(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lower = trimmed.to_lowercase();
+    let prefixes = [
+        "pesquise por ",
+        "pesquise ",
+        "pesquisar ",
+        "procure por ",
+        "procure ",
+        "busque por ",
+        "busque ",
+        "buscar ",
+        "google ",
+        "google: ",
+        "pesquisa: ",
+        "search for ",
+        "search ",
+        "web search ",
+        "look up ",
+    ];
+
+    prefixes.iter().find_map(|prefix| {
+        lower.strip_prefix(prefix).and_then(|_| {
+            let query = trimmed[prefix.len()..].trim();
+            if query.is_empty() {
+                None
+            } else {
+                Some(sanitize_output(&Action::SearchWeb, query))
+            }
+        })
+    })
 }
 
 async fn process_repl_local_command(
@@ -858,16 +968,148 @@ fn process_repl_local_command_locked(
                 spoken: false,
             }
         }
-        ReplCommand::CaptureAndExplain { .. } => JobResult::ActionStatus {
-            request_id,
-            message: "Comando Coddy reconhecido, mas ainda não implementado no daemon.".to_string(),
-            spoken: false,
-        },
+        ReplCommand::CaptureAndExplain { mode, policy } => {
+            process_repl_capture_and_explain_command(repl, request_id, mode, policy)
+        }
+        ReplCommand::DismissConfirmation => {
+            repl.record(ReplEvent::ConfirmationDismissed, Some(request_id));
+
+            JobResult::ActionStatus {
+                request_id,
+                message: "Confirmação de policy dispensada.".to_string(),
+                spoken: false,
+            }
+        }
         ReplCommand::Ask { .. } | ReplCommand::VoiceTurn { .. } => JobResult::Error {
             request_id,
             code: "unsupported_local_repl_command".to_string(),
             message: "Comando Coddy não é local e deve passar pelo pipeline completo.".to_string(),
         },
+    }
+}
+
+fn process_repl_capture_and_explain_command(
+    repl: &mut ReplRuntimeState,
+    request_id: uuid::Uuid,
+    mode: ScreenAssistMode,
+    policy: visionclip_common::AssessmentPolicy,
+) -> JobResult {
+    let requested_help = requested_help_for_screen_assist_mode(mode);
+    let decision = evaluate_assistance(policy, requested_help);
+    repl.record(
+        ReplEvent::PolicyEvaluated {
+            policy,
+            allowed: decision.allowed,
+        },
+        Some(request_id),
+    );
+
+    if decision.requires_confirmation {
+        return JobResult::ActionStatus {
+            request_id,
+            message: format!(
+                "Confirme a política de uso antes de analisar a tela: {}",
+                decision.reason
+            ),
+            spoken: false,
+        };
+    }
+
+    if !decision.allowed {
+        repl.record(
+            ReplEvent::Error {
+                code: "assessment_policy_blocked".to_string(),
+                message: decision.reason.clone(),
+            },
+            Some(request_id),
+        );
+        return JobResult::Error {
+            request_id,
+            code: "assessment_policy_blocked".to_string(),
+            message: decision.reason,
+        };
+    }
+
+    repl.record(
+        ReplEvent::RunStarted { run_id: request_id },
+        Some(request_id),
+    );
+    repl.record(
+        ReplEvent::IntentDetected {
+            intent: intent_for_screen_assist_mode(mode),
+            confidence: 0.86,
+        },
+        Some(request_id),
+    );
+    repl.record(
+        ReplEvent::ToolStarted {
+            name: "capture_and_explain".to_string(),
+        },
+        Some(request_id),
+    );
+    repl.record(
+        ReplEvent::ToolCompleted {
+            name: "capture_and_explain".to_string(),
+            status: ToolStatus::Cancelled,
+        },
+        Some(request_id),
+    );
+    repl.record(
+        ReplEvent::RunCompleted { run_id: request_id },
+        Some(request_id),
+    );
+
+    JobResult::ActionStatus {
+        request_id,
+        message: "CaptureAndExplain foi autorizado; o conector de captura de tela do Coddy ainda será ligado ao backend de visão.".to_string(),
+        spoken: false,
+    }
+}
+
+async fn record_repl_browser_query_response(
+    state: &AppState,
+    request_id: uuid::Uuid,
+    query: &str,
+    summary: &Option<String>,
+) {
+    record_repl_event(
+        state,
+        ReplEvent::MessageAppended {
+            message: ReplMessage {
+                id: uuid::Uuid::new_v4(),
+                role: "assistant".to_string(),
+                text: assistant_message_for_browser_query(query, summary),
+            },
+        },
+        Some(request_id),
+    )
+    .await;
+}
+
+fn assistant_message_for_browser_query(query: &str, summary: &Option<String>) -> String {
+    summary
+        .clone()
+        .unwrap_or_else(|| search_browser_fallback_summary(query, false))
+}
+
+fn requested_help_for_screen_assist_mode(mode: ScreenAssistMode) -> RequestedHelp {
+    match mode {
+        ScreenAssistMode::ExplainVisibleScreen | ScreenAssistMode::SummarizeDocument => {
+            RequestedHelp::ExplainConcept
+        }
+        ScreenAssistMode::ExplainCode | ScreenAssistMode::DebugError => RequestedHelp::DebugCode,
+        ScreenAssistMode::MultipleChoice => RequestedHelp::SolveMultipleChoice,
+    }
+}
+
+fn intent_for_screen_assist_mode(mode: ScreenAssistMode) -> ReplIntent {
+    match mode {
+        ScreenAssistMode::ExplainVisibleScreen | ScreenAssistMode::SummarizeDocument => {
+            ReplIntent::ExplainScreen
+        }
+        ScreenAssistMode::ExplainCode => ReplIntent::ExplainCode,
+        ScreenAssistMode::DebugError => ReplIntent::DebugCode,
+        ScreenAssistMode::MultipleChoice => ReplIntent::MultipleChoiceAssist,
     }
 }
 
@@ -1847,6 +2089,169 @@ mod tests {
             snapshot.session.mode,
             visionclip_common::ReplMode::DesktopApp
         );
+    }
+
+    #[test]
+    fn repl_capture_and_explain_requires_policy_confirmation_when_unknown() {
+        let mut runtime = ReplRuntimeState::new(&AppConfig::default());
+        let request_id = uuid::Uuid::new_v4();
+
+        let result = process_repl_local_command_locked(
+            &mut runtime,
+            request_id,
+            ReplCommand::CaptureAndExplain {
+                mode: visionclip_common::ScreenAssistMode::ExplainCode,
+                policy: visionclip_common::AssessmentPolicy::UnknownAssessment,
+            },
+        );
+
+        assert!(matches!(result, JobResult::ActionStatus { .. }));
+        let snapshot = runtime.snapshot();
+        assert_eq!(
+            snapshot.session.policy,
+            visionclip_common::AssessmentPolicy::UnknownAssessment
+        );
+        assert_eq!(
+            snapshot.session.status,
+            visionclip_common::SessionStatus::AwaitingConfirmation
+        );
+    }
+
+    #[test]
+    fn repl_dismiss_confirmation_returns_session_to_idle() {
+        let mut runtime = ReplRuntimeState::new(&AppConfig::default());
+        let request_id = uuid::Uuid::new_v4();
+
+        process_repl_local_command_locked(
+            &mut runtime,
+            request_id,
+            ReplCommand::CaptureAndExplain {
+                mode: visionclip_common::ScreenAssistMode::ExplainCode,
+                policy: visionclip_common::AssessmentPolicy::UnknownAssessment,
+            },
+        );
+        let result = process_repl_local_command_locked(
+            &mut runtime,
+            request_id,
+            ReplCommand::DismissConfirmation,
+        );
+
+        assert!(matches!(result, JobResult::ActionStatus { .. }));
+        assert_eq!(
+            runtime.snapshot().session.status,
+            visionclip_common::SessionStatus::Idle
+        );
+    }
+
+    #[test]
+    fn repl_capture_and_explain_blocks_restricted_multiple_choice() {
+        let mut runtime = ReplRuntimeState::new(&AppConfig::default());
+        let request_id = uuid::Uuid::new_v4();
+
+        let result = process_repl_local_command_locked(
+            &mut runtime,
+            request_id,
+            ReplCommand::CaptureAndExplain {
+                mode: visionclip_common::ScreenAssistMode::MultipleChoice,
+                policy: visionclip_common::AssessmentPolicy::RestrictedAssessment,
+            },
+        );
+
+        assert!(matches!(
+            result,
+            JobResult::Error {
+                code,
+                ..
+            } if code == "assessment_policy_blocked"
+        ));
+        assert_eq!(
+            runtime.snapshot().session.status,
+            visionclip_common::SessionStatus::Error
+        );
+    }
+
+    #[test]
+    fn repl_ask_keeps_plain_messages_in_agent_mode() {
+        assert_eq!(explicit_repl_web_search_query("olá"), None);
+        assert_eq!(explicit_repl_web_search_query("explique esse código"), None);
+        assert_eq!(explicit_repl_web_search_query("terminal"), None);
+    }
+
+    #[test]
+    fn repl_ask_uses_web_search_only_for_explicit_search_prefixes() {
+        assert_eq!(
+            explicit_repl_web_search_query("pesquise quando foi fundada a NASA").as_deref(),
+            Some("quando foi fundada a NASA")
+        );
+        assert_eq!(
+            explicit_repl_web_search_query("search rust ownership").as_deref(),
+            Some("rust ownership")
+        );
+        assert_eq!(
+            explicit_repl_web_search_query("Google: Quem foi Rousseau?").as_deref(),
+            Some("Quem foi Rousseau?")
+        );
+    }
+
+    #[test]
+    fn repl_capture_and_explain_records_authorized_screen_assist_lifecycle() {
+        let mut runtime = ReplRuntimeState::new(&AppConfig::default());
+        let request_id = uuid::Uuid::new_v4();
+
+        let result = process_repl_local_command_locked(
+            &mut runtime,
+            request_id,
+            ReplCommand::CaptureAndExplain {
+                mode: visionclip_common::ScreenAssistMode::DebugError,
+                policy: visionclip_common::AssessmentPolicy::Practice,
+            },
+        );
+
+        assert!(matches!(result, JobResult::ActionStatus { .. }));
+        let (events, _) = runtime.events_after(1);
+        assert!(matches!(
+            events[0].event,
+            ReplEvent::PolicyEvaluated { allowed: true, .. }
+        ));
+        assert!(matches!(events[1].event, ReplEvent::RunStarted { .. }));
+        assert!(matches!(
+            events[2].event,
+            ReplEvent::IntentDetected {
+                intent: ReplIntent::DebugCode,
+                ..
+            }
+        ));
+        assert!(matches!(events[3].event, ReplEvent::ToolStarted { .. }));
+        assert!(matches!(
+            events[4].event,
+            ReplEvent::ToolCompleted {
+                status: ToolStatus::Cancelled,
+                ..
+            }
+        ));
+        assert!(matches!(events[5].event, ReplEvent::RunCompleted { .. }));
+        assert_eq!(
+            runtime.snapshot().session.status,
+            visionclip_common::SessionStatus::Idle
+        );
+    }
+
+    #[test]
+    fn browser_query_assistant_message_prefers_search_summary() {
+        let summary = Some("Resumo estruturado da pesquisa.".to_string());
+
+        assert_eq!(
+            assistant_message_for_browser_query("Quem foi Rousseau?", &summary),
+            "Resumo estruturado da pesquisa."
+        );
+    }
+
+    #[test]
+    fn browser_query_assistant_message_falls_back_when_search_summary_is_missing() {
+        let message = assistant_message_for_browser_query("Quem foi Rousseau?", &None);
+
+        assert!(message.contains("Pesquisa: Quem foi Rousseau?"));
+        assert!(message.contains("Leitura inicial:"));
     }
 
     #[test]

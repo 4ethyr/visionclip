@@ -54,6 +54,46 @@ fn unknown_assessment_requires_confirmation() {
 }
 
 #[test]
+fn unknown_policy_evaluation_sets_session_confirmation_state() {
+    let mut session = ReplSession::new(
+        ReplMode::FloatingTerminal,
+        ModelRef {
+            provider: "ollama".to_string(),
+            name: "gemma4-e2b".to_string(),
+        },
+    );
+
+    session.apply_event(&ReplEvent::PolicyEvaluated {
+        policy: AssessmentPolicy::UnknownAssessment,
+        allowed: false,
+    });
+
+    assert_eq!(
+        session.status,
+        coddy_core::SessionStatus::AwaitingConfirmation
+    );
+}
+
+#[test]
+fn confirmation_dismissal_returns_session_to_idle() {
+    let mut session = ReplSession::new(
+        ReplMode::FloatingTerminal,
+        ModelRef {
+            provider: "ollama".to_string(),
+            name: "gemma4-e2b".to_string(),
+        },
+    );
+
+    session.apply_event(&ReplEvent::PolicyEvaluated {
+        policy: AssessmentPolicy::UnknownAssessment,
+        allowed: false,
+    });
+    session.apply_event(&ReplEvent::ConfirmationDismissed);
+
+    assert_eq!(session.status, coddy_core::SessionStatus::Idle);
+}
+
+#[test]
 fn shortcut_starts_when_no_run_is_active() {
     let decision = evaluate_shortcut_conflict(ShortcutConflictPolicy::IgnoreWhileBusy, None);
 

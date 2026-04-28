@@ -6,7 +6,9 @@ use crate::config::CoddyRuntimeConfig;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use coddy_client::CoddyClient;
-use coddy_core::{ContextPolicy, ModelRef, ModelRole, ReplCommand, ReplMode};
+use coddy_core::{
+    AssessmentPolicy, ContextPolicy, ModelRef, ModelRole, ReplCommand, ReplMode, ScreenAssistMode,
+};
 use coddy_ipc::CoddyResult;
 use std::{env, ffi::OsString, process::Stdio};
 use tokio::process::Command as TokioCommand;
@@ -52,6 +54,10 @@ enum Command {
         #[command(subcommand)]
         command: UiCommand,
     },
+    Screen {
+        #[command(subcommand)]
+        command: ScreenCommand,
+    },
     Shortcuts {
         #[command(subcommand)]
         command: ShortcutCommand,
@@ -64,6 +70,60 @@ enum Command {
         #[command(subcommand)]
         command: DoctorCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum ScreenCommand {
+    Explain {
+        #[arg(long, value_enum, default_value = "explain-visible-screen")]
+        mode: CliScreenAssistMode,
+
+        #[arg(long, value_enum, default_value = "unknown-assessment")]
+        policy: CliAssessmentPolicy,
+    },
+    DismissConfirmation,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliScreenAssistMode {
+    ExplainVisibleScreen,
+    ExplainCode,
+    DebugError,
+    MultipleChoice,
+    SummarizeDocument,
+}
+
+impl From<CliScreenAssistMode> for ScreenAssistMode {
+    fn from(value: CliScreenAssistMode) -> Self {
+        match value {
+            CliScreenAssistMode::ExplainVisibleScreen => Self::ExplainVisibleScreen,
+            CliScreenAssistMode::ExplainCode => Self::ExplainCode,
+            CliScreenAssistMode::DebugError => Self::DebugError,
+            CliScreenAssistMode::MultipleChoice => Self::MultipleChoice,
+            CliScreenAssistMode::SummarizeDocument => Self::SummarizeDocument,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliAssessmentPolicy {
+    Practice,
+    PermittedAi,
+    SyntaxOnly,
+    RestrictedAssessment,
+    UnknownAssessment,
+}
+
+impl From<CliAssessmentPolicy> for AssessmentPolicy {
+    fn from(value: CliAssessmentPolicy) -> Self {
+        match value {
+            CliAssessmentPolicy::Practice => Self::Practice,
+            CliAssessmentPolicy::PermittedAi => Self::PermittedAi,
+            CliAssessmentPolicy::SyntaxOnly => Self::SyntaxOnly,
+            CliAssessmentPolicy::RestrictedAssessment => Self::RestrictedAssessment,
+            CliAssessmentPolicy::UnknownAssessment => Self::UnknownAssessment,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -255,6 +315,27 @@ async fn main() -> Result<()> {
             .await?;
             print_job_result(result)
         }
+        Some(Command::Screen {
+            command: ScreenCommand::Explain { mode, policy },
+        }) => {
+            let result = send_repl_command(
+                &config,
+                ReplCommand::CaptureAndExplain {
+                    mode: mode.into(),
+                    policy: policy.into(),
+                },
+                cli.speak,
+            )
+            .await?;
+            print_job_result(result)
+        }
+        Some(Command::Screen {
+            command: ScreenCommand::DismissConfirmation,
+        }) => {
+            let result =
+                send_repl_command(&config, ReplCommand::DismissConfirmation, false).await?;
+            print_job_result(result)
+        }
         Some(Command::Shortcuts {
             command: ShortcutCommand::Test,
         }) => run_shortcuts_test(&config).await,
@@ -279,7 +360,7 @@ async fn main() -> Result<()> {
             command: DoctorCommand::Shortcuts,
         }) => run_shortcuts_doctor(&config).await,
         None => {
-            println!("Use `coddy ask`, `coddy voice`, `coddy model select`, `coddy ui open`, `coddy stop-speaking`, `coddy stop-active-run`, `coddy session snapshot`, `coddy shortcuts test` ou `coddy doctor shortcuts`.");
+            println!("Use `coddy ask`, `coddy voice`, `coddy screen explain`, `coddy model select`, `coddy ui open`, `coddy stop-speaking`, `coddy stop-active-run`, `coddy session snapshot`, `coddy shortcuts test` ou `coddy doctor shortcuts`.");
             Ok(())
         }
     }
@@ -607,6 +688,43 @@ mod tests {
             }) => assert!(matches!(mode, CliReplMode::DesktopApp)),
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn parses_screen_explain_command() {
+        let cli = Cli::try_parse_from([
+            "coddy",
+            "screen",
+            "explain",
+            "--mode",
+            "multiple-choice",
+            "--policy",
+            "restricted-assessment",
+        ])
+        .expect("parse screen explain");
+
+        match cli.command {
+            Some(Command::Screen {
+                command: ScreenCommand::Explain { mode, policy },
+            }) => {
+                assert!(matches!(mode, CliScreenAssistMode::MultipleChoice));
+                assert!(matches!(policy, CliAssessmentPolicy::RestrictedAssessment));
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn parses_screen_dismiss_confirmation_command() {
+        let cli = Cli::try_parse_from(["coddy", "screen", "dismiss-confirmation"])
+            .expect("parse screen dismiss-confirmation");
+
+        assert!(matches!(
+            cli.command,
+            Some(Command::Screen {
+                command: ScreenCommand::DismissConfirmation
+            })
+        ));
     }
 
     #[test]
