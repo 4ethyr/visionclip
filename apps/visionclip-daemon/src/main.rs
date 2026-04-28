@@ -10,8 +10,9 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use visionclip_common::{
-    read_message, write_message, Action, AppConfig, ApplicationLaunchJob, CaptureJob,
-    HealthCheckJob, JobResult, UrlOpenJob, VisionRequest, VoiceSearchJob,
+    read_message, resolve_voice_turn_intent, write_message, Action, AppConfig,
+    ApplicationLaunchJob, CaptureJob, HealthCheckJob, JobResult, ReplCommand, ReplCommandJob,
+    UrlOpenJob, VisionRequest, VoiceSearchJob, VoiceTurnIntent,
 };
 use visionclip_infer::{
     postprocess::{sanitize_for_speech, sanitize_output},
@@ -111,6 +112,7 @@ async fn process_request(state: &AppState, request: VisionRequest) -> Result<Job
         VisionRequest::VoiceSearch(job) => process_voice_search(state, job).await,
         VisionRequest::OpenApplication(job) => process_open_application(state, job).await,
         VisionRequest::OpenUrl(job) => process_open_url(state, job).await,
+        VisionRequest::ReplCommand(job) => process_repl_command(state, job).await,
         VisionRequest::HealthCheck(job) => process_health_check(job).await,
     }
 }
@@ -227,6 +229,137 @@ async fn process_open_url(state: &AppState, job: UrlOpenJob) -> Result<JobResult
         message,
         spoken,
     })
+}
+
+async fn process_repl_command(state: &AppState, job: ReplCommandJob) -> Result<JobResult> {
+    let request_id = job.request_id;
+    let total_started_at = Instant::now();
+
+    info!(
+        request_id = %request_id,
+        command = ?job.command,
+        speak_requested = job.speak,
+        "processing Coddy REPL command"
+    );
+
+    match job.command {
+        ReplCommand::Ask { text, .. } => {
+            let query = sanitize_output(&Action::SearchWeb, &text);
+            if query.trim().is_empty() {
+                return Ok(JobResult::Error {
+                    request_id,
+                    code: "empty_repl_query".to_string(),
+                    message: "Comando Coddy vazio.".to_string(),
+                });
+            }
+
+            let speak_requested = state
+                .config
+                .action_should_speak(Action::SearchWeb.as_str(), job.speak);
+            let search_result =
+                execute_search_query(state, request_id, &query, speak_requested, total_started_at)
+                    .await?;
+
+            Ok(JobResult::BrowserQuery {
+                request_id,
+                query,
+                summary: search_result.summary,
+                spoken: search_result.spoken,
+            })
+        }
+        ReplCommand::VoiceTurn {
+            transcript_override: Some(transcript),
+        } => match resolve_voice_turn_intent(&transcript) {
+            Some(VoiceTurnIntent::OpenApplication {
+                transcript,
+                app_name,
+            }) => {
+                process_open_application(
+                    state,
+                    ApplicationLaunchJob {
+                        request_id,
+                        transcript: Some(transcript),
+                        app_name,
+                        speak: job.speak,
+                    },
+                )
+                .await
+            }
+            Some(VoiceTurnIntent::OpenWebsite {
+                transcript,
+                label,
+                url,
+            }) => {
+                process_open_url(
+                    state,
+                    UrlOpenJob {
+                        request_id,
+                        transcript: Some(transcript),
+                        label,
+                        url,
+                        speak: job.speak,
+                    },
+                )
+                .await
+            }
+            Some(VoiceTurnIntent::SearchWeb { transcript, query }) => {
+                let query = sanitize_output(&Action::SearchWeb, &query);
+                if query.trim().is_empty() {
+                    return Ok(JobResult::Error {
+                        request_id,
+                        code: "empty_voice_transcript".to_string(),
+                        message: "Transcript de voz vazio.".to_string(),
+                    });
+                }
+
+                process_voice_search(
+                    state,
+                    VoiceSearchJob {
+                        request_id,
+                        transcript,
+                        query,
+                        speak: job.speak,
+                    },
+                )
+                .await
+            }
+            None => Ok(JobResult::Error {
+                request_id,
+                code: "empty_voice_transcript".to_string(),
+                message: "Transcript de voz vazio.".to_string(),
+            }),
+        },
+        ReplCommand::VoiceTurn {
+            transcript_override: None,
+        } => {
+            if job.speak {
+                warn!(
+                    request_id = %request_id,
+                    "daemon received a voice turn without transcript; the CLI should capture ASR before sending"
+                );
+            }
+            Ok(JobResult::Error {
+                request_id,
+                code: "missing_voice_transcript".to_string(),
+                message:
+                    "Coddy não recebeu transcript de voz. Capture/transcreva no cliente antes de enviar."
+                        .to_string(),
+            })
+        }
+        ReplCommand::StopSpeaking | ReplCommand::StopActiveRun => Ok(JobResult::ActionStatus {
+            request_id,
+            message: "Comando Coddy recebido; cancelamento cooperativo será tratado pelo broker."
+                .to_string(),
+            spoken: false,
+        }),
+        ReplCommand::CaptureAndExplain { .. }
+        | ReplCommand::OpenUi { .. }
+        | ReplCommand::SelectModel { .. } => Ok(JobResult::ActionStatus {
+            request_id,
+            message: "Comando Coddy reconhecido, mas ainda não implementado no daemon.".to_string(),
+            spoken: false,
+        }),
+    }
 }
 
 fn validate_browser_url(url: &str) -> Result<()> {

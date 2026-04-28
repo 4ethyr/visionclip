@@ -23,6 +23,10 @@ VisionClip é um serviço local para Linux que transforma seus modelos locais em
 4. O resultado é pós-processado conforme a ação pedida.
 5. A saída é enviada para clipboard, navegador ou TTS.
 
+## Próximas frentes
+
+- A especificação do futuro **Coddy**, o REPL visual/CLI do VisionClip com modo terminal flutuante, modo desktop app, voz, screen understanding e assistência segura para coding practice/assessments, está em [docs/repl/README.md](docs/repl/README.md).
+
 ## Status atual
 
 Nesta etapa, o projeto passa a validar o fluxo principal com `gemma4:e2b` tanto para OCR quanto para `TranslatePtBr`, `Explain` e `SearchWeb`. O caminho multimodal puro continua suportado, mas o default foi mantido em `OCR -> Gemma -> Gemma` porque ele preservou melhor a qualidade do que a imagem direta e ficou mais rápido do que o stack com dois modelos. Em Wayland, o launcher tenta primeiro o portal de screenshot quando `prefer_portal = true`; se isso não estiver disponível, ele pode cair para outros backends compatíveis instalados no host.
