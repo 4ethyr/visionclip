@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Aether Terminal - Model Selection</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700;900&amp;family=JetBrains+Mono:wght@400;500&amp;family=Manrope:wght@400;500;600&amp;family=Inter:wght@400;600&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "on-secondary": "#520072",
+                        "secondary-container": "#b600f8",
+                        "on-tertiary-fixed": "#1c1b1b",
+                        "error-container": "#93000a",
+                        "surface-dim": "#131313",
+                        "primary": "#dbfcff",
+                        "surface-container-low": "#1c1b1b",
+                        "error": "#ffb4ab",
+                        "surface-container-highest": "#353534",
+                        "secondary-fixed-dim": "#ebb2ff",
+                        "on-error-container": "#ffdad6",
+                        "on-surface": "#e5e2e1",
+                        "on-primary-fixed": "#002022",
+                        "surface-container-lowest": "#0e0e0e",
+                        "surface-tint": "#00dbe9",
+                        "primary-fixed": "#7df4ff",
+                        "inverse-on-surface": "#313030",
+                        "on-tertiary": "#313030",
+                        "on-surface-variant": "#b9cacb",
+                        "outline": "#849495",
+                        "on-primary": "#00363a",
+                        "tertiary-fixed-dim": "#c8c6c5",
+                        "surface-variant": "#353534",
+                        "on-secondary-container": "#fff6fc",
+                        "on-primary-container": "#006970",
+                        "tertiary-fixed": "#e5e2e1",
+                        "on-primary-fixed-variant": "#004f54",
+                        "inverse-surface": "#e5e2e1",
+                        "inverse-primary": "#006970",
+                        "on-secondary-fixed": "#320047",
+                        "secondary": "#ebb2ff",
+                        "surface-container": "#201f1f",
+                        "secondary-fixed": "#f8d8ff",
+                        "background": "#131313",
+                        "surface-bright": "#3a3939",
+                        "outline-variant": "#3b494b",
+                        "tertiary": "#f8f5f5",
+                        "surface-container-high": "#2a2a2a",
+                        "on-secondary-fixed-variant": "#74009f",
+                        "on-tertiary-container": "#5f5e5e",
+                        "primary-container": "#00f0ff",
+                        "surface": "#131313",
+                        "on-error": "#690005",
+                        "tertiary-container": "#dcd9d8",
+                        "primary-fixed-dim": "#00dbe9",
+                        "on-tertiary-fixed-variant": "#474746",
+                        "on-background": "#e5e2e1"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.125rem",
+                        "lg": "0.25rem",
+                        "xl": "0.5rem",
+                        "full": "0.75rem"
+                    },
+                    "spacing": {
+                        "lg": "48px",
+                        "xl": "80px",
+                        "md": "24px",
+                        "margin": "24px",
+                        "xs": "4px",
+                        "base": "8px",
+                        "sm": "12px",
+                        "gutter": "16px"
+                    },
+                    "fontFamily": {
+                        "headline-md": ["Space Grotesk"],
+                        "display-lg": ["Space Grotesk"],
+                        "label-sm": ["Inter"],
+                        "code-md": ["JetBrains Mono"],
+                        "body-base": ["Manrope"]
+                    },
+                    "fontSize": {
+                        "headline-md": ["24px", { "lineHeight": "1.2", "fontWeight": "500" }],
+                        "display-lg": ["48px", { "lineHeight": "1.1", "letterSpacing": "-0.02em", "fontWeight": "700" }],
+                        "label-sm": ["12px", { "lineHeight": "1", "letterSpacing": "0.05em", "fontWeight": "600" }],
+                        "code-md": ["14px", { "lineHeight": "1.5", "fontWeight": "400" }],
+                        "body-base": ["16px", { "lineHeight": "1.6", "fontWeight": "400" }]
+                    }
+                }
+            }
+        }
+    </script>
+<style>
+        /* Base subtle background pattern for depth */
+        body {
+            background-color: theme('colors.background');
+            background-image: radial-gradient(circle at 50% 50%, rgba(0, 240, 255, 0.03) 0%, transparent 60%);
+        }
+    </style>
+</head>
+<body class="min-h-screen text-on-surface font-body-base text-body-base flex items-center justify-center p-md sm:p-lg antialiased">
+<!-- Floating Application Window -->
+<div class="relative w-full max-w-[1024px] h-[720px] rounded-xl overflow-hidden bg-surface/60 backdrop-blur-[20px] border border-outline/20 shadow-[0_20px_40px_rgba(0,0,0,0.4)] flex flex-col">
+<!-- TopAppBar Component (from JSON) -->
+<header class="docked full-width top-0 border-b border-cyan-500/20 bg-slate-950/60 backdrop-blur-xl shadow-[0_4px_30px_rgba(0,0,0,0.1)] flex justify-between items-center w-full px-6 py-3 relative z-50">
+<!-- Brand / Logo -->
+<div class="font-['Space_Grotesk'] tracking-tighter uppercase text-xs font-bold text-lg font-black tracking-widest text-cyan-400 drop-shadow-[0_0_8px_rgba(0,240,255,0.5)]">
+                AETHER_TERMINAL
+            </div>
+<!-- Actions -->
+<div class="flex items-center gap-margin">
+<!-- Model Selection Dropdown Container -->
+<div class="relative">
+<!-- Dropdown Trigger -->
+<button class="flex items-center gap-base font-['Space_Grotesk'] tracking-tighter uppercase text-xs font-bold text-cyan-400 hover:text-cyan-300 transition-colors duration-300 active:scale-95 transition-transform">
+                        Model: GPT-4o
+                        <span class="material-symbols-outlined text-[16px]">arrow_drop_down</span>
+</button>
+<!-- Dropdown Menu (Open State) -->
+<div class="absolute top-full right-0 mt-sm w-[280px] bg-surface-container-high/90 backdrop-blur-[30px] border border-outline-variant/50 rounded-lg p-base shadow-[0_20px_40px_rgba(0,0,0,0.5)] flex flex-col gap-xs before:content-[''] before:absolute before:inset-0 before:rounded-lg before:ring-1 before:ring-white/5 before:pointer-events-none">
+<!-- Active Item: GPT-4o -->
+<button class="w-full flex items-center justify-between px-sm py-sm bg-primary/10 border-l-2 border-primary text-primary font-code-md text-code-md rounded-r-md transition-colors shadow-[inset_16px_0_32px_-16px_rgba(0,240,255,0.3)]">
+<div class="flex items-center gap-sm">
+<!-- Status Dot: Cyan/Active -->
+<span class="w-[6px] h-[6px] rounded-full bg-primary shadow-[0_0_8px_theme(colors.primary)] animate-[pulse_2s_ease-in-out_infinite]"></span>
+<span>GPT-4o (Cloud)</span>
+</div>
+<span class="material-symbols-outlined text-[16px] opacity-70">cloud</span>
+</button>
+<!-- Inactive Item: Llama-3 -->
+<button class="w-full flex items-center justify-between px-sm py-sm text-on-surface-variant hover:text-on-surface hover:bg-surface-bright/50 font-code-md text-code-md rounded-md transition-colors border-l-2 border-transparent">
+<div class="flex items-center gap-sm">
+<!-- Status Dot: Blue (using primary-fixed for distinct blue tone) -->
+<span class="w-[6px] h-[6px] rounded-full bg-primary-fixed shadow-[0_0_4px_theme(colors.primary-fixed)]"></span>
+<span>Llama-3 (Local SLM)</span>
+</div>
+<span class="material-symbols-outlined text-[16px] opacity-50">memory</span>
+</button>
+<!-- Inactive Item: Claude 3.5 -->
+<button class="w-full flex items-center justify-between px-sm py-sm text-on-surface-variant hover:text-on-surface hover:bg-surface-bright/50 font-code-md text-code-md rounded-md transition-colors border-l-2 border-transparent">
+<div class="flex items-center gap-sm">
+<!-- Status Dot: Greenish (using a theme-aligned hex to meet 'green' requirement while staying techy) -->
+<span class="w-[6px] h-[6px] rounded-full bg-[#00ff9d] shadow-[0_0_4px_#00ff9d]"></span>
+<span>Claude 3.5 (API)</span>
+</div>
+<span class="material-symbols-outlined text-[16px] opacity-50">api</span>
+</button>
+</div>
+</div>
+<!-- Trailing Icons -->
+<button class="text-cyan-400 hover:text-cyan-300 transition-colors duration-300 active:scale-95 transition-transform flex items-center justify-center">
+<span class="material-symbols-outlined">sensors</span>
+</button>
+<button class="text-cyan-400 hover:text-cyan-300 transition-colors duration-300 active:scale-95 transition-transform flex items-center justify-center">
+<span class="material-symbols-outlined">settings</span>
+</button>
+</div>
+</header>
+<!-- Main Execution Canvas (Background Content) -->
+<main class="flex-1 p-margin relative overflow-hidden flex flex-col">
+<!-- Subtle Terminal Output Placeholder -->
+<div class="font-code-md text-code-md text-on-surface-variant/40 flex flex-col gap-xs mt-lg">
+<div class="flex gap-sm">
+<span class="text-primary/50">&gt;</span>
+<span>system.initialize(context='view_4');</span>
+</div>
+<div class="flex gap-sm">
+<span class="text-primary/50">&gt;</span>
+<span>loading interface components...</span>
+</div>
+<div class="flex gap-sm">
+<span class="text-primary/50">&gt;</span>
+<span>awaiting user input.</span>
+</div>
+</div>
+<!-- Decorative glowing orb for depth -->
+<div class="absolute bottom-[-100px] right-[-100px] w-[300px] h-[300px] bg-secondary-container/10 blur-[80px] rounded-full pointer-events-none"></div>
+</main>
+</div>
+</body></html>

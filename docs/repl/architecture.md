@@ -374,14 +374,14 @@ pub enum ScreenAssistMode {
 
 ### Curto prazo
 
-Usar Unix socket já existente do daemon e adicionar requests:
+Usar Unix socket já existente do daemon com o protocolo direto `coddy-ipc`:
 
 ```rust
-pub enum VisionRequest {
-    ReplCommand(ReplCommandJob),
-    ReplSessionEvent(ReplSessionEventJob),
-    ReplCapture(ReplCaptureJob),
-    // existentes...
+pub enum CoddyRequest {
+    Command(ReplCommandJob),
+    SessionSnapshot(ReplSessionSnapshotJob),
+    Events(ReplEventsJob),
+    EventStream(ReplEventStreamJob),
 }
 ```
 

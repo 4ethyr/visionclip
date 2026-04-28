@@ -174,6 +174,23 @@ Referências:
 - https://help.openai.com/en/articles/11096431-openai-codex-ci-getting-started
 - https://aider.chat/docs/
 
+## OpenAPI e Swagger
+
+OpenAPI descreve APIs HTTP de forma padronizada e independente de linguagem. A especificação 3.1 alinhou schemas com JSON Schema 2020-12 e pode ser representada em JSON ou YAML. A OpenAPI Initiative recomenda versões patch mais recentes da linha 3.1, mas tooling compatível com 3.1 deve funcionar com documentos 3.1.x; por compatibilidade ampla com Swagger UI e geradores, a documentação do Coddy usa `openapi: 3.1.0`.
+
+Implicação:
+
+- Documentar a futura bridge HTTP/Tauri do REPL em `docs/repl/openapi/coddy-repl.openapi.yaml`.
+- Manter Rust IPC como fonte de verdade enquanto não houver servidor HTTP.
+- Usar `operationId` estável para geração futura de cliente TypeScript.
+- Modelar eventos e comandos no formato serde atual para reduzir transformação entre daemon, CLI e frontend.
+
+Referências:
+
+- https://spec.openapis.org/oas/v3.1.0.html
+- https://www.openapis.org/blog/2021/02/18/openapi-specification-3-1-released
+- https://www.openapis.org/blog/2024/10/25/announcing-openapi-specification-patch-releases
+
 ## Assessments e Integridade
 
 Plataformas de assessment possuem regras variáveis. CodeSignal documenta cenários onde buscas são restritas a sintaxe e afirma que, em algumas regras, IA não é permitida. HackerRank documenta malpractices como ajuda não autorizada, cópia de código e navegação indevida. Ao mesmo tempo, HackerRank e CodeSignal também possuem modos oficiais de AI-assisted assessments quando o recrutador habilita esse uso.

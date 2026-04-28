@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Aether Terminal - Float Window</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&amp;family=Inter:wght@400;600&amp;family=JetBrains+Mono:wght@400&amp;family=Manrope:wght@400&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "on-secondary": "#520072",
+                        "secondary-container": "#b600f8",
+                        "on-tertiary-fixed": "#1c1b1b",
+                        "error-container": "#93000a",
+                        "surface-dim": "#131313",
+                        "primary": "#dbfcff",
+                        "surface-container-low": "#1c1b1b",
+                        "error": "#ffb4ab",
+                        "surface-container-highest": "#353534",
+                        "secondary-fixed-dim": "#ebb2ff",
+                        "on-error-container": "#ffdad6",
+                        "on-surface": "#e5e2e1",
+                        "on-primary-fixed": "#002022",
+                        "surface-container-lowest": "#0e0e0e",
+                        "surface-tint": "#00dbe9",
+                        "primary-fixed": "#7df4ff",
+                        "inverse-on-surface": "#313030",
+                        "on-tertiary": "#313030",
+                        "on-surface-variant": "#b9cacb",
+                        "outline": "#849495",
+                        "on-primary": "#00363a",
+                        "tertiary-fixed-dim": "#c8c6c5",
+                        "surface-variant": "#353534",
+                        "on-secondary-container": "#fff6fc",
+                        "on-primary-container": "#006970",
+                        "tertiary-fixed": "#e5e2e1",
+                        "on-primary-fixed-variant": "#004f54",
+                        "inverse-surface": "#e5e2e1",
+                        "inverse-primary": "#006970",
+                        "on-secondary-fixed": "#320047",
+                        "secondary": "#ebb2ff",
+                        "surface-container": "#201f1f",
+                        "secondary-fixed": "#f8d8ff",
+                        "background": "#131313",
+                        "surface-bright": "#3a3939",
+                        "outline-variant": "#3b494b",
+                        "tertiary": "#f8f5f5",
+                        "surface-container-high": "#2a2a2a",
+                        "on-secondary-fixed-variant": "#74009f",
+                        "on-tertiary-container": "#5f5e5e",
+                        "primary-container": "#00f0ff",
+                        "surface": "#131313",
+                        "on-error": "#690005",
+                        "tertiary-container": "#dcd9d8",
+                        "primary-fixed-dim": "#00dbe9",
+                        "on-tertiary-fixed-variant": "#474746",
+                        "on-background": "#e5e2e1"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.125rem",
+                        "lg": "0.25rem",
+                        "xl": "0.5rem",
+                        "full": "0.75rem"
+                    },
+                    "spacing": {
+                        "lg": "48px",
+                        "xl": "80px",
+                        "md": "24px",
+                        "margin": "24px",
+                        "xs": "4px",
+                        "base": "8px",
+                        "sm": "12px",
+                        "gutter": "16px"
+                    },
+                    "fontFamily": {
+                        "headline-md": ["Space Grotesk"],
+                        "display-lg": ["Space Grotesk"],
+                        "label-sm": ["Inter"],
+                        "code-md": ["JetBrains Mono"],
+                        "body-base": ["Manrope"]
+                    },
+                    "fontSize": {
+                        "headline-md": ["24px", {"lineHeight": "1.2", "fontWeight": "500"}],
+                        "display-lg": ["48px", {"lineHeight": "1.1", "letterSpacing": "-0.02em", "fontWeight": "700"}],
+                        "label-sm": ["12px", {"lineHeight": "1", "letterSpacing": "0.05em", "fontWeight": "600"}],
+                        "code-md": ["14px", {"lineHeight": "1.5", "fontWeight": "400"}],
+                        "body-base": ["16px", {"lineHeight": "1.6", "fontWeight": "400"}]
+                    }
+                }
+            }
+        }
+    </script>
+<style>
+        .glass-panel {
+            background-color: rgba(19, 19, 19, 0.6);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(0, 240, 255, 0.2);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+        }
+        .code-block {
+            background-color: rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .syntax-keyword { color: #ebb2ff; }
+        .syntax-string { color: #7df4ff; }
+        .syntax-comment { color: #849495; }
+        .syntax-func { color: #00dbe9; }
+        .aurora-gradient {
+            background: radial-gradient(circle at top right, rgba(182, 0, 248, 0.15) 0%, transparent 60%);
+        }
+        
+        /* Custom Scrollbar for terminal vibe */
+        ::-webkit-scrollbar {
+            width: 2px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: rgba(182, 0, 248, 0.3);
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(182, 0, 248, 0.6);
+        }
+    </style>
+</head>
+<body class="bg-background text-on-surface min-h-screen flex items-center justify-center relative overflow-hidden" data-alt="Abstract dark sci-fi background with glowing nebulous shapes and deep shadows" style="background-image: url('https://lh3.googleusercontent.com/aida-public/AB6AXuCHRGK2m8X3KiNpd8T9gLfHDKT2ciUIZLMYJ6kzWBKXZsatmfatK5cV8wDa75yjYARVx0sHN5RyMDf9te1_uBFx2x49G1kU_S1t3cVADlh_0U1VqfN4Sv9hB4ITaEJs72yzTOHCTp10Gn3nLV-oH9RSdTZ5CPeeiYoCFr0_Ec8AHeFhF6MCmAM3DvtHsZk0tdtHyfi0QzRN6ucKdBFktj4sjFFN10aY3vwewwBpMTcMR2RMjaw9A71X-f9honeULMBkR8Bpu1OhHKdh'); background-size: cover; background-position: center;">
+<!-- Background overlay to darken and blur the image slightly to make the terminal pop -->
+<div class="absolute inset-0 bg-background/40 backdrop-blur-sm z-0"></div>
+<!-- Main Floating Terminal Window -->
+<main class="relative z-10 w-full max-w-4xl mx-margin glass-panel rounded-xl overflow-hidden flex flex-col h-[819px] max-h-[800px] aurora-gradient shadow-[0_20px_40px_rgba(0,0,0,0.4)]">
+<!-- Top App Bar -->
+<header class="bg-slate-950/60 backdrop-blur-xl border-b border-cyan-500/20 shadow-[0_4px_30px_rgba(0,0,0,0.1)] flex justify-between items-center w-full px-6 py-3 flex-shrink-0">
+<div class="flex items-center gap-sm">
+<span class="material-symbols-outlined text-cyan-400" data-weight="fill" style="font-variation-settings: 'FILL' 1;">terminal</span>
+<span class="font-headline-md text-headline-md text-cyan-400 tracking-widest drop-shadow-[0_0_8px_rgba(0,240,255,0.5)]">AETHER_TERMINAL</span>
+</div>
+<div class="flex items-center gap-gutter">
+<span class="font-label-sm text-label-sm text-on-surface-variant bg-surface-container-high px-sm py-xs rounded-full border border-outline-variant">Model: GPT-4o</span>
+<div class="flex gap-base">
+<button aria-label="Sensors" class="text-slate-500 hover:text-cyan-300 transition-colors duration-300 active:scale-95 transition-transform">
+<span class="material-symbols-outlined">sensors</span>
+</button>
+<button aria-label="Settings" class="text-slate-500 hover:text-cyan-300 transition-colors duration-300 active:scale-95 transition-transform">
+<span class="material-symbols-outlined">settings</span>
+</button>
+</div>
+</div>
+</header>
+<!-- Chat History Canvas -->
+<div class="flex-1 overflow-y-auto p-margin flex flex-col gap-lg">
+<!-- User Message -->
+<div class="flex gap-gutter items-start max-w-3xl self-end flex-row-reverse">
+<div class="w-8 h-8 rounded-full bg-surface-container-high flex items-center justify-center border border-outline-variant flex-shrink-0">
+<span class="material-symbols-outlined text-on-surface text-[18px]">person</span>
+</div>
+<div class="bg-surface-container-low border border-outline-variant rounded-xl rounded-tr-none p-gutter">
+<p class="font-body-base text-body-base text-on-surface">Refactor auth.py to use the new robust security crate in Rust. I want to replace the current Python implementation completely.</p>
+</div>
+</div>
+<!-- AI Response -->
+<div class="flex gap-gutter items-start max-w-3xl">
+<div class="w-8 h-8 rounded-full bg-primary-fixed-dim/20 flex items-center justify-center border border-primary-fixed-dim flex-shrink-0">
+<span class="material-symbols-outlined text-primary-fixed-dim text-[18px]">smart_toy</span>
+</div>
+<div class="flex-1 flex flex-col gap-sm">
+<p class="font-body-base text-body-base text-on-surface">Certainly. Here is the refactored authentication module written in Rust, utilizing the recommended security crates for robust password hashing and token generation.</p>
+<!-- Code Block -->
+<div class="code-block rounded-lg overflow-hidden mt-base">
+<div class="bg-surface-container-highest px-gutter py-sm border-b border-white/10 flex justify-between items-center">
+<span class="font-label-sm text-label-sm text-on-surface-variant uppercase">rust</span>
+<button class="text-on-surface-variant hover:text-primary-fixed-dim transition-colors flex items-center gap-xs">
+<span class="material-symbols-outlined text-[14px]">content_copy</span>
+<span class="font-label-sm text-label-sm">Copy</span>
+</button>
+</div>
+<div class="p-gutter overflow-x-auto">
+<pre class="font-code-md text-code-md text-on-surface leading-relaxed"><span class="syntax-keyword">use</span> argon2::{
+    password_hash::{
+        rand_core::OsRng,
+        PasswordHash, PasswordHasher, PasswordVerifier, SaltString
+    },
+    Argon2
+};
+<span class="syntax-keyword">use</span> jsonwebtoken::{encode, Header, EncodingKey};
+<span class="syntax-keyword">use</span> serde::{Serialize, Deserialize};
+
+<span class="syntax-comment">// Define our claims for the JWT</span>
+#[derive(Debug, Serialize, Deserialize)]
+<span class="syntax-keyword">struct</span> Claims {
+    sub: String,
+    exp: usize,
+}
+
+<span class="syntax-keyword">pub fn</span> <span class="syntax-func">hash_password</span>(password: &amp;<span class="syntax-keyword">str</span>) -&gt; Result&lt;String, argon2::password_hash::Error&gt; {
+    <span class="syntax-keyword">let</span> salt = SaltString::generate(&amp;<span class="syntax-keyword">mut</span> OsRng);
+    <span class="syntax-keyword">let</span> argon2 = Argon2::default();
+    <span class="syntax-keyword">let</span> password_hash = argon2.hash_password(password.as_bytes(), &amp;salt)?.to_string();
+    <span class="syntax-keyword">Ok</span>(password_hash)
+}
+
+<span class="syntax-keyword">pub fn</span> <span class="syntax-func">verify_password</span>(hash: &amp;<span class="syntax-keyword">str</span>, password: &amp;<span class="syntax-keyword">str</span>) -&gt; <span class="syntax-keyword">bool</span> {
+    <span class="syntax-keyword">let</span> parsed_hash = <span class="syntax-keyword">match</span> PasswordHash::new(hash) {
+        <span class="syntax-keyword">Ok</span>(ph) =&gt; ph,
+        <span class="syntax-keyword">Err</span>(_) =&gt; <span class="syntax-keyword">return</span> <span class="syntax-keyword">false</span>,
+    };
+    Argon2::default().verify_password(password.as_bytes(), &amp;parsed_hash).is_ok()
+}
+                            </pre>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- Input Bar Area -->
+<div class="p-margin border-t border-cyan-500/15 bg-surface-dim/80 backdrop-blur-md flex-shrink-0">
+<div class="relative flex items-center bg-surface-container rounded-full border border-outline-variant focus-within:border-primary-fixed-dim focus-within:shadow-[0_0_15px_rgba(0,219,233,0.2)] transition-all duration-300">
+<span class="material-symbols-outlined text-primary-fixed-dim pl-gutter">chevron_right</span>
+<input class="flex-1 bg-transparent border-none focus:ring-0 text-on-surface font-code-md text-code-md py-sm px-base placeholder:text-on-surface-variant/50" placeholder="Enter command or prompt..." type="text" value="Optimize the imports and "/>
+<!-- Blinking cursor simulation -->
+<div class="w-2 h-4 bg-primary-fixed-dim absolute left-[260px] animate-pulse"></div>
+<button class="mr-sm w-8 h-8 rounded-full bg-primary-fixed-dim/10 flex items-center justify-center text-primary-fixed-dim hover:bg-primary-fixed-dim/20 transition-colors">
+<span class="material-symbols-outlined text-[18px]">arrow_upward</span>
+</button>
+</div>
+</div>
+</main>
+</body></html>
