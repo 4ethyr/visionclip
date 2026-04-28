@@ -5,7 +5,7 @@ import type { RequestedHelp, AssistanceFallback } from '@/domain/types/policy'
 
 describe('Domain type contracts', () => {
   describe('ReplEvent discriminated union', () => {
-    it('all 20 event variants are valid ReplEvent types', () => {
+    it('all event variants are valid ReplEvent types', () => {
       const events: { [K in keyof ReplEvent]: ReplEvent } = {
         SessionStarted: { SessionStarted: { session_id: 'uuid' } },
         RunStarted: { RunStarted: { run_id: 'uuid' } },
@@ -18,7 +18,13 @@ describe('Domain type contracts', () => {
         OcrCompleted: { OcrCompleted: { chars: 500 } },
         IntentDetected: { IntentDetected: { intent: 'OpenApplication' as ReplIntent, confidence: 0.95 } },
         PolicyEvaluated: { PolicyEvaluated: { policy: 'Practice', allowed: true } },
-        ModelSelected: { ModelSelected: { model: 'gpt-4o' } },
+        ConfirmationDismissed: { ConfirmationDismissed: {} },
+        ModelSelected: {
+          ModelSelected: {
+            model: { provider: 'ollama', name: 'qwen2.5:0.5b' },
+            role: 'Chat',
+          },
+        },
         SearchStarted: { SearchStarted: { query: 'Rust docs', provider: 'google' } },
         SearchContextExtracted: { SearchContextExtracted: { provider: 'google', organic_results: 5, ai_overview_present: false } },
         TokenDelta: { TokenDelta: { run_id: 'run-1', text: 'Hello' } },
@@ -32,8 +38,7 @@ describe('Domain type contracts', () => {
         Error: { Error: { code: 'E001', message: 'Something went wrong' } },
       }
 
-      // Verify we have all 20 event keys + SessionStarted + Error
-      expect(Object.keys(events)).toHaveLength(23)
+      expect(Object.keys(events)).toHaveLength(24)
 
       // Verify each event is correctly typed
       for (const [key, event] of Object.entries(events)) {

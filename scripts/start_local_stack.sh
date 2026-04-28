@@ -110,9 +110,41 @@ start_bg() {
     local pid_file="$2"
     shift 2
 
-    nohup "$@" >"$log_file" 2>&1 &
+    if command -v setsid >/dev/null 2>&1; then
+        nohup setsid "$@" >"$log_file" 2>&1 < /dev/null &
+    else
+        nohup "$@" >"$log_file" 2>&1 < /dev/null &
+    fi
     local pid=$!
     echo "$pid" >"$pid_file"
+}
+
+wait_for_process_alive() {
+    local pid_file="$1"
+    local label="$2"
+    local log_file="$3"
+    local attempts="${4:-20}"
+
+    for _ in $(seq 1 "$attempts"); do
+        if [[ ! -f "$pid_file" ]]; then
+            break
+        fi
+
+        local pid
+        pid="$(cat "$pid_file")"
+        if [[ -n "$pid" ]] && kill -0 "$pid" >/dev/null 2>&1; then
+            return 0
+        fi
+
+        sleep 0.25
+    done
+
+    echo "Erro: $label nao permaneceu em execucao apos iniciar." >&2
+    if [[ -f "$log_file" ]]; then
+        echo "Ultimas linhas de $log_file:" >&2
+        tail -n 40 "$log_file" >&2 || true
+    fi
+    return 1
 }
 
 wait_for_http() {
@@ -297,7 +329,7 @@ if ! pgrep -af "$ROOT_DIR/target/debug/visionclip-daemon" >/dev/null 2>&1; then
         "$DAEMON_LOG" \
         "$DAEMON_PID_FILE" \
         env "VISIONCLIP_CONFIG=$CONFIG_PATH" "$ROOT_DIR/target/debug/visionclip-daemon"
-    sleep 1
+    wait_for_process_alive "$DAEMON_PID_FILE" "visionclip-daemon" "$DAEMON_LOG"
 else
     echo "visionclip-daemon ja esta em execucao"
 fi

@@ -80,17 +80,31 @@ export function sessionReducer(session: ReplSession, event: ReplEvent): ReplSess
     }
 
     case 'PolicyEvaluated': {
-      const { policy } = (event as { PolicyEvaluated: { policy: string; allowed: boolean } })
+      const { policy, allowed } = (event as { PolicyEvaluated: { policy: string; allowed: boolean } })
         .PolicyEvaluated
-      return { ...session, policy: policy as ReplSession['policy'] }
-    }
-
-    case 'ModelSelected': {
-      const { model } = (event as { ModelSelected: { model: string } }).ModelSelected
       return {
         ...session,
-        selected_model: { ...session.selected_model, name: model },
+        policy: policy as ReplSession['policy'],
+        status: !allowed && policy === 'UnknownAssessment'
+          ? 'AwaitingConfirmation'
+          : session.status,
       }
+    }
+
+    case 'ConfirmationDismissed':
+      return session.status === 'AwaitingConfirmation'
+        ? { ...session, status: 'Idle' }
+        : session
+
+    case 'ModelSelected': {
+      const { model, role } = (event as { ModelSelected: {
+        model: ReplSession['selected_model']
+        role: string
+      } }).ModelSelected
+
+      if (role !== 'Chat') return session
+
+      return { ...session, selected_model: model }
     }
 
     // Events that the frontend observes but does not mutate state for:

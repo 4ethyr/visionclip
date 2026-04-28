@@ -2,6 +2,7 @@
 // Terminal-style textarea input: Enter sends, Shift+Enter newlines, auto-resize.
 
 import { useState, useRef, useCallback, type KeyboardEvent, type ChangeEvent } from 'react'
+import { Icon } from './Icon'
 
 interface Props {
   onSend: (text: string) => void
@@ -54,44 +55,31 @@ export function InputBar({
   )
 
   return (
-    <div className="relative flex items-start bg-surface-container rounded-2xl border border-outline-variant focus-within:border-primary transition-shadow duration-300">
-      {/* Prompt arrow */}
-      <span className="text-primary pl-4 pt-3 select-none font-mono text-sm leading-5">
+    <div className="terminal-input relative flex items-start rounded-full border border-outline-variant/80 bg-surface-container/70 px-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+      <span className="select-none pl-4 pt-3 font-mono text-sm leading-5 text-primary drop-shadow-[0_0_8px_rgba(0,219,233,0.65)]">
         &gt;
       </span>
 
       <textarea
         ref={textareaRef}
-        className="flex-1 bg-transparent border-none focus:ring-0 text-on-surface font-mono text-sm py-2.5 px-3 placeholder:text-on-surface-variant/50 resize-none overflow-y-auto leading-5"
+        className="min-h-[42px] flex-1 resize-none overflow-y-auto border-none bg-transparent px-3 py-2.5 font-mono text-sm leading-5 text-on-surface caret-primary outline-none placeholder:text-on-surface-variant/45 focus:ring-0"
         placeholder={placeholder}
         rows={1}
         value={value}
         onChange={handleChange}
         onKeyDown={handleKeyDown}
         disabled={disabled}
-        autoFocus
       />
 
-      {/* Mic button */}
-      <button
-        type="button"
-        className="mt-1.5 w-8 h-8 rounded-full flex items-center justify-center text-on-surface-variant hover:text-primary transition-colors flex-shrink-0"
-        title="Voice input"
-        aria-label="Voice input"
-      >
-        <span className="text-[18px]">🎤</span>
-      </button>
-
-      {/* Send button */}
       <button
         type="button"
         onClick={submit}
         disabled={disabled || !value.trim()}
-        className="mt-1.5 mr-2 w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center text-primary hover:bg-primary/20 transition-colors disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0"
+        className="mr-2 mt-1.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary shadow-[0_0_18px_rgba(0,219,233,0.12)] transition-colors hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-30"
         title="Send"
         aria-label="Send"
       >
-        <span className="text-[18px]">↑</span>
+        <Icon name="send" className="h-4 w-4" />
       </button>
     </div>
   )

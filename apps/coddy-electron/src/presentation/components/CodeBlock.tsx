@@ -3,6 +3,7 @@
 
 import { useState, useCallback, type CSSProperties } from 'react'
 import type { JSX } from 'react'
+import { Icon } from './Icon'
 
 // Simple keyword-based syntax highlighting for common languages.
 const KEYWORD_MAP: Record<string, string[]> = {
@@ -115,24 +116,23 @@ export function CodeBlock({ code, language }: CodeBlockProps) {
   }, [code])
 
   return (
-    <div className="code-block rounded-lg overflow-hidden mt-2">
-      {/* Header */}
-      <div className="bg-surface-container-highest px-4 py-1.5 border-b border-white/10 flex justify-between items-center">
-        <span className="text-xs text-on-surface-variant uppercase tracking-wider">
+    <div className="code-block mt-3 overflow-hidden rounded-lg">
+      <div className="flex items-center justify-between border-b border-white/10 bg-surface-container-highest/80 px-4 py-2">
+        <span className="font-mono text-xs uppercase tracking-[0.18em] text-on-surface-variant">
           {lang || 'code'}
         </span>
         <button
           type="button"
           onClick={handleCopy}
-          className="text-on-surface-variant hover:text-primary transition-colors flex items-center gap-1 text-xs"
+          className="flex items-center gap-1.5 font-mono text-xs text-on-surface-variant transition-colors hover:text-primary"
         >
+          <Icon name="copy" className="h-3.5 w-3.5" />
           {copied ? 'Copied!' : 'Copy'}
         </button>
       </div>
 
-      {/* Code */}
       <div className="p-4 overflow-x-auto">
-        <pre className="font-mono text-sm leading-relaxed text-on-surface">
+        <pre className="font-mono text-sm leading-relaxed text-on-surface/95">
           {lines.map((line, i) => (
             <div key={i}>
               {highlightLine(line, keywords)}

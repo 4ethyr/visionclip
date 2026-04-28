@@ -92,4 +92,34 @@ describe('ElectronReplIpcClient', () => {
     await expect(iterator.next()).rejects.toThrow('watch failed')
     expect(unsubscribe).toHaveBeenCalledOnce()
   })
+
+  it('routes model and UI commands through the preload bridge', async () => {
+    const invoke = vi.fn().mockResolvedValue('ok')
+    window.replApi = {
+      invoke,
+      on: vi.fn(),
+    }
+
+    const client = new ElectronReplIpcClient()
+    await client.selectModel(
+      { provider: 'ollama', name: 'qwen2.5:0.5b' },
+      'Chat',
+    )
+    await client.openUi('DesktopApp')
+    await client.captureAndExplain('MultipleChoice', 'RestrictedAssessment')
+    await client.dismissConfirmation()
+
+    expect(invoke).toHaveBeenCalledWith(
+      'repl:select-model',
+      { provider: 'ollama', name: 'qwen2.5:0.5b' },
+      'Chat',
+    )
+    expect(invoke).toHaveBeenCalledWith('repl:open-ui', 'DesktopApp')
+    expect(invoke).toHaveBeenCalledWith(
+      'repl:capture-and-explain',
+      'MultipleChoice',
+      'RestrictedAssessment',
+    )
+    expect(invoke).toHaveBeenCalledWith('repl:dismiss-confirmation')
+  })
 })

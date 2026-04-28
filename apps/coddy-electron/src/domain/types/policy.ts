@@ -15,6 +15,13 @@ export type RequestedHelp =
   | 'DebugCode'
   | 'GenerateTests'
 
+export type ScreenAssistMode =
+  | 'ExplainVisibleScreen'
+  | 'ExplainCode'
+  | 'DebugError'
+  | 'MultipleChoice'
+  | 'SummarizeDocument'
+
 export type AssistanceFallback =
   | 'None'
   | 'ConceptualGuidance'
@@ -37,5 +44,5 @@ export function block(fallback: AssistanceFallback, reason: string): AssistanceD
 }
 
 export function confirm(fallback: AssistanceFallback, reason: string): AssistanceDecision {
-  return { allowed: true, requiresConfirmation: true, fallback, reason }
+  return { allowed: false, requiresConfirmation: true, fallback, reason }
 }

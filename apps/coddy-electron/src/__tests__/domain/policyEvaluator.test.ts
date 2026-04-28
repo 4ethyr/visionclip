@@ -122,32 +122,32 @@ describe('policyEvaluator', () => {
 
       it('requires confirmation for ExplainConcept', () => {
         const d = evaluateAssistance(policy, 'ExplainConcept')
-        expect(d.allowed).toBe(true)
+        expect(d.allowed).toBe(false)
         expect(d.requiresConfirmation).toBe(true)
         expect(d.fallback).toBe('AskForPolicyConfirmation')
       })
 
       it('requires confirmation for DebugCode', () => {
         const d = evaluateAssistance(policy, 'DebugCode')
-        expect(d.allowed).toBe(true)
+        expect(d.allowed).toBe(false)
         expect(d.requiresConfirmation).toBe(true)
       })
 
       it('requires confirmation for GenerateTests', () => {
         const d = evaluateAssistance(policy, 'GenerateTests')
-        expect(d.allowed).toBe(true)
+        expect(d.allowed).toBe(false)
         expect(d.requiresConfirmation).toBe(true)
       })
 
       it('requires confirmation for SolveMultipleChoice', () => {
         const d = evaluateAssistance(policy, 'SolveMultipleChoice')
-        expect(d.allowed).toBe(true)
+        expect(d.allowed).toBe(false)
         expect(d.requiresConfirmation).toBe(true)
       })
 
       it('requires confirmation for GenerateCompleteCode', () => {
         const d = evaluateAssistance(policy, 'GenerateCompleteCode')
-        expect(d.allowed).toBe(true)
+        expect(d.allowed).toBe(false)
         expect(d.requiresConfirmation).toBe(true)
       })
     })

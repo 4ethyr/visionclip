@@ -7,7 +7,17 @@
 
 import { describe, it, expect, beforeEach } from 'vitest'
 import type { ReplIpcClient, ReplCommandResult } from '@/domain'
-import type { ReplSessionSnapshot, ReplEventEnvelope, ReplEvent, ReplSessionSnapshotSession } from '@/domain'
+import type {
+  ModelRef,
+  ModelRole,
+  AssessmentPolicy,
+  ReplEvent,
+  ReplEventEnvelope,
+  ReplMode,
+  ReplSessionSnapshot,
+  ReplSessionSnapshotSession,
+  ScreenAssistMode,
+} from '@/domain'
 
 // ---------------------------------------------------------------------------
 // Simulated IPC bridge — mirrors the production ipcBridge.ts handlers
@@ -138,6 +148,76 @@ function createSimBridge(daemon: SimDaemon) {
         case 'repl:stop-active-run':
           daemon.commands.push('stop-active-run')
           return Promise.resolve({ ok: true })
+
+        case 'repl:select-model': {
+          const model = args[0] as ModelRef
+          const role = args[1] as ModelRole
+          daemon.commands.push(
+            `select-model:${role}:${model.provider}/${model.name}`,
+          )
+          pushEvent(daemon, watchListeners, {
+            ModelSelected: { model, role },
+          })
+          if (role === 'Chat') {
+            daemon.snapshotSession.selected_model = model
+          }
+          return Promise.resolve({
+            text: `Modelo ${model.provider}/${model.name} selecionado.`,
+          })
+        }
+
+        case 'repl:open-ui': {
+          const mode = args[0] as ReplMode
+          daemon.commands.push(`open-ui:${mode}`)
+          daemon.snapshotSession.mode = mode
+          pushEvent(daemon, watchListeners, {
+            OverlayShown: { mode },
+          })
+          return Promise.resolve({
+            text: `Modo ${mode} aberto.`,
+          })
+        }
+
+        case 'repl:capture-and-explain': {
+          const mode = args[0] as ScreenAssistMode
+          const policy = args[1] as AssessmentPolicy
+          const allowed = !(
+            policy === 'UnknownAssessment'
+            || (policy === 'RestrictedAssessment' && mode === 'MultipleChoice')
+          )
+          daemon.commands.push(`capture-and-explain:${mode}:${policy}`)
+          pushEvent(daemon, watchListeners, {
+            PolicyEvaluated: {
+              policy,
+              allowed,
+            },
+          })
+          if (policy === 'UnknownAssessment') {
+            daemon.snapshotSession.status = 'AwaitingConfirmation'
+          }
+          if (!allowed && policy === 'RestrictedAssessment') {
+            return Promise.resolve({
+              error: {
+                code: 'assessment_policy_blocked',
+                message:
+                  'restricted assessments must not receive final answers or complete code',
+              },
+            })
+          }
+          return Promise.resolve({
+            text: 'CaptureAndExplain solicitado.',
+          })
+        }
+
+        case 'repl:dismiss-confirmation':
+          daemon.commands.push('dismiss-confirmation')
+          daemon.snapshotSession.status = 'Idle'
+          pushEvent(daemon, watchListeners, {
+            ConfirmationDismissed: {},
+          })
+          return Promise.resolve({
+            text: 'Confirmação dispensada.',
+          })
 
         default:
           return Promise.reject(new Error(`Unknown channel: ${channel}`))
@@ -274,6 +354,35 @@ function createSimClient(sim: ReturnType<typeof createSimBridge>): ReplIpcClient
       await sim.invoke('repl:stop-speaking')
     },
 
+    async selectModel(model: ModelRef, role: ModelRole) {
+      return (await sim.invoke(
+        'repl:select-model',
+        model,
+        role,
+      )) as ReplCommandResult
+    },
+
+    async openUi(mode: ReplMode) {
+      return (await sim.invoke('repl:open-ui', mode)) as ReplCommandResult
+    },
+
+    async captureAndExplain(
+      mode: ScreenAssistMode,
+      policy: AssessmentPolicy,
+    ) {
+      return (await sim.invoke(
+        'repl:capture-and-explain',
+        mode,
+        policy,
+      )) as ReplCommandResult
+    },
+
+    async dismissConfirmation() {
+      return (await sim.invoke(
+        'repl:dismiss-confirmation',
+      )) as ReplCommandResult
+    },
+
     async captureVoice() {
       return (await sim.invoke('voice:capture')) as ReplCommandResult
     },
@@ -349,6 +458,96 @@ describe('IPC integration', () => {
       await client.stopActiveRun()
 
       expect(daemon.commands).toEqual(['stop-active-run'])
+    })
+  })
+
+  describe('model and UI commands', () => {
+    it('selects the chat model and emits a ModelSelected event', async () => {
+      const model = { provider: 'ollama', name: 'qwen2.5:0.5b' }
+
+      const result = await client.selectModel(model, 'Chat')
+      const snapshot = await client.getSnapshot()
+
+      expect(result.text).toContain('qwen2.5')
+      expect(snapshot.session.selected_model).toEqual(model)
+      expect(daemon.commands).toEqual([
+        'select-model:Chat:ollama/qwen2.5:0.5b',
+      ])
+      expect(daemon.events.at(-1)?.event).toEqual({
+        ModelSelected: { model, role: 'Chat' },
+      })
+    })
+
+    it('opens desktop UI mode and stores it in the snapshot', async () => {
+      const result = await client.openUi('DesktopApp')
+      const snapshot = await client.getSnapshot()
+
+      expect(result.text).toContain('DesktopApp')
+      expect(snapshot.session.mode).toBe('DesktopApp')
+      expect(daemon.commands).toEqual(['open-ui:DesktopApp'])
+      expect(daemon.events.at(-1)?.event).toEqual({
+        OverlayShown: { mode: 'DesktopApp' },
+      })
+    })
+
+    it('routes screen assist through policy evaluation events', async () => {
+      const result = await client.captureAndExplain(
+        'ExplainVisibleScreen',
+        'UnknownAssessment',
+      )
+
+      expect(result.text).toContain('CaptureAndExplain')
+      expect(daemon.commands).toEqual([
+        'capture-and-explain:ExplainVisibleScreen:UnknownAssessment',
+      ])
+      expect(daemon.events.at(-1)?.event).toEqual({
+        PolicyEvaluated: {
+          policy: 'UnknownAssessment',
+          allowed: false,
+        },
+      })
+    })
+
+    it('dismisses a pending confirmation through a structured event', async () => {
+      await client.captureAndExplain(
+        'ExplainVisibleScreen',
+        'UnknownAssessment',
+      )
+
+      const result = await client.dismissConfirmation()
+      const snapshot = await client.getSnapshot()
+
+      expect(result.text).toContain('dispensada')
+      expect(snapshot.session.status).toBe('Idle')
+      expect(daemon.commands).toEqual([
+        'capture-and-explain:ExplainVisibleScreen:UnknownAssessment',
+        'dismiss-confirmation',
+      ])
+      expect(daemon.events.at(-1)?.event).toEqual({
+        ConfirmationDismissed: {},
+      })
+    })
+
+    it('returns structured policy errors instead of throwing for blocked screen assist', async () => {
+      const result = await client.captureAndExplain(
+        'MultipleChoice',
+        'RestrictedAssessment',
+      )
+
+      expect(result.error).toEqual({
+        code: 'assessment_policy_blocked',
+        message:
+          'restricted assessments must not receive final answers or complete code',
+      })
+      expect(daemon.commands).toEqual([
+        'capture-and-explain:MultipleChoice:RestrictedAssessment',
+      ])
+      expect(daemon.events.at(-1)?.event).toEqual({
+        PolicyEvaluated: {
+          policy: 'RestrictedAssessment',
+          allowed: false,
+        },
+      })
     })
   })
 

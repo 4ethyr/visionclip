@@ -17,6 +17,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "typecheck:main": "tsc -p tsconfig.main.json --noEmit",
     "electron:dev": "VITE_DEV_SERVER_URL=http://localhost:5173 electron dist/main/main.js",
+    "electron:dev:local": "ELECTRON_DISABLE_SANDBOX=1 CODDY_BIN=../../target/debug/coddy VISIONCLIP_CONFIG=../../tools/runtime/local-stack/visionclip-e2e.toml VITE_DEV_SERVER_URL=http://localhost:5173 electron dist/main/main.js",
     "electron:build": "electron-builder"
   },
   "dependencies": {

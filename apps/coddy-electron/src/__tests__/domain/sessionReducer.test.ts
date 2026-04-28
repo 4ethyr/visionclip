@@ -314,16 +314,64 @@ describe('sessionReducer', () => {
 
       expect(result.policy).toBe('SyntaxOnly')
     })
-  })
 
-  describe('ModelSelected', () => {
-    it('updates selected_model name', () => {
-      const session = testSession()
-      const event: ReplEvent = { ModelSelected: { model: 'gpt-4o' } }
+    it('waits for confirmation when assessment policy is unknown', () => {
+      const session = testSession({ status: 'Thinking' })
+      const event: ReplEvent = {
+        PolicyEvaluated: { policy: 'UnknownAssessment', allowed: false },
+      }
 
       const result = sessionReducer(session, event)
 
-      expect(result.selected_model.name).toBe('gpt-4o')
+      expect(result.policy).toBe('UnknownAssessment')
+      expect(result.status).toBe('AwaitingConfirmation')
+    })
+
+    it('returns to Idle when confirmation is dismissed', () => {
+      const session = testSession({ status: 'AwaitingConfirmation' })
+      const event: ReplEvent = { ConfirmationDismissed: {} }
+
+      const result = sessionReducer(session, event)
+
+      expect(result.status).toBe('Idle')
+    })
+  })
+
+  describe('ModelSelected', () => {
+    it('updates selected_model for chat role', () => {
+      const session = testSession()
+      const event: ReplEvent = {
+        ModelSelected: {
+          model: { provider: 'ollama', name: 'qwen2.5:0.5b' },
+          role: 'Chat',
+        },
+      }
+
+      const result = sessionReducer(session, event)
+
+      expect(result.selected_model).toEqual({
+        provider: 'ollama',
+        name: 'qwen2.5:0.5b',
+      })
+    })
+
+    it('does not replace selected chat model for OCR role', () => {
+      const session = testSession({
+        selected_model: { provider: 'ollama', name: 'gemma4-e2b' },
+      })
+      const event: ReplEvent = {
+        ModelSelected: {
+          model: { provider: 'ollama', name: 'glm-ocr' },
+          role: 'Ocr',
+        },
+      }
+
+      const result = sessionReducer(session, event)
+
+      expect(result.selected_model).toEqual({
+        provider: 'ollama',
+        name: 'gemma4-e2b',
+      })
     })
   })
 

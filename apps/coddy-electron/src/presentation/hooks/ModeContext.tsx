@@ -1,7 +1,13 @@
 // presentation/hooks/ModeContext.tsx
 // Lightweight context for the current UI mode (FloatingTerminal vs DesktopApp).
 
-import { createContext, useContext, useState, type ReactNode } from 'react'
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useState,
+  type ReactNode,
+} from 'react'
 import type { ReplMode } from '@/domain'
 import { loadSettings, saveSettings } from '@/application'
 
@@ -20,14 +26,14 @@ export function ModeProvider({ children }: { children: ReactNode }) {
     return settings.mode
   })
 
-  const setMode = (newMode: ReplMode) => {
+  const setMode = useCallback((newMode: ReplMode) => {
     setModeState(newMode)
     saveSettings({ mode: newMode })
-  }
+  }, [])
 
-  const toggleMode = () => {
+  const toggleMode = useCallback(() => {
     setMode(mode === 'FloatingTerminal' ? 'DesktopApp' : 'FloatingTerminal')
-  }
+  }, [mode, setMode])
 
   return (
     <ModeContext.Provider value={{ mode, setMode, toggleMode }}>

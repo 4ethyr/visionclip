@@ -1,7 +1,8 @@
 use crate::backend::{InferenceBackend, InferenceInput, InferenceOutput};
 use crate::prompts::{
-    policy_for_action, search_answer_system_prompt, search_answer_user_prompt, system_prompt,
-    user_prompt, user_prompt_from_text,
+    policy_for_action, repl_agent_system_prompt, repl_agent_user_prompt,
+    search_answer_system_prompt, search_answer_user_prompt, system_prompt, user_prompt,
+    user_prompt_from_text,
 };
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -88,6 +89,18 @@ impl OllamaBackend {
             .await
     }
 
+    pub async fn answer_repl_turn(
+        &self,
+        request_id: String,
+        user_message: &str,
+    ) -> Result<InferenceOutput> {
+        let action = visionclip_common::ipc::Action::Explain;
+        let model = self.config.model.as_str();
+        let payload = self.repl_agent_chat_payload(model, user_message);
+        self.send_chat_request(&request_id, &action, model, "repl_agent", payload)
+            .await
+    }
+
     fn image_chat_payload(&self, model: &str, input: &InferenceInput) -> serde_json::Value {
         let policy = policy_for_action(&input.action);
         let image_b64 = STANDARD.encode(&input.image_bytes);
@@ -169,6 +182,25 @@ impl OllamaBackend {
                         ai_overview_text,
                         supporting_sources
                     )
+                }
+            ]
+        })
+    }
+
+    fn repl_agent_chat_payload(&self, model: &str, user_message: &str) -> serde_json::Value {
+        json!({
+            "model": model,
+            "stream": false,
+            "keep_alive": self.config.keep_alive,
+            "options": ollama_options(&self.config, 640),
+            "messages": [
+                {
+                    "role": "system",
+                    "content": repl_agent_system_prompt()
+                },
+                {
+                    "role": "user",
+                    "content": repl_agent_user_prompt(user_message)
                 }
             ]
         })
@@ -715,6 +747,39 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("GOOGLE_AI_OVERVIEW"));
+    }
+
+    #[tokio::test]
+    async fn repl_agent_answer_uses_cli_agent_prompt_payload() {
+        let server =
+            TestServer::spawn(r#"{"message":{"content":"Olá. Como posso ajudar no código?"}}"#);
+        let backend = OllamaBackend::new(InferConfig {
+            base_url: server.base_url.clone(),
+            model: "gemma4:test".into(),
+            keep_alive: "5m".into(),
+            temperature: 0.1,
+            thinking_default: String::new(),
+            ..InferConfig::default()
+        });
+
+        let output = backend
+            .answer_repl_turn("req-repl-agent".into(), "olá")
+            .await
+            .unwrap();
+
+        let requests = server.finish();
+        let json: serde_json::Value = serde_json::from_str(&requests[0].1).unwrap();
+        assert_eq!(output.text, "Olá. Como posso ajudar no código?");
+        assert_eq!(json["model"], "gemma4:test");
+        assert_eq!(json["options"]["num_predict"], json!(640));
+        assert!(json["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Nao trate toda mensagem como pesquisa web"));
+        assert!(json["messages"][1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Mensagem do usuario no REPL"));
     }
 
     #[test]

@@ -5,6 +5,7 @@ import type { ReplSession } from '@/domain'
 import { MessageBubble } from '@/presentation/components/MessageBubble'
 import { InputBar } from '@/presentation/components/InputBar'
 import { StreamingText } from '@/presentation/components/StreamingText'
+import { Icon } from '@/presentation/components/Icon'
 
 interface Props {
   session: ReplSession
@@ -20,21 +21,19 @@ export function ConversationPanel({ session, onSend }: Props) {
 
   return (
     <div className="flex-1 flex flex-col h-full">
-      {/* Messages */}
       <div className="flex-1 overflow-y-auto px-6 py-4 flex flex-col gap-4">
-        <div className="text-xs text-on-surface-variant/40 text-center py-4">
-          Start a conversation below
+        <div className="py-4 text-center font-mono text-xs text-on-surface-variant/40">
+          session_initialized // awaiting command
         </div>
 
         {session.messages.map((msg) => (
           <MessageBubble key={msg.id} message={msg} />
         ))}
 
-        {/* Streaming indicator */}
         {session.streaming_text && (
           <div className="flex gap-3 items-start max-w-3xl">
-            <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center border border-primary/30 flex-shrink-0">
-              <span className="text-sm">🤖</span>
+            <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md border border-primary bg-primary/10 text-primary">
+              <Icon name="bot" className="h-4 w-4" />
             </div>
             <div className="bg-surface-container border border-primary/10 rounded-xl rounded-tl-none px-4 py-3 max-w-[80%]">
               <p className="text-sm text-on-surface whitespace-pre-wrap break-words">

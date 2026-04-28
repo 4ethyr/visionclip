@@ -5,6 +5,8 @@ export type {
   ReplIntent,
   ToolStatus,
   ReplMode,
+  ModelRef,
+  ModelRole,
   ExtractionSource,
   ReplMessage,
   ReplEvent,
@@ -16,7 +18,6 @@ export type {
 export type {
   SessionStatus,
   AssessmentPolicy as SessionAssessmentPolicy,
-  ModelRef,
   VoiceState,
   ContextItem,
   ScreenUnderstandingContext,
@@ -28,6 +29,7 @@ export { createInitialSession } from './session'
 export type {
   AssessmentPolicy,
   RequestedHelp,
+  ScreenAssistMode,
   AssistanceFallback,
   AssistanceDecision,
 } from './policy'

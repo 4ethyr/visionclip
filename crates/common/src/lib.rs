@@ -30,8 +30,9 @@ pub use portal::{
 pub use router::{AgentDecision, ProposedAction};
 
 pub use coddy_core::{
-    resolve_voice_turn_intent, ContextPolicy, ModelRef, ReplCommand, ReplEvent, ReplEventBroker,
-    ReplEventEnvelope, ReplEventLog, ReplEventSubscription, ReplIntent, ReplMessage, ReplMode,
-    ReplSession, ReplSessionSnapshot, SearchResultContext, SessionStatus, ShortcutConflictPolicy,
+    evaluate_assistance, resolve_voice_turn_intent, AssessmentPolicy, ContextPolicy, ModelRef,
+    ModelRole, ReplCommand, ReplEvent, ReplEventBroker, ReplEventEnvelope, ReplEventLog,
+    ReplEventSubscription, ReplIntent, ReplMessage, ReplMode, ReplSession, ReplSessionSnapshot,
+    RequestedHelp, ScreenAssistMode, SearchResultContext, SessionStatus, ShortcutConflictPolicy,
     ShortcutDecision, ToolStatus, VoiceTurnIntent,
 };

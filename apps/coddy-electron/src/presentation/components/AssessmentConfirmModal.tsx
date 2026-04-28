@@ -3,6 +3,7 @@
 
 import { useEffect } from 'react'
 import { useSessionContext } from '@/presentation/hooks'
+import { Icon } from './Icon'
 
 interface Props {
   onConfirm: () => void
@@ -24,9 +25,8 @@ export function AssessmentConfirmModal({ onConfirm, onDismiss }: Props) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
       <div className="bg-surface-container-high border border-outline-variant rounded-xl p-6 max-w-md w-full mx-4 shadow-2xl">
-        {/* Icon */}
-        <div className="w-10 h-10 rounded-full bg-yellow-500/20 flex items-center justify-center mb-4 mx-auto">
-          <span className="text-lg">🔒</span>
+        <div className="mx-auto mb-4 flex h-10 w-10 items-center justify-center rounded-full border border-yellow-400/30 bg-yellow-500/15 text-yellow-300">
+          <Icon name="lock" className="h-5 w-5" />
         </div>
 
         {/* Title */}

@@ -1,7 +1,15 @@
 // domain/contracts/ReplIpcClient.ts
 // Port interface — implemented by infrastructure
 
-import type { ReplSessionSnapshot, ReplEventEnvelope } from '../types'
+import type {
+  ModelRef,
+  ModelRole,
+  ReplEventEnvelope,
+  ReplMode,
+  ReplSessionSnapshot,
+  ScreenAssistMode,
+  AssessmentPolicy,
+} from '../types'
 
 /** Result of sending a command to the REPL backend */
 export interface ReplCommandResult {
@@ -48,6 +56,21 @@ export interface ReplIpcClient {
 
   /** Stop TTS speech immediately */
   stopSpeaking(): Promise<void>
+
+  /** Select a model for a specific REPL role */
+  selectModel(model: ModelRef, role: ModelRole): Promise<ReplCommandResult>
+
+  /** Ask the backend to open/switch the REPL UI mode */
+  openUi(mode: ReplMode): Promise<ReplCommandResult>
+
+  /** Request a policy-aware screen assist run */
+  captureAndExplain(
+    mode: ScreenAssistMode,
+    policy: AssessmentPolicy,
+  ): Promise<ReplCommandResult>
+
+  /** Dismiss a pending policy confirmation without sending prompt text */
+  dismissConfirmation(): Promise<ReplCommandResult>
 
   /**
    * Capture voice via the system mic (spawns `coddy voice --overlay`).

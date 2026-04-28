@@ -3,7 +3,15 @@
 // Loads snapshot, starts event stream, exposes state + actions.
 
 import { useState, useEffect, useCallback, useRef } from 'react'
-import type { ReplSession } from '@/domain'
+import type {
+  ModelRef,
+  ModelRole,
+  ReplCommandResult,
+  ReplMode,
+  ReplSession,
+  AssessmentPolicy,
+  ScreenAssistMode,
+} from '@/domain'
 import type { SessionState } from '@/application'
 import {
   initializeSession,
@@ -12,6 +20,11 @@ import {
   sendAsk,
   cancelRun,
   cancelSpeech,
+  selectModel,
+  openUi,
+  captureVoice,
+  captureAndExplain,
+  dismissConfirmation,
 } from '@/application'
 import { useReplClient } from './useReplClient'
 
@@ -32,6 +45,24 @@ export interface UseSessionReturn {
 
   /** Stop TTS playback */
   cancelSpeech: () => Promise<void>
+
+  /** Select a model for the requested role */
+  selectModel: (model: ModelRef, role?: ModelRole) => Promise<void>
+
+  /** Switch the REPL UI mode through the daemon */
+  openUi: (mode: ReplMode) => Promise<void>
+
+  /** Capture one voice turn; the backend dispatches the transcript itself */
+  captureVoice: () => Promise<ReplCommandResult>
+
+  /** Start a policy-aware screen assistance flow */
+  captureAndExplain: (
+    mode: ScreenAssistMode,
+    policy?: AssessmentPolicy,
+  ) => Promise<void>
+
+  /** Dismiss a pending policy confirmation without sending prompt text */
+  dismissConfirmation: () => Promise<void>
 
   /** Manually retry connection to the daemon */
   reconnect: () => void
@@ -124,6 +155,60 @@ export function useSession(): UseSessionReturn {
     await cancelSpeech(client)
   }, [client])
 
+  const handleSelectModel = useCallback(
+    async (model: ModelRef, role: ModelRole = 'Chat') => {
+      try {
+        await selectModel(client, model, role)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+      }
+    },
+    [client],
+  )
+
+  const handleOpenUi = useCallback(
+    async (mode: ReplMode) => {
+      try {
+        await openUi(client, mode)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+      }
+    },
+    [client],
+  )
+
+  const handleCaptureVoice = useCallback(async (): Promise<ReplCommandResult> => {
+    try {
+      return await captureVoice(client)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      setError(message)
+      return { error: { code: 'VOICE_CAPTURE_FAILED', message } }
+    }
+  }, [client])
+
+  const handleCaptureAndExplain = useCallback(
+    async (
+      mode: ScreenAssistMode,
+      policy: AssessmentPolicy = state.session.policy,
+    ) => {
+      try {
+        await captureAndExplain(client, mode, policy)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+      }
+    },
+    [client, state.session.policy],
+  )
+
+  const handleDismissConfirmation = useCallback(async () => {
+    try {
+      await dismissConfirmation(client)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }, [client])
+
   return {
     session: state.session,
     lastSequence: state.lastSequence,
@@ -133,6 +218,11 @@ export function useSession(): UseSessionReturn {
     ask,
     cancelRun: handleCancelRun,
     cancelSpeech: handleCancelSpeech,
+    selectModel: handleSelectModel,
+    openUi: handleOpenUi,
+    captureVoice: handleCaptureVoice,
+    captureAndExplain: handleCaptureAndExplain,
+    dismissConfirmation: handleDismissConfirmation,
     reconnect: init,
   }
 }

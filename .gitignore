@@ -10,3 +10,4 @@ node_modules/
 dist/
 apps/*/node_modules/
 apps/*/dist/
+prints/

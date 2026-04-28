@@ -52,23 +52,25 @@ describe('MessageBubble', () => {
     expect(screen.getByText('Copy')).toBeInTheDocument()
   })
 
-  it('renders user avatar for user role', () => {
+  it('renders a user command icon without emoji avatars', () => {
     render(
       <MessageBubble
         message={{ id: '5', role: 'user', text: 'hi' }}
       />,
     )
 
-    expect(screen.getByText('👤')).toBeInTheDocument()
+    expect(screen.getByTestId('user-message-icon')).toBeInTheDocument()
+    expect(screen.queryByText('👤')).not.toBeInTheDocument()
   })
 
-  it('renders assistant avatar for assistant role', () => {
+  it('renders an assistant agent icon without emoji avatars', () => {
     render(
       <MessageBubble
         message={{ id: '6', role: 'assistant', text: 'hello' }}
       />,
     )
 
-    expect(screen.getByText('🤖')).toBeInTheDocument()
+    expect(screen.getByTestId('assistant-message-icon')).toBeInTheDocument()
+    expect(screen.queryByText('🤖')).not.toBeInTheDocument()
   })
 })

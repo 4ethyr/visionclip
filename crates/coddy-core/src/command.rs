@@ -52,6 +52,7 @@ pub enum ReplCommand {
         model: ModelRef,
         role: ModelRole,
     },
+    DismissConfirmation,
     StopActiveRun,
     StopSpeaking,
 }

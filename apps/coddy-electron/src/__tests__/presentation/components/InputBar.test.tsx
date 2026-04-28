@@ -11,6 +11,7 @@ describe('InputBar', () => {
     const textarea = screen.getByPlaceholderText('Enter command or prompt...')
     expect(textarea).toBeInTheDocument()
     expect(tagName(textarea)).toBe('TEXTAREA')
+    expect(textarea).not.toHaveFocus()
   })
 
   it('calls onSend with trimmed text on Enter', async () => {

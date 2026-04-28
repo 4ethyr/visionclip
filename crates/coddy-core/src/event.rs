@@ -73,8 +73,10 @@ pub enum ReplEvent {
         policy: crate::AssessmentPolicy,
         allowed: bool,
     },
+    ConfirmationDismissed,
     ModelSelected {
-        model: String,
+        model: crate::ModelRef,
+        role: crate::ModelRole,
     },
     SearchStarted {
         query: String,

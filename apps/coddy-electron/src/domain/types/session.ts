@@ -1,7 +1,7 @@
 // domain/types/session.ts
 // Mirrors: crates/coddy-core/src/session.rs
 
-import type { ReplMode, ReplMessage } from './events'
+import type { ReplMode, ReplMessage, ModelRef } from './events'
 
 export type SessionStatus =
   | 'Idle'
@@ -21,11 +21,6 @@ export type AssessmentPolicy =
   | 'SyntaxOnly'
   | 'RestrictedAssessment'
   | 'UnknownAssessment'
-
-export interface ModelRef {
-  provider: string
-  name: string
-}
 
 export interface VoiceState {
   enabled: boolean

@@ -1,6 +1,7 @@
 // Workspace panel: shows context items (files, screen captures, etc.)
 
 import type { ContextItem } from '@/domain'
+import { Icon } from './Icon'
 
 interface Props {
   items: ContextItem[]
@@ -34,7 +35,12 @@ export function WorkspacePanel({ items }: Props) {
                     : 'bg-surface-container-low'
                 }`}
               >
-                <span>{item.sensitive ? '🔒' : '📄'}</span>
+                <Icon
+                  name={item.sensitive ? 'lock' : 'file'}
+                  className={`h-4 w-4 flex-shrink-0 ${
+                    item.sensitive ? 'text-yellow-300' : 'text-primary/80'
+                  }`}
+                />
                 <span className="text-on-surface truncate">{item.label}</span>
               </div>
             ))}

@@ -7,9 +7,11 @@ import { useSessionContext } from '@/presentation/hooks'
 import { Sidebar, type DesktopTab } from '@/presentation/components/Sidebar'
 import { ConversationPanel } from '@/presentation/components/ConversationPanel'
 import { WorkspacePanel } from '@/presentation/components/WorkspacePanel'
+import { ModelSelector } from '@/presentation/components/ModelSelector'
 
 export function DesktopApp() {
-  const { session, connecting, error, ask } = useSessionContext()
+  const { session, connecting, error, ask, selectModel, openUi } =
+    useSessionContext()
   const [activeTab, setActiveTab] = useState<DesktopTab>('chat')
   const [sidebarOpen] = useState(true)
 
@@ -22,6 +24,10 @@ export function DesktopApp() {
           onTabChange={setActiveTab}
           connected={!connecting}
           status={session.status}
+          mode={session.mode}
+          onOpenMode={(mode) => {
+            void openUi(mode)
+          }}
         />
       )}
 
@@ -49,8 +55,37 @@ export function DesktopApp() {
         )}
 
         {activeTab === 'models' && (
-          <div className="flex-1 flex items-center justify-center text-on-surface-variant text-sm">
-            Model management — coming soon.
+          <div className="flex-1 overflow-y-auto px-8 py-7">
+            <div className="max-w-2xl">
+              <p className="text-xs uppercase tracking-[0.25em] text-primary/70 mb-2">
+                Model routing
+              </p>
+              <h1 className="text-2xl font-semibold text-on-surface mb-3">
+                Modelos do Coddy
+              </h1>
+              <p className="text-sm text-on-surface-variant mb-6">
+                Selecione o modelo de chat usado pelo backend. O daemon emite
+                o evento ModelSelected e todas as telas sincronizam a sessão.
+              </p>
+
+              <div className="rounded-2xl border border-primary/15 bg-surface-container/70 backdrop-blur-xl p-5 flex items-center justify-between gap-4">
+                <div>
+                  <p className="text-sm font-medium text-on-surface">
+                    Modelo de chat ativo
+                  </p>
+                  <p className="text-xs text-on-surface-variant mt-1">
+                    {session.selected_model.provider}/
+                    {session.selected_model.name}
+                  </p>
+                </div>
+                <ModelSelector
+                  model={session.selected_model}
+                  onSelect={(model) => {
+                    void selectModel(model, 'Chat')
+                  }}
+                />
+              </div>
+            </div>
           </div>
         )}
 

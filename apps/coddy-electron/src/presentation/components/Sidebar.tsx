@@ -1,9 +1,8 @@
 // Sidebar for the DesktopApp view.
 // Navigation with icons for Chat, Workspace, Models, Settings.
 
-import type { SessionStatus } from '@/domain'
+import type { ReplMode, SessionStatus } from '@/domain'
 import { StatusIndicator } from '@/presentation/components/StatusIndicator'
-import { useMode } from '@/presentation/hooks'
 
 export type DesktopTab = 'chat' | 'workspace' | 'models' | 'settings'
 
@@ -12,6 +11,8 @@ interface Props {
   onTabChange: (tab: DesktopTab) => void
   connected: boolean
   status: SessionStatus
+  mode: ReplMode
+  onOpenMode: (mode: ReplMode) => void
 }
 
 const TABS: { id: DesktopTab; label: string; icon: string }[] = [
@@ -21,8 +22,14 @@ const TABS: { id: DesktopTab; label: string; icon: string }[] = [
   { id: 'settings', label: 'Settings', icon: '⚙' },
 ]
 
-export function Sidebar({ activeTab, onTabChange, connected, status }: Props) {
-  const { toggleMode, mode } = useMode()
+export function Sidebar({
+  activeTab,
+  onTabChange,
+  connected,
+  status,
+  mode,
+  onOpenMode,
+}: Props) {
   return (
     <aside className="w-56 bg-surface-dim/80 backdrop-blur-xl border-r border-primary/10 flex flex-col flex-shrink-0">
       {/* Logo */}
@@ -64,7 +71,7 @@ export function Sidebar({ activeTab, onTabChange, connected, status }: Props) {
         {mode === 'DesktopApp' && (
           <button
             type="button"
-            onClick={toggleMode}
+            onClick={() => onOpenMode('FloatingTerminal')}
             className="flex items-center gap-2 text-xs text-on-surface-variant hover:text-on-surface transition-colors"
           >
             <span>⬜</span>
