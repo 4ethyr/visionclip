@@ -10,6 +10,7 @@ gtk-overlay = ["dep:gtk4"]
 
 [dependencies]
 visionclip-common = { path = "../../crates/common" }
+visionclip-voice-input = { path = "../../crates/voice-input" }
 anyhow.workspace = true
 clap.workspace = true
 gtk4 = { workspace = true, optional = true }

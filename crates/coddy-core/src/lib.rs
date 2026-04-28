@@ -6,6 +6,7 @@ pub mod policy;
 pub mod search;
 pub mod session;
 pub mod shortcut;
+pub mod voice_intent;
 
 pub use assessment::{AssessmentPolicy, AssistanceDecision, AssistanceFallback, RequestedHelp};
 pub use command::{ContextPolicy, ModelRef, ModelRole, ReplCommand, ScreenAssistMode};
@@ -20,3 +21,4 @@ pub use search::{
 };
 pub use session::{ContextItem, ReplMessage, ReplMode, ReplSession, SessionStatus, VoiceState};
 pub use shortcut::{ShortcutConflictPolicy, ShortcutDecision};
+pub use voice_intent::{resolve_voice_turn_intent, VoiceTurnIntent};

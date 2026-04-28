@@ -29,6 +29,6 @@ pub use portal::{
 pub use router::{AgentDecision, ProposedAction};
 
 pub use coddy_core::{
-    ContextPolicy, ReplCommand, ReplEvent, ReplIntent, SearchResultContext, ShortcutConflictPolicy,
-    ShortcutDecision,
+    resolve_voice_turn_intent, ContextPolicy, ReplCommand, ReplEvent, ReplIntent,
+    SearchResultContext, ShortcutConflictPolicy, ShortcutDecision, VoiceTurnIntent,
 };

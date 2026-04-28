@@ -112,10 +112,18 @@ async fn main() -> Result<()> {
             } else {
                 (None, None)
             };
+            let transcript = match normalize_transcript_override(transcript) {
+                Some(transcript) => transcript,
+                None => visionclip_voice_input::capture_and_transcribe(&config.voice).await?,
+            };
+            info!(
+                chars = transcript.chars().count(),
+                "Coddy voice transcript resolved"
+            );
             let result = send_repl_command(
                 &config,
                 ReplCommand::VoiceTurn {
-                    transcript_override: transcript,
+                    transcript_override: Some(transcript),
                 },
                 cli.speak,
             )
@@ -191,14 +199,7 @@ async fn run_shortcuts_test(config: &AppConfig) -> Result<()> {
     let lock = shortcut::VoiceShortcutLock::acquire(environment.lock_path()?)?;
     println!("lock_acquired: {}", lock.path().display());
 
-    let result = send_repl_command(
-        config,
-        ReplCommand::VoiceTurn {
-            transcript_override: None,
-        },
-        false,
-    )
-    .await?;
+    let result = send_repl_command(config, ReplCommand::StopSpeaking, false).await?;
     print_job_result(result)?;
     println!("shortcut_test: ok");
     Ok(())
@@ -307,6 +308,12 @@ fn join_command_text(text: Vec<String>) -> String {
     text.join(" ").trim().to_string()
 }
 
+fn normalize_transcript_override(transcript: Option<String>) -> Option<String> {
+    transcript
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,6 +335,15 @@ mod tests {
                 OsString::from("--voice-overlay-duration-ms"),
                 OsString::from("300"),
             ]
+        );
+    }
+
+    #[test]
+    fn empty_voice_transcript_override_is_ignored() {
+        assert_eq!(normalize_transcript_override(Some("  ".into())), None);
+        assert_eq!(
+            normalize_transcript_override(Some("  Quem foi Rousseau? ".into())),
+            Some("Quem foi Rousseau?".into())
         );
     }
 }

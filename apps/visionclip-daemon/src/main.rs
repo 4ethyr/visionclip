@@ -10,9 +10,9 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use visionclip_common::{
-    read_message, write_message, Action, AppConfig, ApplicationLaunchJob, CaptureJob,
-    HealthCheckJob, JobResult, ReplCommand, ReplCommandJob, UrlOpenJob, VisionRequest,
-    VoiceSearchJob,
+    read_message, resolve_voice_turn_intent, write_message, Action, AppConfig,
+    ApplicationLaunchJob, CaptureJob, HealthCheckJob, JobResult, ReplCommand, ReplCommandJob,
+    UrlOpenJob, VisionRequest, VoiceSearchJob, VoiceTurnIntent,
 };
 use visionclip_infer::{
     postprocess::{sanitize_for_speech, sanitize_output},
@@ -269,35 +269,83 @@ async fn process_repl_command(state: &AppState, job: ReplCommandJob) -> Result<J
         }
         ReplCommand::VoiceTurn {
             transcript_override: Some(transcript),
-        } => {
-            let query = sanitize_output(&Action::SearchWeb, &transcript);
-            if query.trim().is_empty() {
-                return Ok(JobResult::Error {
-                    request_id,
-                    code: "empty_voice_transcript".to_string(),
-                    message: "Transcript de voz vazio.".to_string(),
-                });
+        } => match resolve_voice_turn_intent(&transcript) {
+            Some(VoiceTurnIntent::OpenApplication {
+                transcript,
+                app_name,
+            }) => {
+                process_open_application(
+                    state,
+                    ApplicationLaunchJob {
+                        request_id,
+                        transcript: Some(transcript),
+                        app_name,
+                        speak: job.speak,
+                    },
+                )
+                .await
             }
+            Some(VoiceTurnIntent::OpenWebsite {
+                transcript,
+                label,
+                url,
+            }) => {
+                process_open_url(
+                    state,
+                    UrlOpenJob {
+                        request_id,
+                        transcript: Some(transcript),
+                        label,
+                        url,
+                        speak: job.speak,
+                    },
+                )
+                .await
+            }
+            Some(VoiceTurnIntent::SearchWeb { transcript, query }) => {
+                let query = sanitize_output(&Action::SearchWeb, &query);
+                if query.trim().is_empty() {
+                    return Ok(JobResult::Error {
+                        request_id,
+                        code: "empty_voice_transcript".to_string(),
+                        message: "Transcript de voz vazio.".to_string(),
+                    });
+                }
 
-            process_voice_search(
-                state,
-                VoiceSearchJob {
-                    request_id,
-                    transcript,
-                    query,
-                    speak: job.speak,
-                },
-            )
-            .await
-        }
+                process_voice_search(
+                    state,
+                    VoiceSearchJob {
+                        request_id,
+                        transcript,
+                        query,
+                        speak: job.speak,
+                    },
+                )
+                .await
+            }
+            None => Ok(JobResult::Error {
+                request_id,
+                code: "empty_voice_transcript".to_string(),
+                message: "Transcript de voz vazio.".to_string(),
+            }),
+        },
         ReplCommand::VoiceTurn {
             transcript_override: None,
-        } => Ok(JobResult::ActionStatus {
-            request_id,
-            message: "Coddy pronto para escutar; envie um transcript para este comando no MVP."
-                .to_string(),
-            spoken: false,
-        }),
+        } => {
+            if job.speak {
+                warn!(
+                    request_id = %request_id,
+                    "daemon received a voice turn without transcript; the CLI should capture ASR before sending"
+                );
+            }
+            Ok(JobResult::Error {
+                request_id,
+                code: "missing_voice_transcript".to_string(),
+                message:
+                    "Coddy não recebeu transcript de voz. Capture/transcreva no cliente antes de enviar."
+                        .to_string(),
+            })
+        }
         ReplCommand::StopSpeaking | ReplCommand::StopActiveRun => Ok(JobResult::ActionStatus {
             request_id,
             message: "Comando Coddy recebido; cancelamento cooperativo será tratado pelo broker."

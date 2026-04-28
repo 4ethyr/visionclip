@@ -295,6 +295,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "visionclip-common",
+ "visionclip-voice-input",
 ]
 
 [[package]]
@@ -2769,6 +2770,18 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+ "visionclip-common",
+ "which",
+]
+
+[[package]]
+name = "visionclip-voice-input"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "tokio",
  "tracing",
  "uuid",
