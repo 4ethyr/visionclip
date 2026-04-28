@@ -4,7 +4,9 @@ members = [
   "apps/coddy",
   "apps/visionclip-daemon",
   "apps/visionclip-config",
+  "crates/coddy-client",
   "crates/coddy-core",
+  "crates/coddy-ipc",
   "crates/common",
   "crates/infer",
   "crates/output",
@@ -28,6 +30,8 @@ bincode = { version = "2.0", features = ["serde"] }
 bytes = "1.7"
 clap = { version = "4.5", features = ["derive"] }
 coddy-core = { path = "crates/coddy-core" }
+coddy-client = { path = "crates/coddy-client" }
+coddy-ipc = { path = "crates/coddy-ipc" }
 directories = "5.0"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 scraper = "0.24"

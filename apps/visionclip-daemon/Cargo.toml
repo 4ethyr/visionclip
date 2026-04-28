@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+coddy-ipc.workspace = true
 visionclip-common = { path = "../../crates/common" }
 visionclip-infer = { path = "../../crates/infer" }
 visionclip-output = { path = "../../crates/output" }

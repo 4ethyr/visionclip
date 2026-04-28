@@ -1,4 +1,5 @@
 use crate::error::AppResult;
+pub use coddy_ipc::{ReplCommandJob, ReplEventStreamJob, ReplEventsJob, ReplSessionSnapshotJob};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
@@ -88,24 +89,6 @@ pub struct HealthCheckJob {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReplCommandJob {
-    pub request_id: Uuid,
-    pub command: coddy_core::ReplCommand,
-    pub speak: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReplSessionSnapshotJob {
-    pub request_id: Uuid,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReplEventsJob {
-    pub request_id: Uuid,
-    pub after_sequence: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum VisionRequest {
     Capture(CaptureJob),
     VoiceSearch(VoiceSearchJob),
@@ -115,6 +98,7 @@ pub enum VisionRequest {
     ReplCommand(ReplCommandJob),
     ReplSessionSnapshot(ReplSessionSnapshotJob),
     ReplEvents(ReplEventsJob),
+    ReplEventStream(ReplEventStreamJob),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -275,6 +259,13 @@ mod tests {
             })),
             7
         );
+        assert_eq!(
+            encoded_variant_tag(&VisionRequest::ReplEventStream(ReplEventStreamJob {
+                request_id,
+                after_sequence: 0,
+            })),
+            8
+        );
     }
 
     #[test]
@@ -419,6 +410,28 @@ mod tests {
                 assert_eq!(last_sequence, 13);
             }
             _ => panic!("unexpected decoded result"),
+        }
+    }
+
+    #[test]
+    fn repl_event_stream_request_roundtrips_through_bincode() {
+        let request_id = Uuid::new_v4();
+        let request = VisionRequest::ReplEventStream(ReplEventStreamJob {
+            request_id,
+            after_sequence: 42,
+        });
+        let payload = bincode::serde::encode_to_vec(&request, bincode::config::standard())
+            .expect("encode stream request");
+        let (decoded, _): (VisionRequest, usize) =
+            bincode::serde::decode_from_slice(&payload, bincode::config::standard())
+                .expect("decode stream request");
+
+        match decoded {
+            VisionRequest::ReplEventStream(job) => {
+                assert_eq!(job.request_id, request_id);
+                assert_eq!(job.after_sequence, 42);
+            }
+            _ => panic!("unexpected decoded request"),
         }
     }
 

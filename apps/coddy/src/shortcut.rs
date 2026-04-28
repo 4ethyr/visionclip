@@ -6,7 +6,6 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
-use visionclip_common::AppConfig;
 
 const MEDIA_KEYS_SCHEMA: &str = "org.gnome.settings-daemon.plugins.media-keys";
 const CUSTOM_BINDING_PATH: &str =
@@ -25,16 +24,15 @@ pub struct ShortcutEnvironment {
 }
 
 impl ShortcutEnvironment {
-    pub fn detect(config: &AppConfig) -> Result<Self> {
-        let socket_path = config.socket_path()?;
-        Ok(Self {
+    pub fn detect(socket_path: PathBuf) -> Self {
+        Self {
             socket_exists: socket_path.exists(),
             socket_path,
             display: env::var("DISPLAY").ok(),
             wayland_display: env::var("WAYLAND_DISPLAY").ok(),
             xdg_runtime_dir: env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
             dbus_session_bus_address: env::var("DBUS_SESSION_BUS_ADDRESS").ok(),
-        })
+        }
     }
 
     pub fn has_graphical_session(&self) -> bool {

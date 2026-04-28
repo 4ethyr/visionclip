@@ -5,6 +5,11 @@ mod search;
 use crate::linux_apps::open_application;
 use crate::search::{GoogleSearchClient, SearchEnrichment};
 use anyhow::{Context, Result};
+use coddy_ipc::{
+    decode_payload, decode_wire_request_payload, read_frame_payload, write_frame, CoddyRequest,
+    CoddyResult, CoddyWireResult, ReplCommandJob, ReplEventStreamJob, ReplEventsJob,
+    ReplSessionSnapshotJob,
+};
 use std::{
     future::Future,
     path::PathBuf,
@@ -15,11 +20,10 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use visionclip_common::{
-    read_message, resolve_voice_turn_intent, write_message, Action, AppConfig,
-    ApplicationLaunchJob, CaptureJob, HealthCheckJob, JobResult, ModelRef, ReplCommand,
-    ReplCommandJob, ReplEvent, ReplEventEnvelope, ReplEventLog, ReplEventsJob, ReplIntent,
-    ReplMessage, ReplMode, ReplSession, ReplSessionSnapshotJob, ToolStatus, UrlOpenJob,
-    VisionRequest, VoiceSearchJob, VoiceTurnIntent,
+    resolve_voice_turn_intent, write_message, Action, AppConfig, ApplicationLaunchJob, CaptureJob,
+    HealthCheckJob, JobResult, ModelRef, ReplCommand, ReplEvent, ReplEventBroker,
+    ReplEventEnvelope, ReplEventSubscription, ReplIntent, ReplMessage, ReplMode, ReplSession,
+    ToolStatus, UrlOpenJob, VisionRequest, VoiceSearchJob, VoiceTurnIntent,
 };
 use visionclip_infer::{
     postprocess::{sanitize_for_speech, sanitize_output},
@@ -86,7 +90,7 @@ struct AppState {
 
 struct ReplRuntimeState {
     session: ReplSession,
-    events: ReplEventLog,
+    events: ReplEventBroker,
 }
 
 impl ReplRuntimeState {
@@ -98,8 +102,8 @@ impl ReplRuntimeState {
                 name: config.infer.model.clone(),
             },
         );
-        let mut events = ReplEventLog::new(session.id);
-        events.append(
+        let mut events = ReplEventBroker::new(session.id, 256);
+        events.publish(
             ReplEvent::SessionStarted {
                 session_id: session.id,
             },
@@ -112,8 +116,8 @@ impl ReplRuntimeState {
     }
 
     fn record(&mut self, event: ReplEvent, run_id: Option<uuid::Uuid>) {
-        self.events.append(event.clone(), run_id, unix_ms_now());
-        self.session.apply_event(&event);
+        let envelope = self.events.publish(event, run_id, unix_ms_now());
+        self.session.apply_event(&envelope.event);
     }
 
     fn snapshot(&self) -> visionclip_common::ReplSessionSnapshot {
@@ -128,6 +132,10 @@ impl ReplRuntimeState {
             self.events.events_after(sequence),
             self.events.last_sequence(),
         )
+    }
+
+    fn subscribe_after(&self, sequence: u64) -> ReplEventSubscription {
+        self.events.subscribe_after(sequence)
     }
 }
 
@@ -144,7 +152,19 @@ impl TtsPlaybackGate {
 }
 
 async fn handle_connection(mut stream: UnixStream, state: Arc<AppState>) -> Result<()> {
-    let request: VisionRequest = read_message(&mut stream).await?;
+    let payload = read_frame_payload(&mut stream).await?;
+
+    if let Some(request) = decode_coddy_wire_request(&payload)? {
+        return handle_coddy_connection(&mut stream, &state, request).await;
+    }
+
+    let request: VisionRequest = decode_payload(&payload)?;
+    let request = match request {
+        VisionRequest::ReplEventStream(job) => {
+            return stream_repl_events(&mut stream, &state, job).await;
+        }
+        request => request,
+    };
 
     let response = match process_request(&state, request).await {
         Ok(result) => result,
@@ -162,6 +182,39 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<AppState>) -> Resu
     Ok(())
 }
 
+fn decode_coddy_wire_request(payload: &[u8]) -> Result<Option<CoddyRequest>> {
+    Ok(decode_wire_request_payload(payload)?)
+}
+
+async fn handle_coddy_connection(
+    stream: &mut UnixStream,
+    state: &AppState,
+    request: CoddyRequest,
+) -> Result<()> {
+    let request_id = request.request_id();
+    let request = match request {
+        CoddyRequest::EventStream(job) => {
+            return stream_coddy_repl_events(stream, state, job).await;
+        }
+        request => request,
+    };
+
+    let response = match process_coddy_request(state, request).await {
+        Ok(result) => result,
+        Err(error) => {
+            error!(?error, "Coddy job processing failed");
+            CoddyResult::Error {
+                request_id,
+                code: "processing_error".into(),
+                message: error.to_string(),
+            }
+        }
+    };
+
+    write_frame(stream, &CoddyWireResult::new(response)).await?;
+    Ok(())
+}
+
 async fn process_request(state: &AppState, request: VisionRequest) -> Result<JobResult> {
     match request {
         VisionRequest::Capture(job) => process_job(state, job).await,
@@ -171,7 +224,86 @@ async fn process_request(state: &AppState, request: VisionRequest) -> Result<Job
         VisionRequest::ReplCommand(job) => process_repl_command(state, job).await,
         VisionRequest::ReplSessionSnapshot(job) => process_repl_session_snapshot(state, job).await,
         VisionRequest::ReplEvents(job) => process_repl_events(state, job).await,
+        VisionRequest::ReplEventStream(job) => Ok(JobResult::Error {
+            request_id: job.request_id,
+            code: "invalid_repl_stream_dispatch".to_string(),
+            message: "ReplEventStream requires a persistent connection.".to_string(),
+        }),
         VisionRequest::HealthCheck(job) => process_health_check(job).await,
+    }
+}
+
+async fn process_coddy_request(state: &AppState, request: CoddyRequest) -> Result<CoddyResult> {
+    let result = match request {
+        CoddyRequest::Command(job) => process_repl_command(state, job).await?,
+        CoddyRequest::SessionSnapshot(job) => process_repl_session_snapshot(state, job).await?,
+        CoddyRequest::Events(job) => process_repl_events(state, job).await?,
+        CoddyRequest::EventStream(job) => JobResult::Error {
+            request_id: job.request_id,
+            code: "invalid_repl_stream_dispatch".to_string(),
+            message: "EventStream requires a persistent connection.".to_string(),
+        },
+    };
+
+    Ok(map_job_result_to_coddy(result))
+}
+
+fn map_job_result_to_coddy(result: JobResult) -> CoddyResult {
+    match result {
+        JobResult::ClipboardText {
+            request_id,
+            text,
+            spoken,
+        } => CoddyResult::Text {
+            request_id,
+            text,
+            spoken,
+        },
+        JobResult::BrowserQuery {
+            request_id,
+            query,
+            summary,
+            spoken,
+        } => CoddyResult::BrowserQuery {
+            request_id,
+            query,
+            summary,
+            spoken,
+        },
+        JobResult::ActionStatus {
+            request_id,
+            message,
+            spoken,
+        } => CoddyResult::ActionStatus {
+            request_id,
+            message,
+            spoken,
+        },
+        JobResult::Error {
+            request_id,
+            code,
+            message,
+        } => CoddyResult::Error {
+            request_id,
+            code,
+            message,
+        },
+        JobResult::ReplSessionSnapshot {
+            request_id,
+            snapshot,
+        } => CoddyResult::ReplSessionSnapshot {
+            request_id,
+            snapshot,
+        },
+        JobResult::ReplEvents {
+            request_id,
+            events,
+            last_sequence,
+        } => CoddyResult::ReplEvents {
+            request_id,
+            events,
+            last_sequence,
+        },
     }
 }
 
@@ -202,6 +334,80 @@ async fn process_repl_events(state: &AppState, job: ReplEventsJob) -> Result<Job
         events,
         last_sequence,
     })
+}
+
+async fn stream_repl_events(
+    stream: &mut UnixStream,
+    state: &AppState,
+    job: ReplEventStreamJob,
+) -> Result<()> {
+    let mut subscription = {
+        let repl = state.repl.lock().await;
+        repl.subscribe_after(job.after_sequence)
+    };
+
+    info!(
+        request_id = %job.request_id,
+        after_sequence = job.after_sequence,
+        "starting Coddy REPL event stream"
+    );
+
+    while let Some(event) = subscription.next().await {
+        let last_sequence = event.sequence;
+        let response = JobResult::ReplEvents {
+            request_id: job.request_id,
+            events: vec![event],
+            last_sequence,
+        };
+
+        if let Err(error) = write_message(stream, &response).await {
+            info!(
+                request_id = %job.request_id,
+                ?error,
+                "Coddy REPL event stream closed"
+            );
+            return Ok(());
+        }
+    }
+
+    Ok(())
+}
+
+async fn stream_coddy_repl_events(
+    stream: &mut UnixStream,
+    state: &AppState,
+    job: ReplEventStreamJob,
+) -> Result<()> {
+    let mut subscription = {
+        let repl = state.repl.lock().await;
+        repl.subscribe_after(job.after_sequence)
+    };
+
+    info!(
+        request_id = %job.request_id,
+        after_sequence = job.after_sequence,
+        "starting direct Coddy REPL event stream"
+    );
+
+    while let Some(event) = subscription.next().await {
+        let last_sequence = event.sequence;
+        let response = CoddyWireResult::new(CoddyResult::ReplEvents {
+            request_id: job.request_id,
+            events: vec![event],
+            last_sequence,
+        });
+
+        if let Err(error) = write_frame(stream, &response).await {
+            info!(
+                request_id = %job.request_id,
+                ?error,
+                "direct Coddy REPL event stream closed"
+            );
+            return Ok(());
+        }
+    }
+
+    Ok(())
 }
 
 async fn record_repl_event(state: &AppState, event: ReplEvent, run_id: Option<uuid::Uuid>) {
@@ -1424,6 +1630,7 @@ fn unix_ms_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use coddy_ipc::CoddyWireRequest;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -1436,6 +1643,49 @@ mod tests {
         assert!(validate_browser_url("http://example.com").is_ok());
         assert!(validate_browser_url("file:///etc/passwd").is_err());
         assert!(validate_browser_url("https://example.com/a b").is_err());
+    }
+
+    #[test]
+    fn coddy_wire_payload_decodes_before_legacy_fallback() {
+        let request_id = uuid::Uuid::new_v4();
+        let wire = CoddyWireRequest::new(CoddyRequest::Events(ReplEventsJob {
+            request_id,
+            after_sequence: 7,
+        }));
+        let payload = coddy_ipc::encode_payload(&wire).expect("encode coddy wire request");
+
+        let decoded = decode_coddy_wire_request(&payload)
+            .expect("decode coddy wire request")
+            .expect("coddy request");
+
+        let CoddyRequest::Events(job) = decoded else {
+            panic!("unexpected coddy request")
+        };
+        assert_eq!(job.request_id, request_id);
+        assert_eq!(job.after_sequence, 7);
+    }
+
+    #[test]
+    fn legacy_payload_is_not_treated_as_coddy_wire_request() {
+        let request_id = uuid::Uuid::new_v4();
+        let legacy = VisionRequest::HealthCheck(HealthCheckJob { request_id });
+        let payload = coddy_ipc::encode_payload(&legacy).expect("encode legacy request");
+
+        assert!(decode_coddy_wire_request(&payload)
+            .expect("decode legacy fallback")
+            .is_none());
+    }
+
+    #[test]
+    fn coddy_wire_payload_rejects_incompatible_version() {
+        let mut wire =
+            CoddyWireRequest::new(CoddyRequest::SessionSnapshot(ReplSessionSnapshotJob {
+                request_id: uuid::Uuid::new_v4(),
+            }));
+        wire.protocol_version += 1;
+        let payload = coddy_ipc::encode_payload(&wire).expect("encode coddy wire request");
+
+        assert!(decode_coddy_wire_request(&payload).is_err());
     }
 
     #[test]
@@ -1479,6 +1729,25 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].sequence, 2);
         assert_eq!(events[1].sequence, 3);
+    }
+
+    #[tokio::test]
+    async fn repl_runtime_subscription_receives_live_events_without_polling() {
+        let config = AppConfig::default();
+        let mut runtime = ReplRuntimeState::new(&config);
+        let start_sequence = runtime.snapshot().last_sequence;
+        let run_id = uuid::Uuid::new_v4();
+        let mut subscription = runtime.subscribe_after(start_sequence);
+
+        runtime.record(ReplEvent::RunStarted { run_id }, Some(run_id));
+
+        let event = tokio::time::timeout(Duration::from_millis(100), subscription.next())
+            .await
+            .expect("live event before timeout")
+            .expect("open subscription");
+
+        assert_eq!(event.sequence, start_sequence + 1);
+        assert!(matches!(event.event, ReplEvent::RunStarted { .. }));
     }
 
     #[test]

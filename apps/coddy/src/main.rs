@@ -1,17 +1,16 @@
+mod config;
 mod shortcut;
 mod voice_overlay;
 
+use crate::config::CoddyRuntimeConfig;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use coddy_client::CoddyClient;
+use coddy_core::{ContextPolicy, ReplCommand};
+use coddy_ipc::CoddyResult;
 use std::{env, ffi::OsString, process::Stdio};
-use tokio::net::UnixStream;
 use tokio::process::Command as TokioCommand;
 use tracing::{info, warn};
-use uuid::Uuid;
-use visionclip_common::{
-    read_message, write_message, AppConfig, ContextPolicy, JobResult, ReplCommand, ReplCommandJob,
-    ReplEventsJob, ReplSessionSnapshotJob, VisionRequest,
-};
 
 #[derive(Debug, Parser)]
 #[command(name = "coddy")]
@@ -79,6 +78,13 @@ enum SessionCommand {
         #[arg(long, default_value_t = 0)]
         after: u64,
     },
+    Watch {
+        #[arg(long, default_value_t = 0)]
+        after: u64,
+
+        #[arg(long)]
+        limit: Option<usize>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -93,10 +99,10 @@ async fn main() -> Result<()> {
         return voice_overlay::run_listening_overlay(cli.voice_overlay_duration_ms);
     }
 
-    let config = AppConfig::load()?;
+    let config = CoddyRuntimeConfig::load()?;
 
     tracing_subscriber::fmt()
-        .with_env_filter(env::var("RUST_LOG").unwrap_or_else(|_| config.general.log_level.clone()))
+        .with_env_filter(env::var("RUST_LOG").unwrap_or_else(|_| config.log_level().to_string()))
         .init();
 
     match cli.command {
@@ -160,6 +166,9 @@ async fn main() -> Result<()> {
         Some(Command::Session {
             command: SessionCommand::Events { after },
         }) => run_session_events(&config, after).await,
+        Some(Command::Session {
+            command: SessionCommand::Watch { after, limit },
+        }) => run_session_watch(&config, after, limit).await,
         Some(Command::Doctor {
             command: DoctorCommand::Shortcuts,
         }) => run_shortcuts_doctor(&config).await,
@@ -171,39 +180,24 @@ async fn main() -> Result<()> {
 }
 
 async fn send_repl_command(
-    config: &AppConfig,
+    config: &CoddyRuntimeConfig,
     command: ReplCommand,
     speak: bool,
-) -> Result<JobResult> {
-    let request_id = Uuid::new_v4();
-    let socket_path = config.socket_path()?;
+) -> Result<CoddyResult> {
+    let client = coddy_client(config)?;
 
     info!(
-        request_id = %request_id,
-        socket = %socket_path.display(),
+        socket = %client.socket_path().display(),
         ?command,
         speak,
         "sending Coddy REPL command"
     );
 
-    let mut stream = UnixStream::connect(&socket_path).await.with_context(|| {
-        format!(
-            "failed to connect to daemon socket {}",
-            socket_path.display()
-        )
-    })?;
-    let request = VisionRequest::ReplCommand(ReplCommandJob {
-        request_id,
-        command,
-        speak,
-    });
-
-    write_message(&mut stream, &request).await?;
-    Ok(read_message(&mut stream).await?)
+    client.send_command(command, speak).await
 }
 
-async fn run_shortcuts_doctor(config: &AppConfig) -> Result<()> {
-    let environment = shortcut::ShortcutEnvironment::detect(config)?;
+async fn run_shortcuts_doctor(config: &CoddyRuntimeConfig) -> Result<()> {
+    let environment = shortcut::ShortcutEnvironment::detect(config.socket_path()?);
     print!("{environment}");
     let status = shortcut::GnomeShortcutStatus::detect(&shortcut::default_wrapper_path()?);
     print!("{status}");
@@ -211,90 +205,66 @@ async fn run_shortcuts_doctor(config: &AppConfig) -> Result<()> {
     Ok(())
 }
 
-async fn run_shortcuts_test(config: &AppConfig) -> Result<()> {
-    let environment = shortcut::ShortcutEnvironment::detect(config)?;
+async fn run_shortcuts_test(config: &CoddyRuntimeConfig) -> Result<()> {
+    let environment = shortcut::ShortcutEnvironment::detect(config.socket_path()?);
     print!("{environment}");
     environment.validate_for_shortcut()?;
     let lock = shortcut::VoiceShortcutLock::acquire(environment.lock_path()?)?;
     println!("lock_acquired: {}", lock.path().display());
 
-    let result = send_repl_command(config, ReplCommand::StopSpeaking, false).await?;
+    let result = coddy_client(config)?.stop_speaking().await?;
     print_job_result(result)?;
     println!("shortcut_test: ok");
     Ok(())
 }
 
-async fn run_session_snapshot(config: &AppConfig) -> Result<()> {
-    let request_id = Uuid::new_v4();
-    let socket_path = config.socket_path()?;
-    let mut stream = UnixStream::connect(&socket_path).await.with_context(|| {
-        format!(
-            "failed to connect to daemon socket {}",
-            socket_path.display()
-        )
-    })?;
-
-    write_message(
-        &mut stream,
-        &VisionRequest::ReplSessionSnapshot(ReplSessionSnapshotJob { request_id }),
-    )
-    .await?;
-
-    match read_message(&mut stream).await? {
-        JobResult::ReplSessionSnapshot { snapshot, .. } => {
-            println!("{}", serde_json::to_string_pretty(&snapshot)?);
-            Ok(())
-        }
-        JobResult::Error { code, message, .. } => {
-            anyhow::bail!("daemon returned error {code}: {message}")
-        }
-        _ => anyhow::bail!("daemon returned unexpected response for REPL session snapshot"),
-    }
+async fn run_session_snapshot(config: &CoddyRuntimeConfig) -> Result<()> {
+    let snapshot = coddy_client(config)?.snapshot().await?;
+    println!("{}", serde_json::to_string_pretty(&snapshot)?);
+    Ok(())
 }
 
-async fn run_session_events(config: &AppConfig, after_sequence: u64) -> Result<()> {
-    let request_id = Uuid::new_v4();
-    let socket_path = config.socket_path()?;
-    let mut stream = UnixStream::connect(&socket_path).await.with_context(|| {
-        format!(
-            "failed to connect to daemon socket {}",
-            socket_path.display()
-        )
-    })?;
-
-    write_message(
-        &mut stream,
-        &VisionRequest::ReplEvents(ReplEventsJob {
-            request_id,
-            after_sequence,
-        }),
-    )
-    .await?;
-
-    match read_message(&mut stream).await? {
-        JobResult::ReplEvents {
-            events,
-            last_sequence,
-            ..
-        } => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "last_sequence": last_sequence,
-                    "events": events,
-                }))?
-            );
-            Ok(())
-        }
-        JobResult::Error { code, message, .. } => {
-            anyhow::bail!("daemon returned error {code}: {message}")
-        }
-        _ => anyhow::bail!("daemon returned unexpected response for REPL session events"),
-    }
+async fn run_session_events(config: &CoddyRuntimeConfig, after_sequence: u64) -> Result<()> {
+    let batch = coddy_client(config)?.events_after(after_sequence).await?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "last_sequence": batch.last_sequence,
+            "events": batch.events,
+        }))?
+    );
+    Ok(())
 }
 
-fn acquire_voice_shortcut_lock(config: &AppConfig) -> Result<shortcut::VoiceShortcutLock> {
-    let environment = shortcut::ShortcutEnvironment::detect(config)?;
+async fn run_session_watch(
+    config: &CoddyRuntimeConfig,
+    after_sequence: u64,
+    limit: Option<usize>,
+) -> Result<()> {
+    let mut stream = coddy_client(config)?.event_stream(after_sequence).await?;
+    let mut received = 0_usize;
+    while let Some(frame) = stream.next().await? {
+        received += 1;
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "last_sequence": frame.last_sequence,
+                "event": frame.event,
+            }))?
+        );
+        if session_watch_limit_reached(received, limit) {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+fn coddy_client(config: &CoddyRuntimeConfig) -> Result<CoddyClient> {
+    Ok(CoddyClient::new(config.socket_path()?))
+}
+
+fn acquire_voice_shortcut_lock(config: &CoddyRuntimeConfig) -> Result<shortcut::VoiceShortcutLock> {
+    let environment = shortcut::ShortcutEnvironment::detect(config.socket_path()?);
     environment.validate_for_shortcut()?;
     shortcut::VoiceShortcutLock::acquire(environment.lock_path()?)
 }
@@ -369,31 +339,31 @@ fn run_shortcuts_install(
     Ok(())
 }
 
-fn print_job_result(result: JobResult) -> Result<()> {
+fn print_job_result(result: CoddyResult) -> Result<()> {
     match result {
-        JobResult::ClipboardText { text, .. } => {
+        CoddyResult::Text { text, .. } => {
             println!("{text}");
             Ok(())
         }
-        JobResult::BrowserQuery { query, summary, .. } => {
+        CoddyResult::BrowserQuery { query, summary, .. } => {
             println!("Pesquisa: {query}");
             if let Some(summary) = summary {
                 println!("\n{summary}");
             }
             Ok(())
         }
-        JobResult::ActionStatus { message, .. } => {
+        CoddyResult::ActionStatus { message, .. } => {
             println!("{message}");
             Ok(())
         }
-        JobResult::Error { code, message, .. } => {
+        CoddyResult::Error { code, message, .. } => {
             anyhow::bail!("daemon returned error {code}: {message}")
         }
-        JobResult::ReplSessionSnapshot { snapshot, .. } => {
+        CoddyResult::ReplSessionSnapshot { snapshot, .. } => {
             println!("{}", serde_json::to_string_pretty(&snapshot)?);
             Ok(())
         }
-        JobResult::ReplEvents {
+        CoddyResult::ReplEvents {
             events,
             last_sequence,
             ..
@@ -418,6 +388,10 @@ fn normalize_transcript_override(transcript: Option<String>) -> Option<String> {
     transcript
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn session_watch_limit_reached(received: usize, limit: Option<usize>) -> bool {
+    limit.is_some_and(|limit| received >= limit)
 }
 
 #[cfg(test)]
@@ -451,5 +425,29 @@ mod tests {
             normalize_transcript_override(Some("  Quem foi Rousseau? ".into())),
             Some("Quem foi Rousseau?".into())
         );
+    }
+
+    #[test]
+    fn parses_session_watch_options() {
+        let cli =
+            Cli::try_parse_from(["coddy", "session", "watch", "--after", "7", "--limit", "2"])
+                .expect("parse session watch");
+
+        match cli.command {
+            Some(Command::Session {
+                command: SessionCommand::Watch { after, limit },
+            }) => {
+                assert_eq!(after, 7);
+                assert_eq!(limit, Some(2));
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn session_watch_limit_is_optional() {
+        assert!(!session_watch_limit_reached(10, None));
+        assert!(!session_watch_limit_reached(1, Some(2)));
+        assert!(session_watch_limit_reached(2, Some(2)));
     }
 }

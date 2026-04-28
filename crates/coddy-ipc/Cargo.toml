@@ -1,13 +1,13 @@
 [package]
-name = "visionclip-voice-input"
+name = "coddy-ipc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-anyhow.workspace = true
+bincode.workspace = true
+coddy-core.workspace = true
 serde.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
-tracing.workspace = true
 uuid.workspace = true
-which.workspace = true
