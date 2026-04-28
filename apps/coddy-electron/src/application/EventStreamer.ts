@@ -11,8 +11,20 @@ export type ErrorCallback = (error: Error) => void
 const BASE_DELAY_MS = 500
 const MAX_DELAY_MS = 10_000
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+function delay(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve()
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(resolve, ms)
+    signal.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timeout)
+        resolve()
+      },
+      { once: true },
+    )
+  })
 }
 
 /**
@@ -30,11 +42,12 @@ export function startEventStream(
 ): () => void {
   let aborted = false
   let currentState = initial
+  const abortController = new AbortController()
 
   void (async () => {
     while (!aborted) {
       try {
-        await runStream(client, initial.lastSequence, (envelope) => {
+        await runStream(client, currentState.lastSequence, abortController.signal, (envelope) => {
           if (aborted) return
 
           const newState = applyEvents(
@@ -48,7 +61,7 @@ export function startEventStream(
 
         // Stream ended cleanly (daemon closed it). Retry.
         if (!aborted) {
-          await delay(1000)
+          await delay(1000, abortController.signal)
         }
       } catch (error) {
         if (aborted) return
@@ -60,7 +73,10 @@ export function startEventStream(
         // Exponential backoff
         for (let attempt = 1; attempt <= 5; attempt++) {
           if (aborted) return
-          await delay(Math.min(BASE_DELAY_MS * 2 ** attempt, MAX_DELAY_MS))
+          await delay(
+            Math.min(BASE_DELAY_MS * 2 ** attempt, MAX_DELAY_MS),
+            abortController.signal,
+          )
         }
       }
     }
@@ -68,6 +84,7 @@ export function startEventStream(
 
   return () => {
     aborted = true
+    abortController.abort()
   }
 }
 
@@ -78,19 +95,39 @@ export function startEventStream(
 async function runStream(
   client: ReplIpcClient,
   afterSequence: number,
+  signal: AbortSignal,
   onEvent: (envelope: ReplEventEnvelope) => void,
 ): Promise<void> {
-  // Refresh the snapshot to get the latest sequence
+  const iterator = client.watchEvents(afterSequence)[Symbol.asyncIterator]()
+
   try {
-    const snapshot = await client.getSnapshot()
-    afterSequence = snapshot.last_sequence
-  } catch {
-    // Use the provided sequence if snapshot fails
+    while (!signal.aborted) {
+      const next = await nextWithAbort(iterator, signal)
+      if (next.done) return
+      onEvent(next.value)
+    }
+  } finally {
+    await iterator.return?.()
+  }
+}
+
+function nextWithAbort(
+  iterator: AsyncIterator<ReplEventEnvelope>,
+  signal: AbortSignal,
+): Promise<IteratorResult<ReplEventEnvelope>> {
+  if (signal.aborted) {
+    return Promise.resolve({ done: true, value: undefined })
   }
 
-  const stream = client.watchEvents(afterSequence)
+  return new Promise((resolve, reject) => {
+    const onAbort = () => resolve({ done: true, value: undefined })
+    signal.addEventListener('abort', onAbort, { once: true })
 
-  for await (const envelope of stream) {
-    onEvent(envelope)
-  }
+    iterator
+      .next()
+      .then(resolve, reject)
+      .finally(() => {
+        signal.removeEventListener('abort', onAbort)
+      })
+  })
 }
