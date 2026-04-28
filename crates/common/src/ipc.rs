@@ -100,6 +100,12 @@ pub struct ReplSessionSnapshotJob {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplEventsJob {
+    pub request_id: Uuid,
+    pub after_sequence: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum VisionRequest {
     Capture(CaptureJob),
     VoiceSearch(VoiceSearchJob),
@@ -108,6 +114,7 @@ pub enum VisionRequest {
     HealthCheck(HealthCheckJob),
     ReplCommand(ReplCommandJob),
     ReplSessionSnapshot(ReplSessionSnapshotJob),
+    ReplEvents(ReplEventsJob),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +143,11 @@ pub enum JobResult {
     ReplSessionSnapshot {
         request_id: Uuid,
         snapshot: Box<coddy_core::ReplSessionSnapshot>,
+    },
+    ReplEvents {
+        request_id: Uuid,
+        events: Vec<coddy_core::ReplEventEnvelope>,
+        last_sequence: u64,
     },
 }
 
@@ -256,6 +268,13 @@ mod tests {
             )),
             6
         );
+        assert_eq!(
+            encoded_variant_tag(&VisionRequest::ReplEvents(ReplEventsJob {
+                request_id,
+                after_sequence: 0,
+            })),
+            7
+        );
     }
 
     #[test]
@@ -345,6 +364,59 @@ mod tests {
             } => {
                 assert_eq!(decoded_request_id, request_id);
                 assert_eq!(snapshot.last_sequence, 7);
+            }
+            _ => panic!("unexpected decoded result"),
+        }
+    }
+
+    #[test]
+    fn repl_events_request_and_result_roundtrip_through_bincode() {
+        let request_id = Uuid::new_v4();
+        let request = VisionRequest::ReplEvents(ReplEventsJob {
+            request_id,
+            after_sequence: 12,
+        });
+        let payload = bincode::serde::encode_to_vec(&request, bincode::config::standard())
+            .expect("encode events request");
+        let (decoded, _): (VisionRequest, usize) =
+            bincode::serde::decode_from_slice(&payload, bincode::config::standard())
+                .expect("decode events request");
+
+        match decoded {
+            VisionRequest::ReplEvents(job) => {
+                assert_eq!(job.request_id, request_id);
+                assert_eq!(job.after_sequence, 12);
+            }
+            _ => panic!("unexpected decoded request"),
+        }
+
+        let event = coddy_core::ReplEventEnvelope::new(
+            13,
+            Uuid::new_v4(),
+            None,
+            1_775_000_000_000,
+            coddy_core::ReplEvent::VoiceListeningStarted,
+        );
+        let result = JobResult::ReplEvents {
+            request_id,
+            events: vec![event],
+            last_sequence: 13,
+        };
+        let payload = bincode::serde::encode_to_vec(&result, bincode::config::standard())
+            .expect("encode events result");
+        let (decoded, _): (JobResult, usize) =
+            bincode::serde::decode_from_slice(&payload, bincode::config::standard())
+                .expect("decode events result");
+
+        match decoded {
+            JobResult::ReplEvents {
+                request_id: decoded_request_id,
+                events,
+                last_sequence,
+            } => {
+                assert_eq!(decoded_request_id, request_id);
+                assert_eq!(events.len(), 1);
+                assert_eq!(last_sequence, 13);
             }
             _ => panic!("unexpected decoded result"),
         }

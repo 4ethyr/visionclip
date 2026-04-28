@@ -17,8 +17,9 @@ use tracing::{error, info, warn};
 use visionclip_common::{
     read_message, resolve_voice_turn_intent, write_message, Action, AppConfig,
     ApplicationLaunchJob, CaptureJob, HealthCheckJob, JobResult, ModelRef, ReplCommand,
-    ReplCommandJob, ReplEvent, ReplEventLog, ReplIntent, ReplMessage, ReplMode, ReplSession,
-    ReplSessionSnapshotJob, ToolStatus, UrlOpenJob, VisionRequest, VoiceSearchJob, VoiceTurnIntent,
+    ReplCommandJob, ReplEvent, ReplEventEnvelope, ReplEventLog, ReplEventsJob, ReplIntent,
+    ReplMessage, ReplMode, ReplSession, ReplSessionSnapshotJob, ToolStatus, UrlOpenJob,
+    VisionRequest, VoiceSearchJob, VoiceTurnIntent,
 };
 use visionclip_infer::{
     postprocess::{sanitize_for_speech, sanitize_output},
@@ -121,6 +122,13 @@ impl ReplRuntimeState {
             last_sequence: self.events.last_sequence(),
         }
     }
+
+    fn events_after(&self, sequence: u64) -> (Vec<ReplEventEnvelope>, u64) {
+        (
+            self.events.events_after(sequence),
+            self.events.last_sequence(),
+        )
+    }
 }
 
 #[derive(Clone, Default)]
@@ -162,6 +170,7 @@ async fn process_request(state: &AppState, request: VisionRequest) -> Result<Job
         VisionRequest::OpenUrl(job) => process_open_url(state, job).await,
         VisionRequest::ReplCommand(job) => process_repl_command(state, job).await,
         VisionRequest::ReplSessionSnapshot(job) => process_repl_session_snapshot(state, job).await,
+        VisionRequest::ReplEvents(job) => process_repl_events(state, job).await,
         VisionRequest::HealthCheck(job) => process_health_check(job).await,
     }
 }
@@ -182,6 +191,16 @@ async fn process_repl_session_snapshot(
     Ok(JobResult::ReplSessionSnapshot {
         request_id: job.request_id,
         snapshot: Box::new(repl.snapshot()),
+    })
+}
+
+async fn process_repl_events(state: &AppState, job: ReplEventsJob) -> Result<JobResult> {
+    let repl = state.repl.lock().await;
+    let (events, last_sequence) = repl.events_after(job.after_sequence);
+    Ok(JobResult::ReplEvents {
+        request_id: job.request_id,
+        events,
+        last_sequence,
     })
 }
 
@@ -1443,6 +1462,23 @@ mod tests {
             snapshot.session.status,
             visionclip_common::SessionStatus::Idle
         );
+    }
+
+    #[test]
+    fn repl_runtime_returns_incremental_events_after_sequence() {
+        let config = AppConfig::default();
+        let mut runtime = ReplRuntimeState::new(&config);
+        let run_id = uuid::Uuid::new_v4();
+
+        runtime.record(ReplEvent::RunStarted { run_id }, Some(run_id));
+        runtime.record(ReplEvent::RunCompleted { run_id }, Some(run_id));
+
+        let (events, last_sequence) = runtime.events_after(1);
+
+        assert_eq!(last_sequence, 3);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].sequence, 2);
+        assert_eq!(events[1].sequence, 3);
     }
 
     #[test]
