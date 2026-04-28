@@ -15,6 +15,7 @@ class WatchIterator implements AsyncIterable<ReplEventEnvelope> {
   private resolveNext: ((value: IteratorResult<ReplEventEnvelope>) => void) | null = null
   private unsubscribe: (() => void) | null = null
   private streamId: string | null = null
+  private pendingBeforeStreamId: unknown[] = []
 
   constructor(private readonly afterSequence: number) {}
 
@@ -46,39 +47,73 @@ class WatchIterator implements AsyncIterable<ReplEventEnvelope> {
   private async ensureStarted(): Promise<void> {
     if (this.unsubscribe) return
 
-    // Tell main process to start the coddy watch stream
-    const streamId = (await window.replApi.invoke(
-      'repl:watch-start',
-      this.afterSequence,
-    )) as string | { streamId: string }
+    this.unsubscribe = window.replApi.on(
+      'repl:watch-event',
+      (data: unknown) => this.handleWatchPayload(data),
+    )
+
+    let streamId: string | { streamId: string }
+    try {
+      // Tell main process to start the coddy watch stream after the listener exists.
+      streamId = (await window.replApi.invoke(
+        'repl:watch-start',
+        this.afterSequence,
+      )) as string | { streamId: string }
+    } catch (error) {
+      this.unsubscribe?.()
+      this.unsubscribe = null
+      this.pendingBeforeStreamId = []
+      this.done = true
+      throw error
+    }
 
     this.streamId = typeof streamId === 'string' ? streamId : streamId.streamId
 
-    this.unsubscribe = window.replApi.on(
-      'repl:watch-event',
-      (data: unknown) => {
-        const payload = data as {
-          streamId: string
-          done?: boolean
-          event?: ReplEventEnvelope
-          last_sequence?: number
-        }
+    const pending = this.pendingBeforeStreamId
+    this.pendingBeforeStreamId = []
+    for (const payload of pending) {
+      this.handleWatchPayload(payload)
+    }
+  }
 
-        if (payload.streamId !== this.streamId) return
+  private handleWatchPayload(data: unknown): void {
+    const payload = data as {
+      streamId: string
+      done?: boolean
+      event?: ReplEventEnvelope
+    }
 
-        if (payload.done) {
-          this.done = true
-          this.resolveNext?.({ done: true, value: undefined })
-          return
-        }
+    if (!this.streamId) {
+      this.pendingBeforeStreamId.push(payload)
+      return
+    }
 
-        const event = payload.event
-        if (event) {
-          this.buffer.push(event)
-          this.resolveNext?.({ done: false, value: this.buffer.shift()! })
-        }
-      },
-    )
+    if (payload.streamId !== this.streamId) return
+
+    if (payload.done) {
+      this.done = true
+      this.resolvePendingNext({ done: true, value: undefined })
+      return
+    }
+
+    if (payload.event) {
+      this.deliverEvent(payload.event)
+    }
+  }
+
+  private deliverEvent(event: ReplEventEnvelope): void {
+    if (!this.resolveNext) {
+      this.buffer.push(event)
+      return
+    }
+
+    this.resolvePendingNext({ done: false, value: event })
+  }
+
+  private resolvePendingNext(value: IteratorResult<ReplEventEnvelope>): void {
+    const resolve = this.resolveNext
+    this.resolveNext = null
+    resolve?.(value)
   }
 
   close(): void {
@@ -87,6 +122,7 @@ class WatchIterator implements AsyncIterable<ReplEventEnvelope> {
     }
     this.unsubscribe?.()
     this.done = true
+    this.resolvePendingNext({ done: true, value: undefined })
   }
 }
 
