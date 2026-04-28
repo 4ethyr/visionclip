@@ -1,0 +1,64 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Glass panel shared across floating views ── */
+.glass-panel {
+  background-color: rgba(19, 19, 19, 0.6);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(0, 219, 233, 0.15);
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+}
+
+/* ── Streaming character reveal ── */
+.streaming-text {
+  display: inline;
+}
+
+.streaming-char {
+  opacity: 0;
+  animation: streaming-reveal 100ms ease-out forwards;
+}
+
+@keyframes streaming-reveal {
+  0% {
+    opacity: 0;
+    filter: blur(2px);
+  }
+  100% {
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+
+/* ── Blinking cursor for streaming ── */
+.streaming-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  background-color: #00dbe9;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  animation: blink 0.8s step-end infinite;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* ── Custom scrollbar ── */
+::-webkit-scrollbar {
+  width: 3px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(182, 0, 248, 0.25);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(182, 0, 248, 0.5);
+}

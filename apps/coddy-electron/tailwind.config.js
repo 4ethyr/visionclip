@@ -1,0 +1,48 @@
+/** @type {import('tailwindcss').Config} */
+module.exports = {
+  content: ['./src/**/*.{ts,tsx}', './index.html'],
+  theme: {
+    extend: {
+      colors: {
+        background: '#131313',
+        surface: '#131313',
+        'surface-dim': '#131313',
+        'surface-container': '#201f1f',
+        'surface-container-low': '#1c1b1b',
+        'surface-container-high': '#2a2a2a',
+        'surface-container-highest': '#353534',
+        'surface-bright': '#3a3939',
+        'surface-container-lowest': '#0e0e0e',
+        'surface-variant': '#353534',
+        'on-surface': '#e5e2e1',
+        'on-surface-variant': '#b9cacb',
+        'on-background': '#e5e2e1',
+        primary: '#00dbe9',
+        'primary-fixed-dim': '#00dbe9',
+        'primary-container': '#00f0ff',
+        'on-primary': '#00363a',
+        'on-primary-container': '#006970',
+        secondary: '#ebb2ff',
+        'secondary-container': '#b600f8',
+        'secondary-fixed-dim': '#ebb2ff',
+        outline: '#849495',
+        'outline-variant': '#3b494b',
+        tertiary: '#f8f5f5',
+        error: '#ffb4ab',
+        'error-container': '#93000a',
+        'on-error': '#690005',
+        'on-error-container': '#ffdad6',
+      },
+      fontFamily: {
+        mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
+        sans: ['Inter', 'Manrope', 'sans-serif'],
+      },
+      borderRadius: {
+        DEFAULT: '2px',
+        lg: '4px',
+        xl: '8px',
+      },
+    },
+  },
+  plugins: [],
+}

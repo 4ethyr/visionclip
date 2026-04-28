@@ -1,0 +1,14 @@
+// presentation/components/index.ts
+
+export { MessageBubble } from './MessageBubble'
+export { StatusIndicator } from './StatusIndicator'
+export { InputBar } from './InputBar'
+export { CodeBlock } from './CodeBlock'
+export { ModelSelector } from './ModelSelector'
+export { VoiceButton } from './VoiceButton'
+export { Sidebar } from './Sidebar'
+export type { DesktopTab } from './Sidebar'
+export { WorkspacePanel } from './WorkspacePanel'
+export { ConversationPanel } from './ConversationPanel'
+export { StreamingText } from './StreamingText'
+export { AssessmentConfirmModal } from './AssessmentConfirmModal'

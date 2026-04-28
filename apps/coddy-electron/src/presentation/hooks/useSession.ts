@@ -1,0 +1,138 @@
+// presentation/hooks/useSession.ts
+// Hook: manages the full REPL session lifecycle.
+// Loads snapshot, starts event stream, exposes state + actions.
+
+import { useState, useEffect, useCallback, useRef } from 'react'
+import type { ReplSession } from '@/domain'
+import type { SessionState } from '@/application'
+import {
+  initializeSession,
+  createLocalSession,
+  startEventStream,
+  sendAsk,
+  cancelRun,
+  cancelSpeech,
+} from '@/application'
+import { useReplClient } from './useReplClient'
+
+export interface UseSessionReturn {
+  session: ReplSession
+  lastSequence: number
+  /** True while still connecting / loading the first snapshot */
+  connecting: boolean
+  /** True when the daemon stream disconnected and we're retrying */
+  reconnecting: boolean
+  error: string | null
+
+  /** Send a text question */
+  ask: (text: string) => Promise<void>
+
+  /** Stop the current generation */
+  cancelRun: () => Promise<void>
+
+  /** Stop TTS playback */
+  cancelSpeech: () => Promise<void>
+
+  /** Manually retry connection to the daemon */
+  reconnect: () => void
+}
+
+export function useSession(): UseSessionReturn {
+  const client = useReplClient()
+  const [state, setState] = useState<SessionState>(createLocalSession())
+  const [connecting, setConnecting] = useState(true)
+  const [reconnecting, setReconnecting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const abortRef = useRef<(() => void) | null>(null)
+  const initCountRef = useRef(0)
+
+  // Initialize: fetch snapshot, then start watching
+  const init = useCallback(() => {
+    abortRef.current?.()
+
+    const count = ++initCountRef.current
+    let cancelled = false
+
+    setConnecting(true)
+    setError(null)
+
+    void (async () => {
+      try {
+        const initial = await initializeSession(client)
+        if (cancelled || count !== initCountRef.current) return
+
+        setState(initial)
+        setConnecting(false)
+
+        // Start live event stream
+        abortRef.current = startEventStream(
+          client,
+          initial,
+          (newState) => {
+            if (!cancelled && count === initCountRef.current) {
+              setState(newState)
+              setReconnecting(false)
+            }
+          },
+          (err) => {
+            if (!cancelled && count === initCountRef.current) {
+              setError(err.message)
+              setReconnecting(true)
+            }
+          },
+        )
+      } catch (err) {
+        if (!cancelled && count === initCountRef.current) {
+          const msg = err instanceof Error ? err.message : String(err)
+          setError(msg)
+          setConnecting(false)
+          setReconnecting(true)
+        }
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [client])
+
+  // Initial load
+  useEffect(() => {
+    const cleanup = init()
+    return () => {
+      cleanup?.()
+      abortRef.current?.()
+    }
+  }, [init])
+
+  const ask = useCallback(
+    async (text: string) => {
+      try {
+        await sendAsk(client, text)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+      }
+    },
+    [client],
+  )
+
+  const handleCancelRun = useCallback(async () => {
+    await cancelRun(client)
+  }, [client])
+
+  const handleCancelSpeech = useCallback(async () => {
+    await cancelSpeech(client)
+  }, [client])
+
+  return {
+    session: state.session,
+    lastSequence: state.lastSequence,
+    connecting,
+    reconnecting,
+    error,
+    ask,
+    cancelRun: handleCancelRun,
+    cancelSpeech: handleCancelSpeech,
+    reconnect: init,
+  }
+}
