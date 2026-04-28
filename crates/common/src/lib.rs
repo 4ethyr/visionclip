@@ -20,7 +20,8 @@ pub use error::{AppError, AppResult};
 pub use intent::{IntentDetection, IntentKind};
 pub use ipc::{
     read_message, write_message, Action, ApplicationLaunchJob, CaptureJob, HealthCheckJob,
-    JobResult, ReplCommandJob, SessionType, UrlOpenJob, VisionRequest, VoiceSearchJob,
+    JobResult, ReplCommandJob, ReplSessionSnapshotJob, SessionType, UrlOpenJob, VisionRequest,
+    VoiceSearchJob,
 };
 pub use portal::{
     current_desktops, screenshot_portal_backends_for_current_desktop, summarize_portal_backends,
@@ -29,6 +30,7 @@ pub use portal::{
 pub use router::{AgentDecision, ProposedAction};
 
 pub use coddy_core::{
-    resolve_voice_turn_intent, ContextPolicy, ReplCommand, ReplEvent, ReplIntent,
-    SearchResultContext, ShortcutConflictPolicy, ShortcutDecision, VoiceTurnIntent,
+    resolve_voice_turn_intent, ContextPolicy, ModelRef, ReplCommand, ReplEvent, ReplEventLog,
+    ReplIntent, ReplMessage, ReplMode, ReplSession, ReplSessionSnapshot, SearchResultContext,
+    SessionStatus, ShortcutConflictPolicy, ShortcutDecision, ToolStatus, VoiceTurnIntent,
 };

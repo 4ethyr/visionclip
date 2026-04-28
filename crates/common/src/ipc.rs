@@ -95,6 +95,11 @@ pub struct ReplCommandJob {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplSessionSnapshotJob {
+    pub request_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum VisionRequest {
     Capture(CaptureJob),
     VoiceSearch(VoiceSearchJob),
@@ -102,6 +107,7 @@ pub enum VisionRequest {
     OpenUrl(UrlOpenJob),
     HealthCheck(HealthCheckJob),
     ReplCommand(ReplCommandJob),
+    ReplSessionSnapshot(ReplSessionSnapshotJob),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,6 +132,10 @@ pub enum JobResult {
         request_id: Uuid,
         code: String,
         message: String,
+    },
+    ReplSessionSnapshot {
+        request_id: Uuid,
+        snapshot: Box<coddy_core::ReplSessionSnapshot>,
     },
 }
 
@@ -232,6 +242,20 @@ mod tests {
             encoded_variant_tag(&VisionRequest::HealthCheck(HealthCheckJob { request_id })),
             4
         );
+        assert_eq!(
+            encoded_variant_tag(&VisionRequest::ReplCommand(ReplCommandJob {
+                request_id,
+                command: coddy_core::ReplCommand::StopActiveRun,
+                speak: false,
+            })),
+            5
+        );
+        assert_eq!(
+            encoded_variant_tag(&VisionRequest::ReplSessionSnapshot(
+                ReplSessionSnapshotJob { request_id }
+            )),
+            6
+        );
     }
 
     #[test]
@@ -289,6 +313,40 @@ mod tests {
                 );
             }
             _ => panic!("unexpected decoded request"),
+        }
+    }
+
+    #[test]
+    fn repl_session_snapshot_result_roundtrips_through_bincode() {
+        let request_id = Uuid::new_v4();
+        let selected_model = coddy_core::ModelRef {
+            provider: "ollama".to_string(),
+            name: "gemma4-e2b".to_string(),
+        };
+        let session =
+            coddy_core::ReplSession::new(coddy_core::ReplMode::FloatingTerminal, selected_model);
+        let result = JobResult::ReplSessionSnapshot {
+            request_id,
+            snapshot: Box::new(coddy_core::ReplSessionSnapshot {
+                session,
+                last_sequence: 7,
+            }),
+        };
+        let payload = bincode::serde::encode_to_vec(&result, bincode::config::standard())
+            .expect("encode snapshot result");
+        let (decoded, _): (JobResult, usize) =
+            bincode::serde::decode_from_slice(&payload, bincode::config::standard())
+                .expect("decode snapshot result");
+
+        match decoded {
+            JobResult::ReplSessionSnapshot {
+                request_id: decoded_request_id,
+                snapshot,
+            } => {
+                assert_eq!(decoded_request_id, request_id);
+                assert_eq!(snapshot.last_sequence, 7);
+            }
+            _ => panic!("unexpected decoded result"),
         }
     }
 

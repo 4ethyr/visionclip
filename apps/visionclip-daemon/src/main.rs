@@ -5,14 +5,20 @@ mod search;
 use crate::linux_apps::open_application;
 use crate::search::{GoogleSearchClient, SearchEnrichment};
 use anyhow::{Context, Result};
-use std::{future::Future, path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    future::Future,
+    path::PathBuf,
+    sync::Arc,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use visionclip_common::{
     read_message, resolve_voice_turn_intent, write_message, Action, AppConfig,
-    ApplicationLaunchJob, CaptureJob, HealthCheckJob, JobResult, ReplCommand, ReplCommandJob,
-    UrlOpenJob, VisionRequest, VoiceSearchJob, VoiceTurnIntent,
+    ApplicationLaunchJob, CaptureJob, HealthCheckJob, JobResult, ModelRef, ReplCommand,
+    ReplCommandJob, ReplEvent, ReplEventLog, ReplIntent, ReplMessage, ReplMode, ReplSession,
+    ReplSessionSnapshotJob, ToolStatus, UrlOpenJob, VisionRequest, VoiceSearchJob, VoiceTurnIntent,
 };
 use visionclip_infer::{
     postprocess::{sanitize_for_speech, sanitize_output},
@@ -53,6 +59,7 @@ async fn main() -> Result<()> {
             None
         },
         tts_gate: TtsPlaybackGate::default(),
+        repl: Mutex::new(ReplRuntimeState::new(&config)),
     });
 
     loop {
@@ -73,6 +80,47 @@ struct AppState {
     search: Option<GoogleSearchClient>,
     piper: Option<PiperHttpClient>,
     tts_gate: TtsPlaybackGate,
+    repl: Mutex<ReplRuntimeState>,
+}
+
+struct ReplRuntimeState {
+    session: ReplSession,
+    events: ReplEventLog,
+}
+
+impl ReplRuntimeState {
+    fn new(config: &AppConfig) -> Self {
+        let session = ReplSession::new(
+            ReplMode::FloatingTerminal,
+            ModelRef {
+                provider: config.infer.backend.clone(),
+                name: config.infer.model.clone(),
+            },
+        );
+        let mut events = ReplEventLog::new(session.id);
+        events.append(
+            ReplEvent::SessionStarted {
+                session_id: session.id,
+            },
+            None,
+            unix_ms_now(),
+        );
+        let session = events.replay(session);
+
+        Self { session, events }
+    }
+
+    fn record(&mut self, event: ReplEvent, run_id: Option<uuid::Uuid>) {
+        self.events.append(event.clone(), run_id, unix_ms_now());
+        self.session.apply_event(&event);
+    }
+
+    fn snapshot(&self) -> visionclip_common::ReplSessionSnapshot {
+        visionclip_common::ReplSessionSnapshot {
+            session: self.session.clone(),
+            last_sequence: self.events.last_sequence(),
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -113,6 +161,7 @@ async fn process_request(state: &AppState, request: VisionRequest) -> Result<Job
         VisionRequest::OpenApplication(job) => process_open_application(state, job).await,
         VisionRequest::OpenUrl(job) => process_open_url(state, job).await,
         VisionRequest::ReplCommand(job) => process_repl_command(state, job).await,
+        VisionRequest::ReplSessionSnapshot(job) => process_repl_session_snapshot(state, job).await,
         VisionRequest::HealthCheck(job) => process_health_check(job).await,
     }
 }
@@ -123,6 +172,21 @@ async fn process_health_check(job: HealthCheckJob) -> Result<JobResult> {
         message: "VisionClip daemon ativo.".to_string(),
         spoken: false,
     })
+}
+
+async fn process_repl_session_snapshot(
+    state: &AppState,
+    job: ReplSessionSnapshotJob,
+) -> Result<JobResult> {
+    let repl = state.repl.lock().await;
+    Ok(JobResult::ReplSessionSnapshot {
+        request_id: job.request_id,
+        snapshot: Box::new(repl.snapshot()),
+    })
+}
+
+async fn record_repl_event(state: &AppState, event: ReplEvent, run_id: Option<uuid::Uuid>) {
+    state.repl.lock().await.record(event, run_id);
 }
 
 async fn process_open_application(
@@ -246,6 +310,15 @@ async fn process_repl_command(state: &AppState, job: ReplCommandJob) -> Result<J
         ReplCommand::Ask { text, .. } => {
             let query = sanitize_output(&Action::SearchWeb, &text);
             if query.trim().is_empty() {
+                record_repl_event(
+                    state,
+                    ReplEvent::Error {
+                        code: "empty_repl_query".to_string(),
+                        message: "Comando Coddy vazio.".to_string(),
+                    },
+                    Some(request_id),
+                )
+                .await;
                 return Ok(JobResult::Error {
                     request_id,
                     code: "empty_repl_query".to_string(),
@@ -253,12 +326,46 @@ async fn process_repl_command(state: &AppState, job: ReplCommandJob) -> Result<J
                 });
             }
 
+            record_repl_event(
+                state,
+                ReplEvent::RunStarted { run_id: request_id },
+                Some(request_id),
+            )
+            .await;
+            record_repl_event(
+                state,
+                ReplEvent::MessageAppended {
+                    message: ReplMessage {
+                        id: uuid::Uuid::new_v4(),
+                        role: "user".to_string(),
+                        text,
+                    },
+                },
+                Some(request_id),
+            )
+            .await;
+            record_repl_event(
+                state,
+                ReplEvent::IntentDetected {
+                    intent: ReplIntent::SearchDocs,
+                    confidence: 0.72,
+                },
+                Some(request_id),
+            )
+            .await;
+
             let speak_requested = state
                 .config
                 .action_should_speak(Action::SearchWeb.as_str(), job.speak);
             let search_result =
                 execute_search_query(state, request_id, &query, speak_requested, total_started_at)
                     .await?;
+            record_repl_event(
+                state,
+                ReplEvent::RunCompleted { run_id: request_id },
+                Some(request_id),
+            )
+            .await;
 
             Ok(JobResult::BrowserQuery {
                 request_id,
@@ -269,66 +376,177 @@ async fn process_repl_command(state: &AppState, job: ReplCommandJob) -> Result<J
         }
         ReplCommand::VoiceTurn {
             transcript_override: Some(transcript),
-        } => match resolve_voice_turn_intent(&transcript) {
-            Some(VoiceTurnIntent::OpenApplication {
-                transcript,
-                app_name,
-            }) => {
-                process_open_application(
-                    state,
-                    ApplicationLaunchJob {
-                        request_id,
-                        transcript: Some(transcript),
-                        app_name,
-                        speak: job.speak,
-                    },
-                )
-                .await
-            }
-            Some(VoiceTurnIntent::OpenWebsite {
-                transcript,
-                label,
-                url,
-            }) => {
-                process_open_url(
-                    state,
-                    UrlOpenJob {
-                        request_id,
-                        transcript: Some(transcript),
-                        label,
-                        url,
-                        speak: job.speak,
-                    },
-                )
-                .await
-            }
-            Some(VoiceTurnIntent::SearchWeb { transcript, query }) => {
-                let query = sanitize_output(&Action::SearchWeb, &query);
-                if query.trim().is_empty() {
-                    return Ok(JobResult::Error {
+        } => {
+            record_repl_event(
+                state,
+                ReplEvent::VoiceTranscriptFinal {
+                    text: transcript.clone(),
+                },
+                Some(request_id),
+            )
+            .await;
+
+            match resolve_voice_turn_intent(&transcript) {
+                Some(VoiceTurnIntent::OpenApplication {
+                    transcript,
+                    app_name,
+                }) => {
+                    record_repl_event(
+                        state,
+                        ReplEvent::IntentDetected {
+                            intent: ReplIntent::OpenApplication,
+                            confidence: 0.9,
+                        },
+                        Some(request_id),
+                    )
+                    .await;
+                    record_repl_event(
+                        state,
+                        ReplEvent::ToolStarted {
+                            name: "open_application".to_string(),
+                        },
+                        Some(request_id),
+                    )
+                    .await;
+
+                    let result = process_open_application(
+                        state,
+                        ApplicationLaunchJob {
+                            request_id,
+                            transcript: Some(transcript),
+                            app_name,
+                            speak: job.speak,
+                        },
+                    )
+                    .await;
+
+                    record_repl_event(
+                        state,
+                        ReplEvent::ToolCompleted {
+                            name: "open_application".to_string(),
+                            status: tool_status_for_result(&result),
+                        },
+                        Some(request_id),
+                    )
+                    .await;
+                    result
+                }
+                Some(VoiceTurnIntent::OpenWebsite {
+                    transcript,
+                    label,
+                    url,
+                }) => {
+                    record_repl_event(
+                        state,
+                        ReplEvent::IntentDetected {
+                            intent: ReplIntent::OpenWebsite,
+                            confidence: 0.9,
+                        },
+                        Some(request_id),
+                    )
+                    .await;
+                    record_repl_event(
+                        state,
+                        ReplEvent::ToolStarted {
+                            name: "open_url".to_string(),
+                        },
+                        Some(request_id),
+                    )
+                    .await;
+
+                    let result = process_open_url(
+                        state,
+                        UrlOpenJob {
+                            request_id,
+                            transcript: Some(transcript),
+                            label,
+                            url,
+                            speak: job.speak,
+                        },
+                    )
+                    .await;
+
+                    record_repl_event(
+                        state,
+                        ReplEvent::ToolCompleted {
+                            name: "open_url".to_string(),
+                            status: tool_status_for_result(&result),
+                        },
+                        Some(request_id),
+                    )
+                    .await;
+                    result
+                }
+                Some(VoiceTurnIntent::SearchWeb { transcript, query }) => {
+                    let query = sanitize_output(&Action::SearchWeb, &query);
+                    if query.trim().is_empty() {
+                        record_repl_event(
+                            state,
+                            ReplEvent::Error {
+                                code: "empty_voice_transcript".to_string(),
+                                message: "Transcript de voz vazio.".to_string(),
+                            },
+                            Some(request_id),
+                        )
+                        .await;
+                        return Ok(JobResult::Error {
+                            request_id,
+                            code: "empty_voice_transcript".to_string(),
+                            message: "Transcript de voz vazio.".to_string(),
+                        });
+                    }
+
+                    record_repl_event(
+                        state,
+                        ReplEvent::RunStarted { run_id: request_id },
+                        Some(request_id),
+                    )
+                    .await;
+                    record_repl_event(
+                        state,
+                        ReplEvent::IntentDetected {
+                            intent: ReplIntent::SearchDocs,
+                            confidence: 0.72,
+                        },
+                        Some(request_id),
+                    )
+                    .await;
+                    let result = process_voice_search(
+                        state,
+                        VoiceSearchJob {
+                            request_id,
+                            transcript,
+                            query,
+                            speak: job.speak,
+                        },
+                    )
+                    .await;
+                    record_repl_event(
+                        state,
+                        ReplEvent::RunCompleted { run_id: request_id },
+                        Some(request_id),
+                    )
+                    .await;
+                    result
+                }
+                None => {
+                    record_repl_event(
+                        state,
+                        ReplEvent::Error {
+                            code: "empty_voice_transcript".to_string(),
+                            message: "Transcript de voz vazio.".to_string(),
+                        },
+                        Some(request_id),
+                    )
+                    .await;
+                    Ok(JobResult::Error {
                         request_id,
                         code: "empty_voice_transcript".to_string(),
                         message: "Transcript de voz vazio.".to_string(),
-                    });
+                    })
                 }
-
-                process_voice_search(
-                    state,
-                    VoiceSearchJob {
-                        request_id,
-                        transcript,
-                        query,
-                        speak: job.speak,
-                    },
-                )
-                .await
             }
-            None => Ok(JobResult::Error {
-                request_id,
-                code: "empty_voice_transcript".to_string(),
-                message: "Transcript de voz vazio.".to_string(),
-            }),
-        },
+        }
         ReplCommand::VoiceTurn {
             transcript_override: None,
         } => {
@@ -338,6 +556,17 @@ async fn process_repl_command(state: &AppState, job: ReplCommandJob) -> Result<J
                     "daemon received a voice turn without transcript; the CLI should capture ASR before sending"
                 );
             }
+            record_repl_event(
+                state,
+                ReplEvent::Error {
+                    code: "missing_voice_transcript".to_string(),
+                    message:
+                        "Coddy não recebeu transcript de voz. Capture/transcreva no cliente antes de enviar."
+                            .to_string(),
+                },
+                Some(request_id),
+            )
+            .await;
             Ok(JobResult::Error {
                 request_id,
                 code: "missing_voice_transcript".to_string(),
@@ -370,6 +599,14 @@ fn validate_browser_url(url: &str) -> Result<()> {
         anyhow::bail!("refusing to open non-http URL");
     }
     Ok(())
+}
+
+fn tool_status_for_result(result: &Result<JobResult>) -> ToolStatus {
+    if result.is_ok() {
+        ToolStatus::Succeeded
+    } else {
+        ToolStatus::Failed
+    }
 }
 
 async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
@@ -692,6 +929,16 @@ async fn execute_search_query(
     let mut ai_overview_chars = 0_usize;
     let mut search_blocked = false;
 
+    record_repl_event(
+        state,
+        ReplEvent::SearchStarted {
+            query: query.to_string(),
+            provider: "google".to_string(),
+        },
+        Some(request_id),
+    )
+    .await;
+
     if let Some(search) = &state.search {
         let search_started_at = Instant::now();
         match search.search(query).await {
@@ -731,6 +978,21 @@ async fn execute_search_query(
             }
         }
     }
+
+    record_repl_event(
+        state,
+        ReplEvent::SearchContextExtracted {
+            provider: if state.search.is_some() {
+                "google".to_string()
+            } else {
+                "disabled".to_string()
+            },
+            organic_results: search_result_count,
+            ai_overview_present: ai_overview_chars > 0,
+        },
+        Some(request_id),
+    )
+    .await;
 
     if search_summary.is_none() {
         search_summary = Some(search_browser_fallback_summary(query, search_blocked));
@@ -1133,6 +1395,13 @@ fn elapsed_ms(started_at: Instant) -> u64 {
     started_at.elapsed().as_millis() as u64
 }
 
+fn unix_ms_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1148,6 +1417,45 @@ mod tests {
         assert!(validate_browser_url("http://example.com").is_ok());
         assert!(validate_browser_url("file:///etc/passwd").is_err());
         assert!(validate_browser_url("https://example.com/a b").is_err());
+    }
+
+    #[test]
+    fn repl_runtime_snapshot_records_reduced_events() {
+        let config = AppConfig::default();
+        let mut runtime = ReplRuntimeState::new(&config);
+        let run_id = uuid::Uuid::new_v4();
+
+        runtime.record(ReplEvent::RunStarted { run_id }, Some(run_id));
+        runtime.record(
+            ReplEvent::SearchStarted {
+                query: "Quem foi Rousseau?".to_string(),
+                provider: "google".to_string(),
+            },
+            Some(run_id),
+        );
+        runtime.record(ReplEvent::RunCompleted { run_id }, Some(run_id));
+
+        let snapshot = runtime.snapshot();
+
+        assert_eq!(snapshot.last_sequence, 4);
+        assert_eq!(snapshot.session.active_run, None);
+        assert_eq!(
+            snapshot.session.status,
+            visionclip_common::SessionStatus::Idle
+        );
+    }
+
+    #[test]
+    fn tool_status_maps_result_state() {
+        let ok: Result<JobResult> = Ok(JobResult::ActionStatus {
+            request_id: uuid::Uuid::new_v4(),
+            message: "ok".to_string(),
+            spoken: false,
+        });
+        let error: Result<JobResult> = Err(anyhow::anyhow!("boom"));
+
+        assert_eq!(tool_status_for_result(&ok), ToolStatus::Succeeded);
+        assert_eq!(tool_status_for_result(&error), ToolStatus::Failed);
     }
 
     #[tokio::test]
