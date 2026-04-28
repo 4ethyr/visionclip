@@ -18,12 +18,14 @@ interface SimDaemon {
   currentSequence: number
   events: ReplEventEnvelope[]
   snapshotSession: ReplSessionSnapshotSession
+  commands: string[]
 }
 
 function createSimDaemon(): SimDaemon {
   return {
     currentSequence: 0,
     events: [],
+    commands: [],
     snapshotSession: {
       id: 'sim-session-uuid',
       mode: 'FloatingTerminal',
@@ -128,6 +130,14 @@ function createSimBridge(daemon: SimDaemon) {
           return Promise.resolve({
             text: 'comando de voz simulado',
           })
+
+        case 'repl:stop-speaking':
+          daemon.commands.push('stop-speaking')
+          return Promise.resolve({ ok: true })
+
+        case 'repl:stop-active-run':
+          daemon.commands.push('stop-active-run')
+          return Promise.resolve({ ok: true })
 
         default:
           return Promise.reject(new Error(`Unknown channel: ${channel}`))
@@ -257,7 +267,7 @@ function createSimClient(sim: ReturnType<typeof createSimBridge>): ReplIpcClient
     },
 
     async stopActiveRun() {
-      await sim.invoke('repl:stop-speaking')
+      await sim.invoke('repl:stop-active-run')
     },
 
     async stopSpeaking() {
@@ -325,6 +335,20 @@ describe('IPC integration', () => {
     it('captures and returns transcript', async () => {
       const result = await client.captureVoice()
       expect(result.text).toBe('comando de voz simulado')
+    })
+  })
+
+  describe('stop commands', () => {
+    it('routes stopSpeaking to the speech cancellation channel', async () => {
+      await client.stopSpeaking()
+
+      expect(daemon.commands).toEqual(['stop-speaking'])
+    })
+
+    it('routes stopActiveRun to the run cancellation channel', async () => {
+      await client.stopActiveRun()
+
+      expect(daemon.commands).toEqual(['stop-active-run'])
     })
   })
 
