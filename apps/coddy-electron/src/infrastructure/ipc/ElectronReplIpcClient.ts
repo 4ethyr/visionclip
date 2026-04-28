@@ -6,9 +6,11 @@ import type { ReplIpcClient, ReplCommandResult, ReplEventsBatch } from '@/domain
 import type {
   ModelRef,
   ModelRole,
+  AssessmentPolicy,
   ReplEventEnvelope,
   ReplMode,
   ReplSessionSnapshot,
+  ScreenAssistMode,
 } from '@/domain'
 
 // ---------------------------------------------------------------------------
@@ -190,6 +192,23 @@ export class ElectronReplIpcClient implements ReplIpcClient {
     return (await window.replApi.invoke(
       'repl:open-ui',
       mode,
+    )) as ReplCommandResult
+  }
+
+  async captureAndExplain(
+    mode: ScreenAssistMode,
+    policy: AssessmentPolicy,
+  ): Promise<ReplCommandResult> {
+    return (await window.replApi.invoke(
+      'repl:capture-and-explain',
+      mode,
+      policy,
+    )) as ReplCommandResult
+  }
+
+  async dismissConfirmation(): Promise<ReplCommandResult> {
+    return (await window.replApi.invoke(
+      'repl:dismiss-confirmation',
     )) as ReplCommandResult
   }
 

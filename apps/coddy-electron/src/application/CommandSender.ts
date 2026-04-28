@@ -4,9 +4,11 @@
 import type {
   ModelRef,
   ModelRole,
+  AssessmentPolicy,
   ReplIpcClient,
   ReplCommandResult,
   ReplMode,
+  ScreenAssistMode,
 } from '@/domain'
 
 /**
@@ -64,4 +66,35 @@ export async function openUi(
   mode: ReplMode,
 ): Promise<ReplCommandResult> {
   return client.openUi(mode)
+}
+
+/**
+ * Captures voice through the platform-specific backend. In Electron this
+ * already sends the transcribed VoiceTurn to the daemon, so callers must not
+ * feed the returned text back into ask().
+ */
+export async function captureVoice(
+  client: ReplIpcClient,
+): Promise<ReplCommandResult> {
+  return client.captureVoice()
+}
+
+/**
+ * Requests a policy-aware screen assistance flow.
+ */
+export async function captureAndExplain(
+  client: ReplIpcClient,
+  mode: ScreenAssistMode,
+  policy: AssessmentPolicy,
+): Promise<ReplCommandResult> {
+  return client.captureAndExplain(mode, policy)
+}
+
+/**
+ * Dismisses a pending policy confirmation without routing text to the LLM.
+ */
+export async function dismissConfirmation(
+  client: ReplIpcClient,
+): Promise<ReplCommandResult> {
+  return client.dismissConfirmation()
 }

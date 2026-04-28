@@ -14,6 +14,25 @@ type ModelRef = {
 
 type ModelRole = 'Chat' | 'Ocr' | 'Asr' | 'Tts' | 'Embedding'
 type ReplMode = 'FloatingTerminal' | 'DesktopApp'
+type ScreenAssistMode =
+  | 'ExplainVisibleScreen'
+  | 'ExplainCode'
+  | 'DebugError'
+  | 'MultipleChoice'
+  | 'SummarizeDocument'
+type AssessmentPolicy =
+  | 'Practice'
+  | 'PermittedAi'
+  | 'SyntaxOnly'
+  | 'RestrictedAssessment'
+  | 'UnknownAssessment'
+
+type ReplCommandResult = {
+  text?: string
+  summary?: string
+  message?: string
+  error?: { code: string; message: string }
+}
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -34,11 +53,16 @@ function coddySpawn(args: string[]): ChildProcess {
 async function readJson(child: ChildProcess): Promise<unknown> {
   return new Promise((resolve, reject) => {
     let stdout = ''
+    let stderr = ''
     child.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
+    child.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
 
     child.on('close', (code) => {
       if (code !== 0) {
-        reject(new Error(`coddy exited ${code}`))
+        const detail = stderr.trim()
+        reject(new Error(
+          detail ? `coddy exited ${code}: ${detail}` : `coddy exited ${code}`,
+        ))
         return
       }
       try {
@@ -80,6 +104,16 @@ export function registerIpcHandlers(): void {
     BrowserWindow.fromWebContents(event.sender)?.minimize()
   })
 
+  ipcMain.handle('window:maximize', (event) => {
+    const targetWindow = BrowserWindow.fromWebContents(event.sender)
+    if (!targetWindow) return
+    if (targetWindow.isMaximized()) {
+      targetWindow.unmaximize()
+      return
+    }
+    targetWindow.maximize()
+  })
+
   // ---- Snapshot ----
   ipcMain.handle('repl:snapshot', async () => {
     return readJson(coddySpawn(['session', 'snapshot']))
@@ -111,9 +145,7 @@ export function registerIpcHandlers(): void {
 
   // ---- Commands ----
   ipcMain.handle('repl:ask', async (_event, text: string) => {
-    const child = coddySpawn(['ask', text])
-    const raw = await readJson(child)
-    return normalizeCommandResult(raw)
+    return runCoddyCommand(['ask', text])
   })
 
   // ---- Voice: capture + transcribe via coddy CLI ----
@@ -128,9 +160,7 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle('repl:voice-turn', async (_event, transcript: string) => {
-    const child = coddySpawn(['voice', '--transcript', transcript])
-    const raw = await readJson(child)
-    return normalizeCommandResult(raw)
+    return runCoddyCommand(['voice', '--transcript', transcript])
   })
 
   ipcMain.handle('repl:stop-speaking', async () => {
@@ -158,15 +188,31 @@ export function registerIpcHandlers(): void {
         '--role',
         toCliModelRole(role),
       ])
-      const raw = await readJson(child)
-      return normalizeCommandResult(raw)
+      return runCoddyCommandFromChild(child)
     },
   )
 
   ipcMain.handle('repl:open-ui', async (_event, mode: ReplMode) => {
-    const child = coddySpawn(['ui', 'open', '--mode', toCliReplMode(mode)])
-    const raw = await readJson(child)
-    return normalizeCommandResult(raw)
+    return runCoddyCommand(['ui', 'open', '--mode', toCliReplMode(mode)])
+  })
+
+  ipcMain.handle(
+    'repl:capture-and-explain',
+    async (_event, mode: ScreenAssistMode, policy: AssessmentPolicy) => {
+      const child = coddySpawn([
+        'screen',
+        'explain',
+        '--mode',
+        toCliScreenAssistMode(mode),
+        '--policy',
+        toCliAssessmentPolicy(policy),
+      ])
+      return runCoddyCommandFromChild(child)
+    },
+  )
+
+  ipcMain.handle('repl:dismiss-confirmation', async () => {
+    return runCoddyCommand(['screen', 'dismiss-confirmation'])
   })
 }
 
@@ -209,12 +255,7 @@ async function pumpWatchStream(streamId: string, child: ChildProcess): Promise<v
   }
 }
 
-function normalizeCommandResult(raw: unknown): {
-  text?: string
-  summary?: string
-  message?: string
-  error?: { code: string; message: string }
-} {
+function normalizeCommandResult(raw: unknown): ReplCommandResult {
   if (typeof raw === 'string') return { text: raw }
   if (raw && typeof raw === 'object') {
     const obj = raw as Record<string, unknown>
@@ -227,6 +268,24 @@ function normalizeCommandResult(raw: unknown): {
     return { text: JSON.stringify(raw) }
   }
   return { text: String(raw) }
+}
+
+async function runCoddyCommand(args: string[]): Promise<ReplCommandResult> {
+  return runCoddyCommandFromChild(coddySpawn(args))
+}
+
+async function runCoddyCommandFromChild(child: ChildProcess): Promise<ReplCommandResult> {
+  try {
+    const raw = await readJson(child)
+    return normalizeCommandResult(raw)
+  } catch (err) {
+    return {
+      error: {
+        code: 'CODDY_COMMAND_FAILED',
+        message: err instanceof Error ? err.message : String(err),
+      },
+    }
+  }
 }
 
 function toCliModelRole(role: ModelRole): string {
@@ -250,5 +309,35 @@ function toCliReplMode(mode: ReplMode): string {
       return 'floating-terminal'
     case 'DesktopApp':
       return 'desktop-app'
+  }
+}
+
+function toCliScreenAssistMode(mode: ScreenAssistMode): string {
+  switch (mode) {
+    case 'ExplainVisibleScreen':
+      return 'explain-visible-screen'
+    case 'ExplainCode':
+      return 'explain-code'
+    case 'DebugError':
+      return 'debug-error'
+    case 'MultipleChoice':
+      return 'multiple-choice'
+    case 'SummarizeDocument':
+      return 'summarize-document'
+  }
+}
+
+function toCliAssessmentPolicy(policy: AssessmentPolicy): string {
+  switch (policy) {
+    case 'Practice':
+      return 'practice'
+    case 'PermittedAi':
+      return 'permitted-ai'
+    case 'SyntaxOnly':
+      return 'syntax-only'
+    case 'RestrictedAssessment':
+      return 'restricted-assessment'
+    case 'UnknownAssessment':
+      return 'unknown-assessment'
   }
 }

@@ -314,6 +314,27 @@ describe('sessionReducer', () => {
 
       expect(result.policy).toBe('SyntaxOnly')
     })
+
+    it('waits for confirmation when assessment policy is unknown', () => {
+      const session = testSession({ status: 'Thinking' })
+      const event: ReplEvent = {
+        PolicyEvaluated: { policy: 'UnknownAssessment', allowed: false },
+      }
+
+      const result = sessionReducer(session, event)
+
+      expect(result.policy).toBe('UnknownAssessment')
+      expect(result.status).toBe('AwaitingConfirmation')
+    })
+
+    it('returns to Idle when confirmation is dismissed', () => {
+      const session = testSession({ status: 'AwaitingConfirmation' })
+      const event: ReplEvent = { ConfirmationDismissed: {} }
+
+      const result = sessionReducer(session, event)
+
+      expect(result.status).toBe('Idle')
+    })
   })
 
   describe('ModelSelected', () => {

@@ -50,6 +50,8 @@ describe('EventStreamer', () => {
       stopSpeaking: vi.fn(),
       selectModel: vi.fn(),
       openUi: vi.fn(),
+      captureAndExplain: vi.fn(),
+      dismissConfirmation: vi.fn(),
       captureVoice: vi.fn(),
     }
 
@@ -99,6 +101,8 @@ describe('EventStreamer', () => {
       stopSpeaking: vi.fn(),
       selectModel: vi.fn(),
       openUi: vi.fn(),
+      captureAndExplain: vi.fn(),
+      dismissConfirmation: vi.fn(),
       captureVoice: vi.fn(),
     }
 

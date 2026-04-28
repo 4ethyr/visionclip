@@ -52,6 +52,7 @@ export type ReplEvent =
   | { OcrCompleted: { chars: number; language_hint?: string } }
   | { IntentDetected: { intent: ReplIntent; confidence: number } }
   | { PolicyEvaluated: { policy: string; allowed: boolean } }
+  | { ConfirmationDismissed: Record<string, never> }
   | { ModelSelected: { model: ModelRef; role: ModelRole } }
   | { SearchStarted: { query: string; provider: string } }
   | { SearchContextExtracted: { provider: string; organic_results: number; ai_overview_present: boolean } }

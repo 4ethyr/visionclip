@@ -39,7 +39,7 @@ export function StatusIndicator({ status }: Props) {
 
   return (
     <span
-      className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium border ${color}`}
+      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 font-mono text-xs ${color}`}
     >
       {status !== 'Idle' && status !== 'Error' && (
         <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />

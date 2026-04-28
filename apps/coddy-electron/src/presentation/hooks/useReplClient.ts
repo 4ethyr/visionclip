@@ -23,6 +23,8 @@ function createClient(): ReplIpcClient {
     stopSpeaking: () => Promise.resolve(),
     selectModel: () => Promise.resolve({}),
     openUi: () => Promise.resolve({}),
+    captureAndExplain: () => Promise.resolve({}),
+    dismissConfirmation: () => Promise.resolve({}),
     captureVoice: () => Promise.resolve({}),
   }
 }

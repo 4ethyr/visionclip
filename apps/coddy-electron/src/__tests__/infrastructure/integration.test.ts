@@ -10,11 +10,13 @@ import type { ReplIpcClient, ReplCommandResult } from '@/domain'
 import type {
   ModelRef,
   ModelRole,
+  AssessmentPolicy,
   ReplEvent,
   ReplEventEnvelope,
   ReplMode,
   ReplSessionSnapshot,
   ReplSessionSnapshotSession,
+  ScreenAssistMode,
 } from '@/domain'
 
 // ---------------------------------------------------------------------------
@@ -176,6 +178,47 @@ function createSimBridge(daemon: SimDaemon) {
           })
         }
 
+        case 'repl:capture-and-explain': {
+          const mode = args[0] as ScreenAssistMode
+          const policy = args[1] as AssessmentPolicy
+          const allowed = !(
+            policy === 'UnknownAssessment'
+            || (policy === 'RestrictedAssessment' && mode === 'MultipleChoice')
+          )
+          daemon.commands.push(`capture-and-explain:${mode}:${policy}`)
+          pushEvent(daemon, watchListeners, {
+            PolicyEvaluated: {
+              policy,
+              allowed,
+            },
+          })
+          if (policy === 'UnknownAssessment') {
+            daemon.snapshotSession.status = 'AwaitingConfirmation'
+          }
+          if (!allowed && policy === 'RestrictedAssessment') {
+            return Promise.resolve({
+              error: {
+                code: 'assessment_policy_blocked',
+                message:
+                  'restricted assessments must not receive final answers or complete code',
+              },
+            })
+          }
+          return Promise.resolve({
+            text: 'CaptureAndExplain solicitado.',
+          })
+        }
+
+        case 'repl:dismiss-confirmation':
+          daemon.commands.push('dismiss-confirmation')
+          daemon.snapshotSession.status = 'Idle'
+          pushEvent(daemon, watchListeners, {
+            ConfirmationDismissed: {},
+          })
+          return Promise.resolve({
+            text: 'Confirmação dispensada.',
+          })
+
         default:
           return Promise.reject(new Error(`Unknown channel: ${channel}`))
       }
@@ -323,6 +366,23 @@ function createSimClient(sim: ReturnType<typeof createSimBridge>): ReplIpcClient
       return (await sim.invoke('repl:open-ui', mode)) as ReplCommandResult
     },
 
+    async captureAndExplain(
+      mode: ScreenAssistMode,
+      policy: AssessmentPolicy,
+    ) {
+      return (await sim.invoke(
+        'repl:capture-and-explain',
+        mode,
+        policy,
+      )) as ReplCommandResult
+    },
+
+    async dismissConfirmation() {
+      return (await sim.invoke(
+        'repl:dismiss-confirmation',
+      )) as ReplCommandResult
+    },
+
     async captureVoice() {
       return (await sim.invoke('voice:capture')) as ReplCommandResult
     },
@@ -427,6 +487,66 @@ describe('IPC integration', () => {
       expect(daemon.commands).toEqual(['open-ui:DesktopApp'])
       expect(daemon.events.at(-1)?.event).toEqual({
         OverlayShown: { mode: 'DesktopApp' },
+      })
+    })
+
+    it('routes screen assist through policy evaluation events', async () => {
+      const result = await client.captureAndExplain(
+        'ExplainVisibleScreen',
+        'UnknownAssessment',
+      )
+
+      expect(result.text).toContain('CaptureAndExplain')
+      expect(daemon.commands).toEqual([
+        'capture-and-explain:ExplainVisibleScreen:UnknownAssessment',
+      ])
+      expect(daemon.events.at(-1)?.event).toEqual({
+        PolicyEvaluated: {
+          policy: 'UnknownAssessment',
+          allowed: false,
+        },
+      })
+    })
+
+    it('dismisses a pending confirmation through a structured event', async () => {
+      await client.captureAndExplain(
+        'ExplainVisibleScreen',
+        'UnknownAssessment',
+      )
+
+      const result = await client.dismissConfirmation()
+      const snapshot = await client.getSnapshot()
+
+      expect(result.text).toContain('dispensada')
+      expect(snapshot.session.status).toBe('Idle')
+      expect(daemon.commands).toEqual([
+        'capture-and-explain:ExplainVisibleScreen:UnknownAssessment',
+        'dismiss-confirmation',
+      ])
+      expect(daemon.events.at(-1)?.event).toEqual({
+        ConfirmationDismissed: {},
+      })
+    })
+
+    it('returns structured policy errors instead of throwing for blocked screen assist', async () => {
+      const result = await client.captureAndExplain(
+        'MultipleChoice',
+        'RestrictedAssessment',
+      )
+
+      expect(result.error).toEqual({
+        code: 'assessment_policy_blocked',
+        message:
+          'restricted assessments must not receive final answers or complete code',
+      })
+      expect(daemon.commands).toEqual([
+        'capture-and-explain:MultipleChoice:RestrictedAssessment',
+      ])
+      expect(daemon.events.at(-1)?.event).toEqual({
+        PolicyEvaluated: {
+          policy: 'RestrictedAssessment',
+          allowed: false,
+        },
       })
     })
   })

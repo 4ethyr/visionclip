@@ -106,6 +106,8 @@ describe('ElectronReplIpcClient', () => {
       'Chat',
     )
     await client.openUi('DesktopApp')
+    await client.captureAndExplain('MultipleChoice', 'RestrictedAssessment')
+    await client.dismissConfirmation()
 
     expect(invoke).toHaveBeenCalledWith(
       'repl:select-model',
@@ -113,5 +115,11 @@ describe('ElectronReplIpcClient', () => {
       'Chat',
     )
     expect(invoke).toHaveBeenCalledWith('repl:open-ui', 'DesktopApp')
+    expect(invoke).toHaveBeenCalledWith(
+      'repl:capture-and-explain',
+      'MultipleChoice',
+      'RestrictedAssessment',
+    )
+    expect(invoke).toHaveBeenCalledWith('repl:dismiss-confirmation')
   })
 })

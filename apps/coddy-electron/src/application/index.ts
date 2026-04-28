@@ -13,7 +13,15 @@ export {
   cancelSpeech,
   selectModel,
   openUi,
+  captureVoice,
+  captureAndExplain,
+  dismissConfirmation,
 } from './CommandSender'
 
-export { loadSettings, saveSettings } from './SettingsStore'
-export type { UserSettings } from './SettingsStore'
+export {
+  DEFAULT_FLOATING_APPEARANCE,
+  loadSettings,
+  normalizeFloatingAppearance,
+  saveSettings,
+} from './SettingsStore'
+export type { FloatingAppearanceSettings, UserSettings } from './SettingsStore'

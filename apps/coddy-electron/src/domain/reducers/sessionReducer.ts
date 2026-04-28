@@ -80,10 +80,21 @@ export function sessionReducer(session: ReplSession, event: ReplEvent): ReplSess
     }
 
     case 'PolicyEvaluated': {
-      const { policy } = (event as { PolicyEvaluated: { policy: string; allowed: boolean } })
+      const { policy, allowed } = (event as { PolicyEvaluated: { policy: string; allowed: boolean } })
         .PolicyEvaluated
-      return { ...session, policy: policy as ReplSession['policy'] }
+      return {
+        ...session,
+        policy: policy as ReplSession['policy'],
+        status: !allowed && policy === 'UnknownAssessment'
+          ? 'AwaitingConfirmation'
+          : session.status,
+      }
     }
+
+    case 'ConfirmationDismissed':
+      return session.status === 'AwaitingConfirmation'
+        ? { ...session, status: 'Idle' }
+        : session
 
     case 'ModelSelected': {
       const { model, role } = (event as { ModelSelected: {

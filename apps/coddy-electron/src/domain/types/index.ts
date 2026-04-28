@@ -29,6 +29,7 @@ export { createInitialSession } from './session'
 export type {
   AssessmentPolicy,
   RequestedHelp,
+  ScreenAssistMode,
   AssistanceFallback,
   AssistanceDecision,
 } from './policy'

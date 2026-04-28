@@ -34,6 +34,7 @@ module.exports = {
         'on-error-container': '#ffdad6',
       },
       fontFamily: {
+        display: ['Space Grotesk', 'Orbitron', 'JetBrains Mono', 'sans-serif'],
         mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
         sans: ['Inter', 'Manrope', 'sans-serif'],
       },

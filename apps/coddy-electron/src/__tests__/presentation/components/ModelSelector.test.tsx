@@ -9,7 +9,10 @@ describe('ModelSelector', () => {
       <ModelSelector model={{ provider: 'ollama', name: 'gemma4-E2B' }} />,
     )
 
-    expect(screen.getAllByText('ollama/gemma4-E2B')).toHaveLength(2)
+    expect(screen.getByText('MODEL: gemma4-E2B')).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Active model ollama/gemma4-E2B' }),
+    ).toBeInTheDocument()
   })
 
   it('emits the selected model from the dropdown', async () => {
@@ -22,7 +25,7 @@ describe('ModelSelector', () => {
     )
 
     await userEvent.click(
-      screen.getByRole('button', { name: 'ollama/qwen2.5:0.5b' }),
+      screen.getByRole('button', { name: /qwen2.5:0.5b/ }),
     )
 
     expect(onSelect).toHaveBeenCalledWith({

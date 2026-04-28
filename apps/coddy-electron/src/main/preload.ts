@@ -15,10 +15,13 @@ const replApi = {
       'repl:stop-active-run',
       'repl:select-model',
       'repl:open-ui',
+      'repl:capture-and-explain',
+      'repl:dismiss-confirmation',
       'repl:watch-start',
       'repl:watch-close',
       'window:close',
       'window:minimize',
+      'window:maximize',
       'voice:capture',
     ]
     if (validChannels.includes(channel)) {
