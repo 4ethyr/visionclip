@@ -7,6 +7,14 @@ import { ipcMain, BrowserWindow } from 'electron'
 
 const CODDY_BIN = process.env.CODDY_BIN || 'coddy'
 
+type ModelRef = {
+  provider: string
+  name: string
+}
+
+type ModelRole = 'Chat' | 'Ocr' | 'Asr' | 'Tts' | 'Embedding'
+type ReplMode = 'FloatingTerminal' | 'DesktopApp'
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -136,6 +144,30 @@ export function registerIpcHandlers(): void {
     await readJson(child)
     return { ok: true }
   })
+
+  ipcMain.handle(
+    'repl:select-model',
+    async (_event, model: ModelRef, role: ModelRole) => {
+      const child = coddySpawn([
+        'model',
+        'select',
+        '--provider',
+        model.provider,
+        '--name',
+        model.name,
+        '--role',
+        toCliModelRole(role),
+      ])
+      const raw = await readJson(child)
+      return normalizeCommandResult(raw)
+    },
+  )
+
+  ipcMain.handle('repl:open-ui', async (_event, mode: ReplMode) => {
+    const child = coddySpawn(['ui', 'open', '--mode', toCliReplMode(mode)])
+    const raw = await readJson(child)
+    return normalizeCommandResult(raw)
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -195,4 +227,28 @@ function normalizeCommandResult(raw: unknown): {
     return { text: JSON.stringify(raw) }
   }
   return { text: String(raw) }
+}
+
+function toCliModelRole(role: ModelRole): string {
+  switch (role) {
+    case 'Chat':
+      return 'chat'
+    case 'Ocr':
+      return 'ocr'
+    case 'Asr':
+      return 'asr'
+    case 'Tts':
+      return 'tts'
+    case 'Embedding':
+      return 'embedding'
+  }
+}
+
+function toCliReplMode(mode: ReplMode): string {
+  switch (mode) {
+    case 'FloatingTerminal':
+      return 'floating-terminal'
+    case 'DesktopApp':
+      return 'desktop-app'
+  }
 }

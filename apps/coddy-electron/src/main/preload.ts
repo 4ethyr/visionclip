@@ -13,6 +13,8 @@ const replApi = {
       'repl:voice-turn',
       'repl:stop-speaking',
       'repl:stop-active-run',
+      'repl:select-model',
+      'repl:open-ui',
       'repl:watch-start',
       'repl:watch-close',
       'window:close',

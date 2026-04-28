@@ -1,7 +1,13 @@
 // application/CommandSender.ts
 // Use case: sends user commands to the REPL backend.
 
-import type { ReplIpcClient, ReplCommandResult } from '@/domain'
+import type {
+  ModelRef,
+  ModelRole,
+  ReplIpcClient,
+  ReplCommandResult,
+  ReplMode,
+} from '@/domain'
 
 /**
  * Sends a text question to the REPL backend.
@@ -36,4 +42,26 @@ export async function cancelRun(client: ReplIpcClient): Promise<void> {
  */
 export async function cancelSpeech(client: ReplIpcClient): Promise<void> {
   await client.stopSpeaking()
+}
+
+/**
+ * Selects a backend model for the requested REPL role.
+ */
+export async function selectModel(
+  client: ReplIpcClient,
+  model: ModelRef,
+  role: ModelRole,
+): Promise<ReplCommandResult> {
+  return client.selectModel(model, role)
+}
+
+/**
+ * Switches the backend REPL UI mode. The reducer applies the emitted
+ * OverlayShown event so all windows converge on the daemon state.
+ */
+export async function openUi(
+  client: ReplIpcClient,
+  mode: ReplMode,
+): Promise<ReplCommandResult> {
+  return client.openUi(mode)
 }

@@ -7,7 +7,15 @@
 
 import { describe, it, expect, beforeEach } from 'vitest'
 import type { ReplIpcClient, ReplCommandResult } from '@/domain'
-import type { ReplSessionSnapshot, ReplEventEnvelope, ReplEvent, ReplSessionSnapshotSession } from '@/domain'
+import type {
+  ModelRef,
+  ModelRole,
+  ReplEvent,
+  ReplEventEnvelope,
+  ReplMode,
+  ReplSessionSnapshot,
+  ReplSessionSnapshotSession,
+} from '@/domain'
 
 // ---------------------------------------------------------------------------
 // Simulated IPC bridge — mirrors the production ipcBridge.ts handlers
@@ -138,6 +146,35 @@ function createSimBridge(daemon: SimDaemon) {
         case 'repl:stop-active-run':
           daemon.commands.push('stop-active-run')
           return Promise.resolve({ ok: true })
+
+        case 'repl:select-model': {
+          const model = args[0] as ModelRef
+          const role = args[1] as ModelRole
+          daemon.commands.push(
+            `select-model:${role}:${model.provider}/${model.name}`,
+          )
+          pushEvent(daemon, watchListeners, {
+            ModelSelected: { model, role },
+          })
+          if (role === 'Chat') {
+            daemon.snapshotSession.selected_model = model
+          }
+          return Promise.resolve({
+            text: `Modelo ${model.provider}/${model.name} selecionado.`,
+          })
+        }
+
+        case 'repl:open-ui': {
+          const mode = args[0] as ReplMode
+          daemon.commands.push(`open-ui:${mode}`)
+          daemon.snapshotSession.mode = mode
+          pushEvent(daemon, watchListeners, {
+            OverlayShown: { mode },
+          })
+          return Promise.resolve({
+            text: `Modo ${mode} aberto.`,
+          })
+        }
 
         default:
           return Promise.reject(new Error(`Unknown channel: ${channel}`))
@@ -274,6 +311,18 @@ function createSimClient(sim: ReturnType<typeof createSimBridge>): ReplIpcClient
       await sim.invoke('repl:stop-speaking')
     },
 
+    async selectModel(model: ModelRef, role: ModelRole) {
+      return (await sim.invoke(
+        'repl:select-model',
+        model,
+        role,
+      )) as ReplCommandResult
+    },
+
+    async openUi(mode: ReplMode) {
+      return (await sim.invoke('repl:open-ui', mode)) as ReplCommandResult
+    },
+
     async captureVoice() {
       return (await sim.invoke('voice:capture')) as ReplCommandResult
     },
@@ -349,6 +398,36 @@ describe('IPC integration', () => {
       await client.stopActiveRun()
 
       expect(daemon.commands).toEqual(['stop-active-run'])
+    })
+  })
+
+  describe('model and UI commands', () => {
+    it('selects the chat model and emits a ModelSelected event', async () => {
+      const model = { provider: 'ollama', name: 'qwen2.5:0.5b' }
+
+      const result = await client.selectModel(model, 'Chat')
+      const snapshot = await client.getSnapshot()
+
+      expect(result.text).toContain('qwen2.5')
+      expect(snapshot.session.selected_model).toEqual(model)
+      expect(daemon.commands).toEqual([
+        'select-model:Chat:ollama/qwen2.5:0.5b',
+      ])
+      expect(daemon.events.at(-1)?.event).toEqual({
+        ModelSelected: { model, role: 'Chat' },
+      })
+    })
+
+    it('opens desktop UI mode and stores it in the snapshot', async () => {
+      const result = await client.openUi('DesktopApp')
+      const snapshot = await client.getSnapshot()
+
+      expect(result.text).toContain('DesktopApp')
+      expect(snapshot.session.mode).toBe('DesktopApp')
+      expect(daemon.commands).toEqual(['open-ui:DesktopApp'])
+      expect(daemon.events.at(-1)?.event).toEqual({
+        OverlayShown: { mode: 'DesktopApp' },
+      })
     })
   })
 

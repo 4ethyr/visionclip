@@ -13,7 +13,16 @@ import { StreamingText } from '@/presentation/components/StreamingText'
 import { AssessmentConfirmModal } from '@/presentation/components/AssessmentConfirmModal'
 
 export function FloatingTerminal() {
-  const { session, connecting, reconnecting, error, ask, reconnect } =
+  const {
+    session,
+    connecting,
+    reconnecting,
+    error,
+    ask,
+    reconnect,
+    selectModel,
+    openUi,
+  } =
     useSessionContext()
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
@@ -46,7 +55,22 @@ export function FloatingTerminal() {
         </div>
         <div className="flex items-center gap-3">
           <StatusIndicator status={session.status} />
-          <ModelSelector model={session.selected_model} />
+          <ModelSelector
+            model={session.selected_model}
+            onSelect={(model) => {
+              void selectModel(model, 'Chat')
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => {
+              void openUi('DesktopApp')
+            }}
+            className="text-xs text-on-surface-variant hover:text-primary border border-outline-variant hover:border-primary/30 rounded-full px-2.5 py-0.5 transition-colors"
+            title="Open desktop mode"
+          >
+            Desktop
+          </button>
           {/* Window controls */}
           <div className="flex items-center gap-1 ml-2">
             <button

@@ -3,7 +3,7 @@
 // Loads snapshot, starts event stream, exposes state + actions.
 
 import { useState, useEffect, useCallback, useRef } from 'react'
-import type { ReplSession } from '@/domain'
+import type { ModelRef, ModelRole, ReplMode, ReplSession } from '@/domain'
 import type { SessionState } from '@/application'
 import {
   initializeSession,
@@ -12,6 +12,8 @@ import {
   sendAsk,
   cancelRun,
   cancelSpeech,
+  selectModel,
+  openUi,
 } from '@/application'
 import { useReplClient } from './useReplClient'
 
@@ -32,6 +34,12 @@ export interface UseSessionReturn {
 
   /** Stop TTS playback */
   cancelSpeech: () => Promise<void>
+
+  /** Select a model for the requested role */
+  selectModel: (model: ModelRef, role?: ModelRole) => Promise<void>
+
+  /** Switch the REPL UI mode through the daemon */
+  openUi: (mode: ReplMode) => Promise<void>
 
   /** Manually retry connection to the daemon */
   reconnect: () => void
@@ -124,6 +132,28 @@ export function useSession(): UseSessionReturn {
     await cancelSpeech(client)
   }, [client])
 
+  const handleSelectModel = useCallback(
+    async (model: ModelRef, role: ModelRole = 'Chat') => {
+      try {
+        await selectModel(client, model, role)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+      }
+    },
+    [client],
+  )
+
+  const handleOpenUi = useCallback(
+    async (mode: ReplMode) => {
+      try {
+        await openUi(client, mode)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+      }
+    },
+    [client],
+  )
+
   return {
     session: state.session,
     lastSequence: state.lastSequence,
@@ -133,6 +163,8 @@ export function useSession(): UseSessionReturn {
     ask,
     cancelRun: handleCancelRun,
     cancelSpeech: handleCancelSpeech,
+    selectModel: handleSelectModel,
+    openUi: handleOpenUi,
     reconnect: init,
   }
 }

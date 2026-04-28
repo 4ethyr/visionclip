@@ -3,7 +3,13 @@
 
 import './globals' // side-effect: registers Window.replApi type
 import type { ReplIpcClient, ReplCommandResult, ReplEventsBatch } from '@/domain'
-import type { ReplSessionSnapshot, ReplEventEnvelope } from '@/domain'
+import type {
+  ModelRef,
+  ModelRole,
+  ReplEventEnvelope,
+  ReplMode,
+  ReplSessionSnapshot,
+} from '@/domain'
 
 // ---------------------------------------------------------------------------
 // Pull-based watch implementation (wraps push events from main process)
@@ -167,6 +173,24 @@ export class ElectronReplIpcClient implements ReplIpcClient {
 
   async stopSpeaking(): Promise<void> {
     await window.replApi.invoke('repl:stop-speaking')
+  }
+
+  async selectModel(
+    model: ModelRef,
+    role: ModelRole,
+  ): Promise<ReplCommandResult> {
+    return (await window.replApi.invoke(
+      'repl:select-model',
+      model,
+      role,
+    )) as ReplCommandResult
+  }
+
+  async openUi(mode: ReplMode): Promise<ReplCommandResult> {
+    return (await window.replApi.invoke(
+      'repl:open-ui',
+      mode,
+    )) as ReplCommandResult
   }
 
   async captureVoice(): Promise<ReplCommandResult> {

@@ -9,10 +9,10 @@ interface Props {
 }
 
 const SUGGESTED_MODELS: ModelRef[] = [
-  { provider: 'ollama', name: 'gemma4:e2b' },
-  { provider: 'ollama', name: 'llama3.2:3b' },
+  { provider: 'ollama', name: 'gemma4-E2B' },
+  { provider: 'ollama', name: 'qwen2.5:0.5b' },
   { provider: 'ollama', name: 'qwen2.5:7b' },
-  { provider: 'openai', name: 'gpt-4o-mini' },
+  { provider: 'ollama', name: 'llama3.2:3b' },
 ]
 
 export function ModelSelector({ model, onSelect }: Props) {
