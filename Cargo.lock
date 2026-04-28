@@ -290,6 +290,7 @@ dependencies = [
  "anyhow",
  "clap",
  "gtk4",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

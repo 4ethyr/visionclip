@@ -40,6 +40,9 @@ pub enum ReplEvent {
     SessionStarted {
         session_id: Uuid,
     },
+    RunStarted {
+        run_id: Uuid,
+    },
     ShortcutTriggered {
         binding: String,
         source: ShortcutSource,
@@ -85,6 +88,9 @@ pub enum ReplEvent {
     TokenDelta {
         run_id: Uuid,
         text: String,
+    },
+    MessageAppended {
+        message: crate::ReplMessage,
     },
     ToolStarted {
         name: String,

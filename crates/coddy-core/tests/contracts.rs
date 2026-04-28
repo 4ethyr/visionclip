@@ -1,8 +1,9 @@
 use coddy_core::{
     evaluate_assistance, evaluate_shortcut_conflict, AssessmentPolicy, ContextPolicy,
-    ExtractionSource, ReplCommand, ReplEvent, ReplMode, RequestedHelp, ScreenRegion,
-    ScreenRegionKind, SearchProvider, SearchResultContext, ShortcutConflictPolicy,
-    ShortcutDecision, ShortcutSource, SourceQuality,
+    ExtractionSource, ModelRef, ReplCommand, ReplEvent, ReplEventEnvelope, ReplEventLog,
+    ReplMessage, ReplMode, ReplSession, RequestedHelp, ScreenRegion, ScreenRegionKind,
+    SearchProvider, SearchResultContext, ShortcutConflictPolicy, ShortcutDecision, ShortcutSource,
+    SourceQuality,
 };
 use uuid::Uuid;
 
@@ -104,6 +105,56 @@ fn overlay_event_is_serializable_before_asr_events() {
     let encoded = serde_json::to_string(&events).expect("serialize events");
 
     assert!(encoded.find("OverlayShown").unwrap() < encoded.find("VoiceListeningStarted").unwrap());
+}
+
+#[test]
+fn event_envelope_roundtrips_through_json_for_frontend_streaming() {
+    let run_id = Uuid::new_v4();
+    let envelope = ReplEventEnvelope::new(
+        42,
+        Uuid::new_v4(),
+        Some(run_id),
+        1_775_000_000_000,
+        ReplEvent::RunStarted { run_id },
+    );
+
+    let encoded = serde_json::to_string(&envelope).expect("serialize event envelope");
+    let decoded: ReplEventEnvelope =
+        serde_json::from_str(&encoded).expect("deserialize event envelope");
+
+    assert_eq!(decoded, envelope);
+    assert!(encoded.contains("\"sequence\":42"));
+    assert!(encoded.contains("RunStarted"));
+}
+
+#[test]
+fn session_snapshot_replays_message_events_for_frontend_state() {
+    let selected_model = ModelRef {
+        provider: "ollama".to_string(),
+        name: "gemma4-e2b".to_string(),
+    };
+    let session = ReplSession::new(ReplMode::FloatingTerminal, selected_model);
+    let mut log = ReplEventLog::new(session.id);
+    let message = ReplMessage {
+        id: Uuid::new_v4(),
+        role: "user".to_string(),
+        text: "Explique este erro".to_string(),
+    };
+
+    log.append(
+        ReplEvent::MessageAppended {
+            message: message.clone(),
+        },
+        None,
+        1_775_000_000_000,
+    );
+
+    let snapshot = log.snapshot(session);
+    let encoded = serde_json::to_string(&snapshot).expect("serialize snapshot");
+
+    assert_eq!(snapshot.last_sequence, 1);
+    assert_eq!(snapshot.session.messages, vec![message]);
+    assert!(encoded.contains("Explique este erro"));
 }
 
 #[test]

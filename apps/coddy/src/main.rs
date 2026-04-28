@@ -10,7 +10,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 use visionclip_common::{
     read_message, write_message, AppConfig, ContextPolicy, JobResult, ReplCommand, ReplCommandJob,
-    VisionRequest,
+    ReplEventsJob, ReplSessionSnapshotJob, VisionRequest,
 };
 
 #[derive(Debug, Parser)]
@@ -47,6 +47,10 @@ enum Command {
         #[command(subcommand)]
         command: ShortcutCommand,
     },
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
     Doctor {
         #[command(subcommand)]
         command: DoctorCommand,
@@ -65,6 +69,15 @@ enum ShortcutCommand {
 
         #[arg(long, default_value_t = false)]
         dry_run: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SessionCommand {
+    Snapshot,
+    Events {
+        #[arg(long, default_value_t = 0)]
+        after: u64,
     },
 }
 
@@ -141,11 +154,17 @@ async fn main() -> Result<()> {
                     dry_run,
                 },
         }) => run_shortcuts_install(binding, coddy_bin, dry_run),
+        Some(Command::Session {
+            command: SessionCommand::Snapshot,
+        }) => run_session_snapshot(&config).await,
+        Some(Command::Session {
+            command: SessionCommand::Events { after },
+        }) => run_session_events(&config, after).await,
         Some(Command::Doctor {
             command: DoctorCommand::Shortcuts,
         }) => run_shortcuts_doctor(&config).await,
         None => {
-            println!("Use `coddy ask`, `coddy voice`, `coddy shortcuts test` ou `coddy doctor shortcuts`.");
+            println!("Use `coddy ask`, `coddy voice`, `coddy session snapshot`, `coddy shortcuts test` ou `coddy doctor shortcuts`.");
             Ok(())
         }
     }
@@ -203,6 +222,75 @@ async fn run_shortcuts_test(config: &AppConfig) -> Result<()> {
     print_job_result(result)?;
     println!("shortcut_test: ok");
     Ok(())
+}
+
+async fn run_session_snapshot(config: &AppConfig) -> Result<()> {
+    let request_id = Uuid::new_v4();
+    let socket_path = config.socket_path()?;
+    let mut stream = UnixStream::connect(&socket_path).await.with_context(|| {
+        format!(
+            "failed to connect to daemon socket {}",
+            socket_path.display()
+        )
+    })?;
+
+    write_message(
+        &mut stream,
+        &VisionRequest::ReplSessionSnapshot(ReplSessionSnapshotJob { request_id }),
+    )
+    .await?;
+
+    match read_message(&mut stream).await? {
+        JobResult::ReplSessionSnapshot { snapshot, .. } => {
+            println!("{}", serde_json::to_string_pretty(&snapshot)?);
+            Ok(())
+        }
+        JobResult::Error { code, message, .. } => {
+            anyhow::bail!("daemon returned error {code}: {message}")
+        }
+        _ => anyhow::bail!("daemon returned unexpected response for REPL session snapshot"),
+    }
+}
+
+async fn run_session_events(config: &AppConfig, after_sequence: u64) -> Result<()> {
+    let request_id = Uuid::new_v4();
+    let socket_path = config.socket_path()?;
+    let mut stream = UnixStream::connect(&socket_path).await.with_context(|| {
+        format!(
+            "failed to connect to daemon socket {}",
+            socket_path.display()
+        )
+    })?;
+
+    write_message(
+        &mut stream,
+        &VisionRequest::ReplEvents(ReplEventsJob {
+            request_id,
+            after_sequence,
+        }),
+    )
+    .await?;
+
+    match read_message(&mut stream).await? {
+        JobResult::ReplEvents {
+            events,
+            last_sequence,
+            ..
+        } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "last_sequence": last_sequence,
+                    "events": events,
+                }))?
+            );
+            Ok(())
+        }
+        JobResult::Error { code, message, .. } => {
+            anyhow::bail!("daemon returned error {code}: {message}")
+        }
+        _ => anyhow::bail!("daemon returned unexpected response for REPL session events"),
+    }
 }
 
 fn acquire_voice_shortcut_lock(config: &AppConfig) -> Result<shortcut::VoiceShortcutLock> {
@@ -300,6 +388,24 @@ fn print_job_result(result: JobResult) -> Result<()> {
         }
         JobResult::Error { code, message, .. } => {
             anyhow::bail!("daemon returned error {code}: {message}")
+        }
+        JobResult::ReplSessionSnapshot { snapshot, .. } => {
+            println!("{}", serde_json::to_string_pretty(&snapshot)?);
+            Ok(())
+        }
+        JobResult::ReplEvents {
+            events,
+            last_sequence,
+            ..
+        } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "last_sequence": last_sequence,
+                    "events": events,
+                }))?
+            );
+            Ok(())
         }
     }
 }
