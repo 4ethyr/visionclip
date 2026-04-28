@@ -34,6 +34,8 @@ O foco é auxiliar dúvidas técnicas, estudo, depuração, explicação de cód
 ## Documentos
 
 - [Arquitetura](architecture.md): módulos Rust/TypeScript, IPC, eventos, estados do REPL, integração com daemon, voz, imagem e modelos locais.
+- [Contratos do Backend](backend-contracts.md): implementação atual do backend Coddy, comandos CLI, IPC, snapshots, eventos incrementais e integração prevista com o frontend.
+- [OpenAPI/Swagger](openapi/README.md): especificação HTTP proposta para bridge Tauri/Swagger/OpenAI Actions baseada nos contratos Rust atuais.
 - [UX/UI](ui-ux-spec.md): análise dos protótipos em `repl_ui`, adaptação da identidade para Coddy, tokens de design, modos simples/advanced, animações e comportamento responsivo.
 - [Assistente de Assessments](assessment-assistant.md): interpretação de screenshots, múltipla escolha, código, política de integridade e prompts internos.
 - [Plano de Implementação](implementation-plan.md): fases TDD, entregáveis, milestones, riscos e critérios de aceite.
