@@ -4,9 +4,9 @@ mod voice_overlay;
 
 use crate::config::CoddyRuntimeConfig;
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use coddy_client::CoddyClient;
-use coddy_core::{ContextPolicy, ReplCommand};
+use coddy_core::{ContextPolicy, ModelRef, ModelRole, ReplCommand, ReplMode};
 use coddy_ipc::CoddyResult;
 use std::{env, ffi::OsString, process::Stdio};
 use tokio::process::Command as TokioCommand;
@@ -44,6 +44,14 @@ enum Command {
     },
     StopSpeaking,
     StopActiveRun,
+    Model {
+        #[command(subcommand)]
+        command: ModelCommand,
+    },
+    Ui {
+        #[command(subcommand)]
+        command: UiCommand,
+    },
     Shortcuts {
         #[command(subcommand)]
         command: ShortcutCommand,
@@ -71,6 +79,64 @@ enum ShortcutCommand {
         #[arg(long, default_value_t = false)]
         dry_run: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum ModelCommand {
+    Select {
+        #[arg(long, default_value = "ollama")]
+        provider: String,
+
+        #[arg(long)]
+        name: String,
+
+        #[arg(long, value_enum, default_value = "chat")]
+        role: CliModelRole,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliModelRole {
+    Chat,
+    Ocr,
+    Asr,
+    Tts,
+    Embedding,
+}
+
+impl From<CliModelRole> for ModelRole {
+    fn from(value: CliModelRole) -> Self {
+        match value {
+            CliModelRole::Chat => Self::Chat,
+            CliModelRole::Ocr => Self::Ocr,
+            CliModelRole::Asr => Self::Asr,
+            CliModelRole::Tts => Self::Tts,
+            CliModelRole::Embedding => Self::Embedding,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum UiCommand {
+    Open {
+        #[arg(long, value_enum, default_value = "floating-terminal")]
+        mode: CliReplMode,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliReplMode {
+    FloatingTerminal,
+    DesktopApp,
+}
+
+impl From<CliReplMode> for ReplMode {
+    fn from(value: CliReplMode) -> Self {
+        match value {
+            CliReplMode::FloatingTerminal => Self::FloatingTerminal,
+            CliReplMode::DesktopApp => Self::DesktopApp,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -159,6 +225,36 @@ async fn main() -> Result<()> {
             let result = coddy_client(&config)?.stop_active_run().await?;
             print_job_result(result)
         }
+        Some(Command::Model {
+            command:
+                ModelCommand::Select {
+                    provider,
+                    name,
+                    role,
+                },
+        }) => {
+            let result = send_repl_command(
+                &config,
+                ReplCommand::SelectModel {
+                    model: ModelRef { provider, name },
+                    role: role.into(),
+                },
+                cli.speak,
+            )
+            .await?;
+            print_job_result(result)
+        }
+        Some(Command::Ui {
+            command: UiCommand::Open { mode },
+        }) => {
+            let result = send_repl_command(
+                &config,
+                ReplCommand::OpenUi { mode: mode.into() },
+                cli.speak,
+            )
+            .await?;
+            print_job_result(result)
+        }
         Some(Command::Shortcuts {
             command: ShortcutCommand::Test,
         }) => run_shortcuts_test(&config).await,
@@ -183,7 +279,7 @@ async fn main() -> Result<()> {
             command: DoctorCommand::Shortcuts,
         }) => run_shortcuts_doctor(&config).await,
         None => {
-            println!("Use `coddy ask`, `coddy voice`, `coddy stop-speaking`, `coddy stop-active-run`, `coddy session snapshot`, `coddy shortcuts test` ou `coddy doctor shortcuts`.");
+            println!("Use `coddy ask`, `coddy voice`, `coddy model select`, `coddy ui open`, `coddy stop-speaking`, `coddy stop-active-run`, `coddy session snapshot`, `coddy shortcuts test` ou `coddy doctor shortcuts`.");
             Ok(())
         }
     }
@@ -466,6 +562,51 @@ mod tests {
             stop_active_run.command,
             Some(Command::StopActiveRun)
         ));
+    }
+
+    #[test]
+    fn parses_model_select_command() {
+        let cli = Cli::try_parse_from([
+            "coddy",
+            "model",
+            "select",
+            "--provider",
+            "ollama",
+            "--name",
+            "qwen2.5:0.5b",
+            "--role",
+            "chat",
+        ])
+        .expect("parse model select");
+
+        match cli.command {
+            Some(Command::Model {
+                command:
+                    ModelCommand::Select {
+                        provider,
+                        name,
+                        role,
+                    },
+            }) => {
+                assert_eq!(provider, "ollama");
+                assert_eq!(name, "qwen2.5:0.5b");
+                assert!(matches!(role, CliModelRole::Chat));
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn parses_ui_open_command() {
+        let cli = Cli::try_parse_from(["coddy", "ui", "open", "--mode", "desktop-app"])
+            .expect("parse ui open");
+
+        match cli.command {
+            Some(Command::Ui {
+                command: UiCommand::Open { mode },
+            }) => assert!(matches!(mode, CliReplMode::DesktopApp)),
+            _ => panic!("unexpected command"),
+        }
     }
 
     #[test]

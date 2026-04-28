@@ -18,7 +18,12 @@ describe('Domain type contracts', () => {
         OcrCompleted: { OcrCompleted: { chars: 500 } },
         IntentDetected: { IntentDetected: { intent: 'OpenApplication' as ReplIntent, confidence: 0.95 } },
         PolicyEvaluated: { PolicyEvaluated: { policy: 'Practice', allowed: true } },
-        ModelSelected: { ModelSelected: { model: 'gpt-4o' } },
+        ModelSelected: {
+          ModelSelected: {
+            model: { provider: 'ollama', name: 'qwen2.5:0.5b' },
+            role: 'Chat',
+          },
+        },
         SearchStarted: { SearchStarted: { query: 'Rust docs', provider: 'google' } },
         SearchContextExtracted: { SearchContextExtracted: { provider: 'google', organic_results: 5, ai_overview_present: false } },
         TokenDelta: { TokenDelta: { run_id: 'run-1', text: 'Hello' } },

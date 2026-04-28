@@ -24,6 +24,13 @@ export type ToolStatus = 'Succeeded' | 'Failed' | 'Cancelled'
 
 export type ReplMode = 'FloatingTerminal' | 'DesktopApp'
 
+export type ModelRole = 'Chat' | 'Ocr' | 'Asr' | 'Tts' | 'Embedding'
+
+export interface ModelRef {
+  provider: string
+  name: string
+}
+
 export type ExtractionSource = 'Accessibility' | 'BrowserDom' | 'ScreenshotOcr' | 'UserProvidedText'
 
 export interface ReplMessage {
@@ -45,7 +52,7 @@ export type ReplEvent =
   | { OcrCompleted: { chars: number; language_hint?: string } }
   | { IntentDetected: { intent: ReplIntent; confidence: number } }
   | { PolicyEvaluated: { policy: string; allowed: boolean } }
-  | { ModelSelected: { model: string } }
+  | { ModelSelected: { model: ModelRef; role: ModelRole } }
   | { SearchStarted: { query: string; provider: string } }
   | { SearchContextExtracted: { provider: string; organic_results: number; ai_overview_present: boolean } }
   | { TokenDelta: { run_id: string; text: string } }

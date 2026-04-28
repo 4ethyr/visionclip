@@ -297,7 +297,7 @@ pub enum ReplEvent {
     OcrCompleted { chars: usize, language_hint: Option<String> },
     IntentDetected { intent: ReplIntent, confidence: f32 },
     PolicyEvaluated { policy: AssistancePolicy, allowed: bool },
-    ModelSelected { model: String },
+    ModelSelected { model: ModelRef, role: ModelRole },
     SearchStarted { query: String, provider: String },
     SearchContextExtracted { provider: String, organic_results: usize, ai_overview_present: bool },
     TokenDelta { run_id: RunId, text: String },

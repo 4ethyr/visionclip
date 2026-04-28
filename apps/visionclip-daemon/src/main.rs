@@ -800,19 +800,74 @@ async fn process_repl_command(state: &AppState, job: ReplCommandJob) -> Result<J
                         .to_string(),
             })
         }
-        ReplCommand::StopSpeaking | ReplCommand::StopActiveRun => Ok(JobResult::ActionStatus {
+        command @ (ReplCommand::StopSpeaking
+        | ReplCommand::StopActiveRun
+        | ReplCommand::OpenUi { .. }
+        | ReplCommand::SelectModel { .. }
+        | ReplCommand::CaptureAndExplain { .. }) => {
+            Ok(process_repl_local_command(state, request_id, command).await)
+        }
+    }
+}
+
+async fn process_repl_local_command(
+    state: &AppState,
+    request_id: uuid::Uuid,
+    command: ReplCommand,
+) -> JobResult {
+    let mut repl = state.repl.lock().await;
+    process_repl_local_command_locked(&mut repl, request_id, command)
+}
+
+fn process_repl_local_command_locked(
+    repl: &mut ReplRuntimeState,
+    request_id: uuid::Uuid,
+    command: ReplCommand,
+) -> JobResult {
+    match command {
+        ReplCommand::StopSpeaking | ReplCommand::StopActiveRun => JobResult::ActionStatus {
             request_id,
             message: "Comando Coddy recebido; cancelamento cooperativo será tratado pelo broker."
                 .to_string(),
             spoken: false,
-        }),
-        ReplCommand::CaptureAndExplain { .. }
-        | ReplCommand::OpenUi { .. }
-        | ReplCommand::SelectModel { .. } => Ok(JobResult::ActionStatus {
+        },
+        ReplCommand::OpenUi { mode } => {
+            repl.record(ReplEvent::OverlayShown { mode }, Some(request_id));
+
+            JobResult::ActionStatus {
+                request_id,
+                message: format!("Modo Coddy atualizado para {mode:?}."),
+                spoken: false,
+            }
+        }
+        ReplCommand::SelectModel { model, role } => {
+            repl.record(
+                ReplEvent::ModelSelected {
+                    model: model.clone(),
+                    role,
+                },
+                Some(request_id),
+            );
+
+            JobResult::ActionStatus {
+                request_id,
+                message: format!(
+                    "Modelo Coddy atualizado para {} ({role:?}, provider {}).",
+                    model.name, model.provider
+                ),
+                spoken: false,
+            }
+        }
+        ReplCommand::CaptureAndExplain { .. } => JobResult::ActionStatus {
             request_id,
             message: "Comando Coddy reconhecido, mas ainda não implementado no daemon.".to_string(),
             spoken: false,
-        }),
+        },
+        ReplCommand::Ask { .. } | ReplCommand::VoiceTurn { .. } => JobResult::Error {
+            request_id,
+            code: "unsupported_local_repl_command".to_string(),
+            message: "Comando Coddy não é local e deve passar pelo pipeline completo.".to_string(),
+        },
     }
 }
 
@@ -1748,6 +1803,50 @@ mod tests {
 
         assert_eq!(event.sequence, start_sequence + 1);
         assert!(matches!(event.event, ReplEvent::RunStarted { .. }));
+    }
+
+    #[test]
+    fn repl_select_model_updates_chat_model_in_snapshot() {
+        let mut runtime = ReplRuntimeState::new(&AppConfig::default());
+        let request_id = uuid::Uuid::new_v4();
+        let model = visionclip_common::ModelRef {
+            provider: "ollama".to_string(),
+            name: "qwen2.5:0.5b".to_string(),
+        };
+
+        let result = process_repl_local_command_locked(
+            &mut runtime,
+            request_id,
+            ReplCommand::SelectModel {
+                model: model.clone(),
+                role: visionclip_common::ModelRole::Chat,
+            },
+        );
+
+        assert!(matches!(result, JobResult::ActionStatus { .. }));
+        let snapshot = runtime.snapshot();
+        assert_eq!(snapshot.session.selected_model, model);
+    }
+
+    #[test]
+    fn repl_open_ui_updates_session_mode_in_snapshot() {
+        let mut runtime = ReplRuntimeState::new(&AppConfig::default());
+        let request_id = uuid::Uuid::new_v4();
+
+        let result = process_repl_local_command_locked(
+            &mut runtime,
+            request_id,
+            ReplCommand::OpenUi {
+                mode: visionclip_common::ReplMode::DesktopApp,
+            },
+        );
+
+        assert!(matches!(result, JobResult::ActionStatus { .. }));
+        let snapshot = runtime.snapshot();
+        assert_eq!(
+            snapshot.session.mode,
+            visionclip_common::ReplMode::DesktopApp
+        );
     }
 
     #[test]

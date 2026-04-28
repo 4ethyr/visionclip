@@ -317,13 +317,40 @@ describe('sessionReducer', () => {
   })
 
   describe('ModelSelected', () => {
-    it('updates selected_model name', () => {
+    it('updates selected_model for chat role', () => {
       const session = testSession()
-      const event: ReplEvent = { ModelSelected: { model: 'gpt-4o' } }
+      const event: ReplEvent = {
+        ModelSelected: {
+          model: { provider: 'ollama', name: 'qwen2.5:0.5b' },
+          role: 'Chat',
+        },
+      }
 
       const result = sessionReducer(session, event)
 
-      expect(result.selected_model.name).toBe('gpt-4o')
+      expect(result.selected_model).toEqual({
+        provider: 'ollama',
+        name: 'qwen2.5:0.5b',
+      })
+    })
+
+    it('does not replace selected chat model for OCR role', () => {
+      const session = testSession({
+        selected_model: { provider: 'ollama', name: 'gemma4-e2b' },
+      })
+      const event: ReplEvent = {
+        ModelSelected: {
+          model: { provider: 'ollama', name: 'glm-ocr' },
+          role: 'Ocr',
+        },
+      }
+
+      const result = sessionReducer(session, event)
+
+      expect(result.selected_model).toEqual({
+        provider: 'ollama',
+        name: 'gemma4-e2b',
+      })
     })
   })
 

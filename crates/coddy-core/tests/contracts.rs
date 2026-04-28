@@ -1,6 +1,6 @@
 use coddy_core::{
     evaluate_assistance, evaluate_shortcut_conflict, AssessmentPolicy, ContextPolicy,
-    ExtractionSource, ModelRef, ReplCommand, ReplEvent, ReplEventEnvelope, ReplEventLog,
+    ExtractionSource, ModelRef, ModelRole, ReplCommand, ReplEvent, ReplEventEnvelope, ReplEventLog,
     ReplMessage, ReplMode, ReplSession, RequestedHelp, ScreenRegion, ScreenRegionKind,
     SearchProvider, SearchResultContext, ShortcutConflictPolicy, ShortcutDecision, ShortcutSource,
     SourceQuality,
@@ -155,6 +155,46 @@ fn session_snapshot_replays_message_events_for_frontend_state() {
     assert_eq!(snapshot.last_sequence, 1);
     assert_eq!(snapshot.session.messages, vec![message]);
     assert!(encoded.contains("Explique este erro"));
+}
+
+#[test]
+fn chat_model_selection_updates_session_model() {
+    let initial_model = ModelRef {
+        provider: "ollama".to_string(),
+        name: "gemma4-e2b".to_string(),
+    };
+    let next_model = ModelRef {
+        provider: "ollama".to_string(),
+        name: "qwen2.5:0.5b".to_string(),
+    };
+    let mut session = ReplSession::new(ReplMode::FloatingTerminal, initial_model);
+
+    session.apply_event(&ReplEvent::ModelSelected {
+        model: next_model.clone(),
+        role: ModelRole::Chat,
+    });
+
+    assert_eq!(session.selected_model, next_model);
+}
+
+#[test]
+fn non_chat_model_selection_does_not_replace_session_chat_model() {
+    let chat_model = ModelRef {
+        provider: "ollama".to_string(),
+        name: "gemma4-e2b".to_string(),
+    };
+    let ocr_model = ModelRef {
+        provider: "ollama".to_string(),
+        name: "glm-ocr".to_string(),
+    };
+    let mut session = ReplSession::new(ReplMode::FloatingTerminal, chat_model.clone());
+
+    session.apply_event(&ReplEvent::ModelSelected {
+        model: ocr_model,
+        role: ModelRole::Ocr,
+    });
+
+    assert_eq!(session.selected_model, chat_model);
 }
 
 #[test]

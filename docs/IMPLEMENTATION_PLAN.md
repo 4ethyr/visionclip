@@ -332,7 +332,7 @@ export type ReplEvent =
   | { OcrCompleted: { chars: number; language_hint?: string } }
   | { IntentDetected: { intent: ReplIntent; confidence: number } }
   | { PolicyEvaluated: { policy: AssessmentPolicy; allowed: boolean } }
-  | { ModelSelected: { model: string } }
+  | { ModelSelected: { model: ModelRef; role: ModelRole } }
   | { SearchStarted: { query: string; provider: string } }
   | { SearchContextExtracted: { provider: string; organic_results: number; ai_overview_present: boolean } }
   | { TokenDelta: { run_id: string; text: string } }

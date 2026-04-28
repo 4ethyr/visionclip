@@ -121,8 +121,10 @@ impl ReplSession {
             crate::ReplEvent::PolicyEvaluated { policy, .. } => {
                 self.policy = *policy;
             }
-            crate::ReplEvent::ModelSelected { model } => {
-                self.selected_model.name = model.clone();
+            crate::ReplEvent::ModelSelected { model, role } => {
+                if *role == crate::ModelRole::Chat {
+                    self.selected_model = model.clone();
+                }
             }
             crate::ReplEvent::SearchStarted { .. } => {
                 self.status = SessionStatus::Thinking;

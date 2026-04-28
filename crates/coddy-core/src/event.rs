@@ -74,7 +74,8 @@ pub enum ReplEvent {
         allowed: bool,
     },
     ModelSelected {
-        model: String,
+        model: crate::ModelRef,
+        role: crate::ModelRole,
     },
     SearchStarted {
         query: String,

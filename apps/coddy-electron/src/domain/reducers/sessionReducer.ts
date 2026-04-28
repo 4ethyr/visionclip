@@ -86,11 +86,14 @@ export function sessionReducer(session: ReplSession, event: ReplEvent): ReplSess
     }
 
     case 'ModelSelected': {
-      const { model } = (event as { ModelSelected: { model: string } }).ModelSelected
-      return {
-        ...session,
-        selected_model: { ...session.selected_model, name: model },
-      }
+      const { model, role } = (event as { ModelSelected: {
+        model: ReplSession['selected_model']
+        role: string
+      } }).ModelSelected
+
+      if (role !== 'Chat') return session
+
+      return { ...session, selected_model: model }
     }
 
     // Events that the frontend observes but does not mutate state for:
