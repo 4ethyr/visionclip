@@ -1,3 +1,7 @@
+#[cfg(feature = "coddy-protocol")]
+mod coddy_bridge;
+#[cfg(feature = "coddy-protocol")]
+mod coddy_contract;
 mod linux_apps;
 mod rendered_search;
 mod search;
@@ -5,26 +9,16 @@ mod search;
 use crate::linux_apps::open_application;
 use crate::search::{GoogleSearchClient, SearchEnrichment};
 use anyhow::{Context, Result};
-use coddy_ipc::{
-    decode_payload, decode_wire_request_payload, read_frame_payload, write_frame, CoddyRequest,
-    CoddyResult, CoddyWireResult, ReplCommandJob, ReplEventStreamJob, ReplEventsJob,
-    ReplSessionSnapshotJob,
-};
-use std::{
-    future::Future,
-    path::PathBuf,
-    sync::Arc,
-    time::{Instant, SystemTime, UNIX_EPOCH},
-};
+#[cfg(feature = "coddy-protocol")]
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::{future::Future, path::PathBuf, sync::Arc, time::Instant};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use visionclip_common::{
-    evaluate_assistance, resolve_voice_turn_intent, write_message, Action, AppConfig,
-    ApplicationLaunchJob, CaptureJob, HealthCheckJob, JobResult, ModelRef, ReplCommand, ReplEvent,
-    ReplEventBroker, ReplEventEnvelope, ReplEventSubscription, ReplIntent, ReplMessage, ReplMode,
-    ReplSession, RequestedHelp, ScreenAssistMode, ToolStatus, UrlOpenJob, VisionRequest,
-    VoiceSearchJob, VoiceTurnIntent,
+    decode_message_payload, read_message_payload, write_message, Action, AppConfig,
+    ApplicationLaunchJob, CaptureJob, HealthCheckJob, JobResult, UrlOpenJob, VisionRequest,
+    VoiceSearchJob,
 };
 use visionclip_infer::{
     postprocess::{sanitize_for_speech, sanitize_output},
@@ -65,7 +59,8 @@ async fn main() -> Result<()> {
             None
         },
         tts_gate: TtsPlaybackGate::default(),
-        repl: Mutex::new(ReplRuntimeState::new(&config)),
+        #[cfg(feature = "coddy-protocol")]
+        repl: Mutex::new(coddy_bridge::ReplRuntimeState::new(&config)),
     });
 
     loop {
@@ -86,58 +81,8 @@ struct AppState {
     search: Option<GoogleSearchClient>,
     piper: Option<PiperHttpClient>,
     tts_gate: TtsPlaybackGate,
-    repl: Mutex<ReplRuntimeState>,
-}
-
-struct ReplRuntimeState {
-    session: ReplSession,
-    events: ReplEventBroker,
-}
-
-impl ReplRuntimeState {
-    fn new(config: &AppConfig) -> Self {
-        let session = ReplSession::new(
-            ReplMode::FloatingTerminal,
-            ModelRef {
-                provider: config.infer.backend.clone(),
-                name: config.infer.model.clone(),
-            },
-        );
-        let mut events = ReplEventBroker::new(session.id, 256);
-        events.publish(
-            ReplEvent::SessionStarted {
-                session_id: session.id,
-            },
-            None,
-            unix_ms_now(),
-        );
-        let session = events.replay(session);
-
-        Self { session, events }
-    }
-
-    fn record(&mut self, event: ReplEvent, run_id: Option<uuid::Uuid>) {
-        let envelope = self.events.publish(event, run_id, unix_ms_now());
-        self.session.apply_event(&envelope.event);
-    }
-
-    fn snapshot(&self) -> visionclip_common::ReplSessionSnapshot {
-        visionclip_common::ReplSessionSnapshot {
-            session: self.session.clone(),
-            last_sequence: self.events.last_sequence(),
-        }
-    }
-
-    fn events_after(&self, sequence: u64) -> (Vec<ReplEventEnvelope>, u64) {
-        (
-            self.events.events_after(sequence),
-            self.events.last_sequence(),
-        )
-    }
-
-    fn subscribe_after(&self, sequence: u64) -> ReplEventSubscription {
-        self.events.subscribe_after(sequence)
-    }
+    #[cfg(feature = "coddy-protocol")]
+    repl: Mutex<coddy_bridge::ReplRuntimeState>,
 }
 
 #[derive(Clone, Default)]
@@ -153,19 +98,17 @@ impl TtsPlaybackGate {
 }
 
 async fn handle_connection(mut stream: UnixStream, state: Arc<AppState>) -> Result<()> {
-    let payload = read_frame_payload(&mut stream).await?;
+    let payload = read_message_payload(&mut stream).await?;
 
-    if let Some(request) = decode_coddy_wire_request(&payload)? {
-        return handle_coddy_connection(&mut stream, &state, request).await;
+    #[cfg(feature = "coddy-protocol")]
+    {
+        if let Some(request) = coddy_bridge::decode_request(&payload)? {
+            let services = DaemonReplNativeServices;
+            return coddy_bridge::handle_connection(&mut stream, &state, request, &services).await;
+        }
     }
 
-    let request: VisionRequest = decode_payload(&payload)?;
-    let request = match request {
-        VisionRequest::ReplEventStream(job) => {
-            return stream_repl_events(&mut stream, &state, job).await;
-        }
-        request => request,
-    };
+    let request: VisionRequest = decode_message_payload(&payload)?;
 
     let response = match process_request(&state, request).await {
         Ok(result) => result,
@@ -183,128 +126,13 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<AppState>) -> Resu
     Ok(())
 }
 
-fn decode_coddy_wire_request(payload: &[u8]) -> Result<Option<CoddyRequest>> {
-    Ok(decode_wire_request_payload(payload)?)
-}
-
-async fn handle_coddy_connection(
-    stream: &mut UnixStream,
-    state: &AppState,
-    request: CoddyRequest,
-) -> Result<()> {
-    let request_id = request.request_id();
-    let request = match request {
-        CoddyRequest::EventStream(job) => {
-            return stream_coddy_repl_events(stream, state, job).await;
-        }
-        request => request,
-    };
-
-    let response = match process_coddy_request(state, request).await {
-        Ok(result) => result,
-        Err(error) => {
-            error!(?error, "Coddy job processing failed");
-            CoddyResult::Error {
-                request_id,
-                code: "processing_error".into(),
-                message: error.to_string(),
-            }
-        }
-    };
-
-    write_frame(stream, &CoddyWireResult::new(response)).await?;
-    Ok(())
-}
-
 async fn process_request(state: &AppState, request: VisionRequest) -> Result<JobResult> {
     match request {
         VisionRequest::Capture(job) => process_job(state, job).await,
         VisionRequest::VoiceSearch(job) => process_voice_search(state, job).await,
         VisionRequest::OpenApplication(job) => process_open_application(state, job).await,
         VisionRequest::OpenUrl(job) => process_open_url(state, job).await,
-        VisionRequest::ReplCommand(job) => process_repl_command(state, job).await,
-        VisionRequest::ReplSessionSnapshot(job) => process_repl_session_snapshot(state, job).await,
-        VisionRequest::ReplEvents(job) => process_repl_events(state, job).await,
-        VisionRequest::ReplEventStream(job) => Ok(JobResult::Error {
-            request_id: job.request_id,
-            code: "invalid_repl_stream_dispatch".to_string(),
-            message: "ReplEventStream requires a persistent connection.".to_string(),
-        }),
         VisionRequest::HealthCheck(job) => process_health_check(job).await,
-    }
-}
-
-async fn process_coddy_request(state: &AppState, request: CoddyRequest) -> Result<CoddyResult> {
-    let result = match request {
-        CoddyRequest::Command(job) => process_repl_command(state, job).await?,
-        CoddyRequest::SessionSnapshot(job) => process_repl_session_snapshot(state, job).await?,
-        CoddyRequest::Events(job) => process_repl_events(state, job).await?,
-        CoddyRequest::EventStream(job) => JobResult::Error {
-            request_id: job.request_id,
-            code: "invalid_repl_stream_dispatch".to_string(),
-            message: "EventStream requires a persistent connection.".to_string(),
-        },
-    };
-
-    Ok(map_job_result_to_coddy(result))
-}
-
-fn map_job_result_to_coddy(result: JobResult) -> CoddyResult {
-    match result {
-        JobResult::ClipboardText {
-            request_id,
-            text,
-            spoken,
-        } => CoddyResult::Text {
-            request_id,
-            text,
-            spoken,
-        },
-        JobResult::BrowserQuery {
-            request_id,
-            query,
-            summary,
-            spoken,
-        } => CoddyResult::BrowserQuery {
-            request_id,
-            query,
-            summary,
-            spoken,
-        },
-        JobResult::ActionStatus {
-            request_id,
-            message,
-            spoken,
-        } => CoddyResult::ActionStatus {
-            request_id,
-            message,
-            spoken,
-        },
-        JobResult::Error {
-            request_id,
-            code,
-            message,
-        } => CoddyResult::Error {
-            request_id,
-            code,
-            message,
-        },
-        JobResult::ReplSessionSnapshot {
-            request_id,
-            snapshot,
-        } => CoddyResult::ReplSessionSnapshot {
-            request_id,
-            snapshot,
-        },
-        JobResult::ReplEvents {
-            request_id,
-            events,
-            last_sequence,
-        } => CoddyResult::ReplEvents {
-            request_id,
-            events,
-            last_sequence,
-        },
     }
 }
 
@@ -314,105 +142,6 @@ async fn process_health_check(job: HealthCheckJob) -> Result<JobResult> {
         message: "VisionClip daemon ativo.".to_string(),
         spoken: false,
     })
-}
-
-async fn process_repl_session_snapshot(
-    state: &AppState,
-    job: ReplSessionSnapshotJob,
-) -> Result<JobResult> {
-    let repl = state.repl.lock().await;
-    Ok(JobResult::ReplSessionSnapshot {
-        request_id: job.request_id,
-        snapshot: Box::new(repl.snapshot()),
-    })
-}
-
-async fn process_repl_events(state: &AppState, job: ReplEventsJob) -> Result<JobResult> {
-    let repl = state.repl.lock().await;
-    let (events, last_sequence) = repl.events_after(job.after_sequence);
-    Ok(JobResult::ReplEvents {
-        request_id: job.request_id,
-        events,
-        last_sequence,
-    })
-}
-
-async fn stream_repl_events(
-    stream: &mut UnixStream,
-    state: &AppState,
-    job: ReplEventStreamJob,
-) -> Result<()> {
-    let mut subscription = {
-        let repl = state.repl.lock().await;
-        repl.subscribe_after(job.after_sequence)
-    };
-
-    info!(
-        request_id = %job.request_id,
-        after_sequence = job.after_sequence,
-        "starting Coddy REPL event stream"
-    );
-
-    while let Some(event) = subscription.next().await {
-        let last_sequence = event.sequence;
-        let response = JobResult::ReplEvents {
-            request_id: job.request_id,
-            events: vec![event],
-            last_sequence,
-        };
-
-        if let Err(error) = write_message(stream, &response).await {
-            info!(
-                request_id = %job.request_id,
-                ?error,
-                "Coddy REPL event stream closed"
-            );
-            return Ok(());
-        }
-    }
-
-    Ok(())
-}
-
-async fn stream_coddy_repl_events(
-    stream: &mut UnixStream,
-    state: &AppState,
-    job: ReplEventStreamJob,
-) -> Result<()> {
-    let mut subscription = {
-        let repl = state.repl.lock().await;
-        repl.subscribe_after(job.after_sequence)
-    };
-
-    info!(
-        request_id = %job.request_id,
-        after_sequence = job.after_sequence,
-        "starting direct Coddy REPL event stream"
-    );
-
-    while let Some(event) = subscription.next().await {
-        let last_sequence = event.sequence;
-        let response = CoddyWireResult::new(CoddyResult::ReplEvents {
-            request_id: job.request_id,
-            events: vec![event],
-            last_sequence,
-        });
-
-        if let Err(error) = write_frame(stream, &response).await {
-            info!(
-                request_id = %job.request_id,
-                ?error,
-                "direct Coddy REPL event stream closed"
-            );
-            return Ok(());
-        }
-    }
-
-    Ok(())
-}
-
-async fn record_repl_event(state: &AppState, event: ReplEvent, run_id: Option<uuid::Uuid>) {
-    state.repl.lock().await.record(event, run_id);
 }
 
 async fn process_open_application(
@@ -521,110 +250,23 @@ async fn process_open_url(state: &AppState, job: UrlOpenJob) -> Result<JobResult
     })
 }
 
-async fn process_repl_command(state: &AppState, job: ReplCommandJob) -> Result<JobResult> {
-    let request_id = job.request_id;
-    let total_started_at = Instant::now();
+#[cfg(feature = "coddy-protocol")]
+struct DaemonReplNativeServices;
 
-    info!(
-        request_id = %request_id,
-        command = ?job.command,
-        speak_requested = job.speak,
-        "processing Coddy REPL command"
-    );
+#[cfg(feature = "coddy-protocol")]
+impl coddy_bridge::ReplNativeServices for DaemonReplNativeServices {
+    fn sanitize_search_query(&self, query: &str) -> String {
+        sanitize_output(&Action::SearchWeb, query)
+    }
 
-    match job.command {
-        ReplCommand::Ask { text, .. } => {
-            let command_text = text.trim().to_string();
-            if command_text.is_empty() {
-                record_repl_event(
-                    state,
-                    ReplEvent::Error {
-                        code: "empty_repl_query".to_string(),
-                        message: "Comando Coddy vazio.".to_string(),
-                    },
-                    Some(request_id),
-                )
-                .await;
-                return Ok(JobResult::Error {
-                    request_id,
-                    code: "empty_repl_query".to_string(),
-                    message: "Comando Coddy vazio.".to_string(),
-                });
-            }
-
-            record_repl_event(
-                state,
-                ReplEvent::RunStarted { run_id: request_id },
-                Some(request_id),
-            )
-            .await;
-            record_repl_event(
-                state,
-                ReplEvent::MessageAppended {
-                    message: ReplMessage {
-                        id: uuid::Uuid::new_v4(),
-                        role: "user".to_string(),
-                        text: command_text.clone(),
-                    },
-                },
-                Some(request_id),
-            )
-            .await;
-
-            if let Some(query) = explicit_repl_web_search_query(&command_text) {
-                record_repl_event(
-                    state,
-                    ReplEvent::IntentDetected {
-                        intent: ReplIntent::SearchDocs,
-                        confidence: 0.9,
-                    },
-                    Some(request_id),
-                )
-                .await;
-
-                let speak_requested = state
-                    .config
-                    .action_should_speak(Action::SearchWeb.as_str(), job.speak);
-                let search_result = execute_search_query(
-                    state,
-                    request_id,
-                    &query,
-                    speak_requested,
-                    total_started_at,
-                )
-                .await?;
-                record_repl_browser_query_response(
-                    state,
-                    request_id,
-                    &query,
-                    &search_result.summary,
-                )
-                .await;
-                record_repl_event(
-                    state,
-                    ReplEvent::RunCompleted { run_id: request_id },
-                    Some(request_id),
-                )
-                .await;
-
-                return Ok(JobResult::BrowserQuery {
-                    request_id,
-                    query,
-                    summary: search_result.summary,
-                    spoken: search_result.spoken,
-                });
-            }
-
-            record_repl_event(
-                state,
-                ReplEvent::IntentDetected {
-                    intent: ReplIntent::AskTechnicalQuestion,
-                    confidence: 0.84,
-                },
-                Some(request_id),
-            )
-            .await;
-
+    fn answer_repl_question<'a>(
+        &'a self,
+        state: &'a AppState,
+        request_id: uuid::Uuid,
+        command_text: String,
+        speak: bool,
+    ) -> coddy_bridge::ReplJobFuture<'a> {
+        Box::pin(async move {
             let output = state
                 .infer
                 .answer_repl_turn(format!("{request_id}-repl-agent"), &command_text)
@@ -632,7 +274,7 @@ async fn process_repl_command(state: &AppState, job: ReplCommandJob) -> Result<J
             let answer = sanitize_output(&Action::Explain, &output.text);
             let speak_requested = state
                 .config
-                .action_should_speak(Action::Explain.as_str(), job.speak);
+                .action_should_speak(Action::Explain.as_str(), speak);
             let speech_text = sanitize_for_speech(&Action::Explain, &answer);
             let (_, spoken) = enqueue_tts(
                 state.piper.as_ref(),
@@ -643,473 +285,106 @@ async fn process_repl_command(state: &AppState, job: ReplCommandJob) -> Result<J
                 None,
                 speak_requested,
             );
-            record_repl_event(
-                state,
-                ReplEvent::MessageAppended {
-                    message: ReplMessage {
-                        id: uuid::Uuid::new_v4(),
-                        role: "assistant".to_string(),
-                        text: answer.clone(),
-                    },
-                },
-                Some(request_id),
-            )
-            .await;
-            record_repl_event(
-                state,
-                ReplEvent::RunCompleted { run_id: request_id },
-                Some(request_id),
-            )
-            .await;
 
             Ok(JobResult::ClipboardText {
                 request_id,
                 text: answer,
                 spoken,
             })
-        }
-        ReplCommand::VoiceTurn {
-            transcript_override: Some(transcript),
-        } => {
-            record_repl_event(
+        })
+    }
+
+    fn search_web<'a>(
+        &'a self,
+        state: &'a AppState,
+        request_id: uuid::Uuid,
+        query: String,
+        speak: bool,
+        total_started_at: Instant,
+    ) -> coddy_bridge::ReplJobFuture<'a> {
+        Box::pin(async move {
+            let speak_requested = state
+                .config
+                .action_should_speak(Action::SearchWeb.as_str(), speak);
+            let search_result =
+                execute_search_query(state, request_id, &query, speak_requested, total_started_at)
+                    .await?;
+
+            Ok(JobResult::BrowserQuery {
+                request_id,
+                query,
+                summary: search_result.summary,
+                spoken: search_result.spoken,
+            })
+        })
+    }
+
+    fn open_application<'a>(
+        &'a self,
+        state: &'a AppState,
+        request_id: uuid::Uuid,
+        transcript: String,
+        app_name: String,
+        speak: bool,
+    ) -> coddy_bridge::ReplJobFuture<'a> {
+        Box::pin(async move {
+            process_open_application(
                 state,
-                ReplEvent::VoiceTranscriptFinal {
-                    text: transcript.clone(),
-                },
-                Some(request_id),
-            )
-            .await;
-
-            match resolve_voice_turn_intent(&transcript) {
-                Some(VoiceTurnIntent::OpenApplication {
-                    transcript,
+                ApplicationLaunchJob {
+                    request_id,
+                    transcript: Some(transcript),
                     app_name,
-                }) => {
-                    record_repl_event(
-                        state,
-                        ReplEvent::IntentDetected {
-                            intent: ReplIntent::OpenApplication,
-                            confidence: 0.9,
-                        },
-                        Some(request_id),
-                    )
-                    .await;
-                    record_repl_event(
-                        state,
-                        ReplEvent::ToolStarted {
-                            name: "open_application".to_string(),
-                        },
-                        Some(request_id),
-                    )
-                    .await;
+                    speak,
+                },
+            )
+            .await
+        })
+    }
 
-                    let result = process_open_application(
-                        state,
-                        ApplicationLaunchJob {
-                            request_id,
-                            transcript: Some(transcript),
-                            app_name,
-                            speak: job.speak,
-                        },
-                    )
-                    .await;
-
-                    record_repl_event(
-                        state,
-                        ReplEvent::ToolCompleted {
-                            name: "open_application".to_string(),
-                            status: tool_status_for_result(&result),
-                        },
-                        Some(request_id),
-                    )
-                    .await;
-                    result
-                }
-                Some(VoiceTurnIntent::OpenWebsite {
-                    transcript,
+    fn open_url<'a>(
+        &'a self,
+        state: &'a AppState,
+        request_id: uuid::Uuid,
+        transcript: String,
+        label: String,
+        url: String,
+        speak: bool,
+    ) -> coddy_bridge::ReplJobFuture<'a> {
+        Box::pin(async move {
+            process_open_url(
+                state,
+                UrlOpenJob {
+                    request_id,
+                    transcript: Some(transcript),
                     label,
                     url,
-                }) => {
-                    record_repl_event(
-                        state,
-                        ReplEvent::IntentDetected {
-                            intent: ReplIntent::OpenWebsite,
-                            confidence: 0.9,
-                        },
-                        Some(request_id),
-                    )
-                    .await;
-                    record_repl_event(
-                        state,
-                        ReplEvent::ToolStarted {
-                            name: "open_url".to_string(),
-                        },
-                        Some(request_id),
-                    )
-                    .await;
-
-                    let result = process_open_url(
-                        state,
-                        UrlOpenJob {
-                            request_id,
-                            transcript: Some(transcript),
-                            label,
-                            url,
-                            speak: job.speak,
-                        },
-                    )
-                    .await;
-
-                    record_repl_event(
-                        state,
-                        ReplEvent::ToolCompleted {
-                            name: "open_url".to_string(),
-                            status: tool_status_for_result(&result),
-                        },
-                        Some(request_id),
-                    )
-                    .await;
-                    result
-                }
-                Some(VoiceTurnIntent::SearchWeb { transcript, query }) => {
-                    let query = sanitize_output(&Action::SearchWeb, &query);
-                    if query.trim().is_empty() {
-                        record_repl_event(
-                            state,
-                            ReplEvent::Error {
-                                code: "empty_voice_transcript".to_string(),
-                                message: "Transcript de voz vazio.".to_string(),
-                            },
-                            Some(request_id),
-                        )
-                        .await;
-                        return Ok(JobResult::Error {
-                            request_id,
-                            code: "empty_voice_transcript".to_string(),
-                            message: "Transcript de voz vazio.".to_string(),
-                        });
-                    }
-
-                    record_repl_event(
-                        state,
-                        ReplEvent::RunStarted { run_id: request_id },
-                        Some(request_id),
-                    )
-                    .await;
-                    record_repl_event(
-                        state,
-                        ReplEvent::IntentDetected {
-                            intent: ReplIntent::SearchDocs,
-                            confidence: 0.72,
-                        },
-                        Some(request_id),
-                    )
-                    .await;
-                    let result = process_voice_search(
-                        state,
-                        VoiceSearchJob {
-                            request_id,
-                            transcript,
-                            query,
-                            speak: job.speak,
-                        },
-                    )
-                    .await;
-                    if let Ok(JobResult::BrowserQuery { query, summary, .. }) = &result {
-                        record_repl_browser_query_response(state, request_id, query, summary).await;
-                    }
-                    record_repl_event(
-                        state,
-                        ReplEvent::RunCompleted { run_id: request_id },
-                        Some(request_id),
-                    )
-                    .await;
-                    result
-                }
-                None => {
-                    record_repl_event(
-                        state,
-                        ReplEvent::Error {
-                            code: "empty_voice_transcript".to_string(),
-                            message: "Transcript de voz vazio.".to_string(),
-                        },
-                        Some(request_id),
-                    )
-                    .await;
-                    Ok(JobResult::Error {
-                        request_id,
-                        code: "empty_voice_transcript".to_string(),
-                        message: "Transcript de voz vazio.".to_string(),
-                    })
-                }
-            }
-        }
-        ReplCommand::VoiceTurn {
-            transcript_override: None,
-        } => {
-            if job.speak {
-                warn!(
-                    request_id = %request_id,
-                    "daemon received a voice turn without transcript; the CLI should capture ASR before sending"
-                );
-            }
-            record_repl_event(
-                state,
-                ReplEvent::Error {
-                    code: "missing_voice_transcript".to_string(),
-                    message:
-                        "Coddy não recebeu transcript de voz. Capture/transcreva no cliente antes de enviar."
-                            .to_string(),
+                    speak,
                 },
-                Some(request_id),
             )
-            .await;
-            Ok(JobResult::Error {
-                request_id,
-                code: "missing_voice_transcript".to_string(),
-                message:
-                    "Coddy não recebeu transcript de voz. Capture/transcreva no cliente antes de enviar."
-                        .to_string(),
-            })
-        }
-        command @ (ReplCommand::StopSpeaking
-        | ReplCommand::StopActiveRun
-        | ReplCommand::OpenUi { .. }
-        | ReplCommand::SelectModel { .. }
-        | ReplCommand::CaptureAndExplain { .. }
-        | ReplCommand::DismissConfirmation) => {
-            Ok(process_repl_local_command(state, request_id, command).await)
-        }
-    }
-}
-
-fn explicit_repl_web_search_query(text: &str) -> Option<String> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let lower = trimmed.to_lowercase();
-    let prefixes = [
-        "pesquise por ",
-        "pesquise ",
-        "pesquisar ",
-        "procure por ",
-        "procure ",
-        "busque por ",
-        "busque ",
-        "buscar ",
-        "google ",
-        "google: ",
-        "pesquisa: ",
-        "search for ",
-        "search ",
-        "web search ",
-        "look up ",
-    ];
-
-    prefixes.iter().find_map(|prefix| {
-        lower.strip_prefix(prefix).and_then(|_| {
-            let query = trimmed[prefix.len()..].trim();
-            if query.is_empty() {
-                None
-            } else {
-                Some(sanitize_output(&Action::SearchWeb, query))
-            }
+            .await
         })
-    })
-}
+    }
 
-async fn process_repl_local_command(
-    state: &AppState,
-    request_id: uuid::Uuid,
-    command: ReplCommand,
-) -> JobResult {
-    let mut repl = state.repl.lock().await;
-    process_repl_local_command_locked(&mut repl, request_id, command)
-}
-
-fn process_repl_local_command_locked(
-    repl: &mut ReplRuntimeState,
-    request_id: uuid::Uuid,
-    command: ReplCommand,
-) -> JobResult {
-    match command {
-        ReplCommand::StopSpeaking | ReplCommand::StopActiveRun => JobResult::ActionStatus {
-            request_id,
-            message: "Comando Coddy recebido; cancelamento cooperativo será tratado pelo broker."
-                .to_string(),
-            spoken: false,
-        },
-        ReplCommand::OpenUi { mode } => {
-            repl.record(ReplEvent::OverlayShown { mode }, Some(request_id));
-
-            JobResult::ActionStatus {
-                request_id,
-                message: format!("Modo Coddy atualizado para {mode:?}."),
-                spoken: false,
-            }
-        }
-        ReplCommand::SelectModel { model, role } => {
-            repl.record(
-                ReplEvent::ModelSelected {
-                    model: model.clone(),
-                    role,
+    fn voice_search<'a>(
+        &'a self,
+        state: &'a AppState,
+        request_id: uuid::Uuid,
+        transcript: String,
+        query: String,
+        speak: bool,
+    ) -> coddy_bridge::ReplJobFuture<'a> {
+        Box::pin(async move {
+            process_voice_search(
+                state,
+                VoiceSearchJob {
+                    request_id,
+                    transcript,
+                    query,
+                    speak,
                 },
-                Some(request_id),
-            );
-
-            JobResult::ActionStatus {
-                request_id,
-                message: format!(
-                    "Modelo Coddy atualizado para {} ({role:?}, provider {}).",
-                    model.name, model.provider
-                ),
-                spoken: false,
-            }
-        }
-        ReplCommand::CaptureAndExplain { mode, policy } => {
-            process_repl_capture_and_explain_command(repl, request_id, mode, policy)
-        }
-        ReplCommand::DismissConfirmation => {
-            repl.record(ReplEvent::ConfirmationDismissed, Some(request_id));
-
-            JobResult::ActionStatus {
-                request_id,
-                message: "Confirmação de policy dispensada.".to_string(),
-                spoken: false,
-            }
-        }
-        ReplCommand::Ask { .. } | ReplCommand::VoiceTurn { .. } => JobResult::Error {
-            request_id,
-            code: "unsupported_local_repl_command".to_string(),
-            message: "Comando Coddy não é local e deve passar pelo pipeline completo.".to_string(),
-        },
-    }
-}
-
-fn process_repl_capture_and_explain_command(
-    repl: &mut ReplRuntimeState,
-    request_id: uuid::Uuid,
-    mode: ScreenAssistMode,
-    policy: visionclip_common::AssessmentPolicy,
-) -> JobResult {
-    let requested_help = requested_help_for_screen_assist_mode(mode);
-    let decision = evaluate_assistance(policy, requested_help);
-    repl.record(
-        ReplEvent::PolicyEvaluated {
-            policy,
-            allowed: decision.allowed,
-        },
-        Some(request_id),
-    );
-
-    if decision.requires_confirmation {
-        return JobResult::ActionStatus {
-            request_id,
-            message: format!(
-                "Confirme a política de uso antes de analisar a tela: {}",
-                decision.reason
-            ),
-            spoken: false,
-        };
-    }
-
-    if !decision.allowed {
-        repl.record(
-            ReplEvent::Error {
-                code: "assessment_policy_blocked".to_string(),
-                message: decision.reason.clone(),
-            },
-            Some(request_id),
-        );
-        return JobResult::Error {
-            request_id,
-            code: "assessment_policy_blocked".to_string(),
-            message: decision.reason,
-        };
-    }
-
-    repl.record(
-        ReplEvent::RunStarted { run_id: request_id },
-        Some(request_id),
-    );
-    repl.record(
-        ReplEvent::IntentDetected {
-            intent: intent_for_screen_assist_mode(mode),
-            confidence: 0.86,
-        },
-        Some(request_id),
-    );
-    repl.record(
-        ReplEvent::ToolStarted {
-            name: "capture_and_explain".to_string(),
-        },
-        Some(request_id),
-    );
-    repl.record(
-        ReplEvent::ToolCompleted {
-            name: "capture_and_explain".to_string(),
-            status: ToolStatus::Cancelled,
-        },
-        Some(request_id),
-    );
-    repl.record(
-        ReplEvent::RunCompleted { run_id: request_id },
-        Some(request_id),
-    );
-
-    JobResult::ActionStatus {
-        request_id,
-        message: "CaptureAndExplain foi autorizado; o conector de captura de tela do Coddy ainda será ligado ao backend de visão.".to_string(),
-        spoken: false,
-    }
-}
-
-async fn record_repl_browser_query_response(
-    state: &AppState,
-    request_id: uuid::Uuid,
-    query: &str,
-    summary: &Option<String>,
-) {
-    record_repl_event(
-        state,
-        ReplEvent::MessageAppended {
-            message: ReplMessage {
-                id: uuid::Uuid::new_v4(),
-                role: "assistant".to_string(),
-                text: assistant_message_for_browser_query(query, summary),
-            },
-        },
-        Some(request_id),
-    )
-    .await;
-}
-
-fn assistant_message_for_browser_query(query: &str, summary: &Option<String>) -> String {
-    summary
-        .clone()
-        .unwrap_or_else(|| search_browser_fallback_summary(query, false))
-}
-
-fn requested_help_for_screen_assist_mode(mode: ScreenAssistMode) -> RequestedHelp {
-    match mode {
-        ScreenAssistMode::ExplainVisibleScreen | ScreenAssistMode::SummarizeDocument => {
-            RequestedHelp::ExplainConcept
-        }
-        ScreenAssistMode::ExplainCode | ScreenAssistMode::DebugError => RequestedHelp::DebugCode,
-        ScreenAssistMode::MultipleChoice => RequestedHelp::SolveMultipleChoice,
-    }
-}
-
-fn intent_for_screen_assist_mode(mode: ScreenAssistMode) -> ReplIntent {
-    match mode {
-        ScreenAssistMode::ExplainVisibleScreen | ScreenAssistMode::SummarizeDocument => {
-            ReplIntent::ExplainScreen
-        }
-        ScreenAssistMode::ExplainCode => ReplIntent::ExplainCode,
-        ScreenAssistMode::DebugError => ReplIntent::DebugCode,
-        ScreenAssistMode::MultipleChoice => ReplIntent::MultipleChoiceAssist,
+            )
+            .await
+        })
     }
 }
 
@@ -1121,14 +396,6 @@ fn validate_browser_url(url: &str) -> Result<()> {
         anyhow::bail!("refusing to open non-http URL");
     }
     Ok(())
-}
-
-fn tool_status_for_result(result: &Result<JobResult>) -> ToolStatus {
-    if result.is_ok() {
-        ToolStatus::Succeeded
-    } else {
-        ToolStatus::Failed
-    }
 }
 
 async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
@@ -1451,15 +718,8 @@ async fn execute_search_query(
     let mut ai_overview_chars = 0_usize;
     let mut search_blocked = false;
 
-    record_repl_event(
-        state,
-        ReplEvent::SearchStarted {
-            query: query.to_string(),
-            provider: "google".to_string(),
-        },
-        Some(request_id),
-    )
-    .await;
+    #[cfg(feature = "coddy-protocol")]
+    coddy_bridge::record_search_started(state, request_id, query, "google").await;
 
     if let Some(search) = &state.search {
         let search_started_at = Instant::now();
@@ -1501,20 +761,21 @@ async fn execute_search_query(
         }
     }
 
-    record_repl_event(
-        state,
-        ReplEvent::SearchContextExtracted {
-            provider: if state.search.is_some() {
-                "google".to_string()
+    #[cfg(feature = "coddy-protocol")]
+    {
+        coddy_bridge::record_search_context_extracted(
+            state,
+            request_id,
+            if state.search.is_some() {
+                "google"
             } else {
-                "disabled".to_string()
+                "disabled"
             },
-            organic_results: search_result_count,
-            ai_overview_present: ai_overview_chars > 0,
-        },
-        Some(request_id),
-    )
-    .await;
+            search_result_count,
+            ai_overview_chars > 0,
+        )
+        .await;
+    }
 
     if search_summary.is_none() {
         search_summary = Some(search_browser_fallback_summary(query, search_blocked));
@@ -1917,6 +1178,7 @@ fn elapsed_ms(started_at: Instant) -> u64 {
     started_at.elapsed().as_millis() as u64
 }
 
+#[cfg(feature = "coddy-protocol")]
 fn unix_ms_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1927,7 +1189,6 @@ fn unix_ms_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coddy_ipc::CoddyWireRequest;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -1940,331 +1201,6 @@ mod tests {
         assert!(validate_browser_url("http://example.com").is_ok());
         assert!(validate_browser_url("file:///etc/passwd").is_err());
         assert!(validate_browser_url("https://example.com/a b").is_err());
-    }
-
-    #[test]
-    fn coddy_wire_payload_decodes_before_legacy_fallback() {
-        let request_id = uuid::Uuid::new_v4();
-        let wire = CoddyWireRequest::new(CoddyRequest::Events(ReplEventsJob {
-            request_id,
-            after_sequence: 7,
-        }));
-        let payload = coddy_ipc::encode_payload(&wire).expect("encode coddy wire request");
-
-        let decoded = decode_coddy_wire_request(&payload)
-            .expect("decode coddy wire request")
-            .expect("coddy request");
-
-        let CoddyRequest::Events(job) = decoded else {
-            panic!("unexpected coddy request")
-        };
-        assert_eq!(job.request_id, request_id);
-        assert_eq!(job.after_sequence, 7);
-    }
-
-    #[test]
-    fn legacy_payload_is_not_treated_as_coddy_wire_request() {
-        let request_id = uuid::Uuid::new_v4();
-        let legacy = VisionRequest::HealthCheck(HealthCheckJob { request_id });
-        let payload = coddy_ipc::encode_payload(&legacy).expect("encode legacy request");
-
-        assert!(decode_coddy_wire_request(&payload)
-            .expect("decode legacy fallback")
-            .is_none());
-    }
-
-    #[test]
-    fn coddy_wire_payload_rejects_incompatible_version() {
-        let mut wire =
-            CoddyWireRequest::new(CoddyRequest::SessionSnapshot(ReplSessionSnapshotJob {
-                request_id: uuid::Uuid::new_v4(),
-            }));
-        wire.protocol_version += 1;
-        let payload = coddy_ipc::encode_payload(&wire).expect("encode coddy wire request");
-
-        assert!(decode_coddy_wire_request(&payload).is_err());
-    }
-
-    #[test]
-    fn repl_runtime_snapshot_records_reduced_events() {
-        let config = AppConfig::default();
-        let mut runtime = ReplRuntimeState::new(&config);
-        let run_id = uuid::Uuid::new_v4();
-
-        runtime.record(ReplEvent::RunStarted { run_id }, Some(run_id));
-        runtime.record(
-            ReplEvent::SearchStarted {
-                query: "Quem foi Rousseau?".to_string(),
-                provider: "google".to_string(),
-            },
-            Some(run_id),
-        );
-        runtime.record(ReplEvent::RunCompleted { run_id }, Some(run_id));
-
-        let snapshot = runtime.snapshot();
-
-        assert_eq!(snapshot.last_sequence, 4);
-        assert_eq!(snapshot.session.active_run, None);
-        assert_eq!(
-            snapshot.session.status,
-            visionclip_common::SessionStatus::Idle
-        );
-    }
-
-    #[test]
-    fn repl_runtime_returns_incremental_events_after_sequence() {
-        let config = AppConfig::default();
-        let mut runtime = ReplRuntimeState::new(&config);
-        let run_id = uuid::Uuid::new_v4();
-
-        runtime.record(ReplEvent::RunStarted { run_id }, Some(run_id));
-        runtime.record(ReplEvent::RunCompleted { run_id }, Some(run_id));
-
-        let (events, last_sequence) = runtime.events_after(1);
-
-        assert_eq!(last_sequence, 3);
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].sequence, 2);
-        assert_eq!(events[1].sequence, 3);
-    }
-
-    #[tokio::test]
-    async fn repl_runtime_subscription_receives_live_events_without_polling() {
-        let config = AppConfig::default();
-        let mut runtime = ReplRuntimeState::new(&config);
-        let start_sequence = runtime.snapshot().last_sequence;
-        let run_id = uuid::Uuid::new_v4();
-        let mut subscription = runtime.subscribe_after(start_sequence);
-
-        runtime.record(ReplEvent::RunStarted { run_id }, Some(run_id));
-
-        let event = tokio::time::timeout(Duration::from_millis(100), subscription.next())
-            .await
-            .expect("live event before timeout")
-            .expect("open subscription");
-
-        assert_eq!(event.sequence, start_sequence + 1);
-        assert!(matches!(event.event, ReplEvent::RunStarted { .. }));
-    }
-
-    #[test]
-    fn repl_select_model_updates_chat_model_in_snapshot() {
-        let mut runtime = ReplRuntimeState::new(&AppConfig::default());
-        let request_id = uuid::Uuid::new_v4();
-        let model = visionclip_common::ModelRef {
-            provider: "ollama".to_string(),
-            name: "qwen2.5:0.5b".to_string(),
-        };
-
-        let result = process_repl_local_command_locked(
-            &mut runtime,
-            request_id,
-            ReplCommand::SelectModel {
-                model: model.clone(),
-                role: visionclip_common::ModelRole::Chat,
-            },
-        );
-
-        assert!(matches!(result, JobResult::ActionStatus { .. }));
-        let snapshot = runtime.snapshot();
-        assert_eq!(snapshot.session.selected_model, model);
-    }
-
-    #[test]
-    fn repl_open_ui_updates_session_mode_in_snapshot() {
-        let mut runtime = ReplRuntimeState::new(&AppConfig::default());
-        let request_id = uuid::Uuid::new_v4();
-
-        let result = process_repl_local_command_locked(
-            &mut runtime,
-            request_id,
-            ReplCommand::OpenUi {
-                mode: visionclip_common::ReplMode::DesktopApp,
-            },
-        );
-
-        assert!(matches!(result, JobResult::ActionStatus { .. }));
-        let snapshot = runtime.snapshot();
-        assert_eq!(
-            snapshot.session.mode,
-            visionclip_common::ReplMode::DesktopApp
-        );
-    }
-
-    #[test]
-    fn repl_capture_and_explain_requires_policy_confirmation_when_unknown() {
-        let mut runtime = ReplRuntimeState::new(&AppConfig::default());
-        let request_id = uuid::Uuid::new_v4();
-
-        let result = process_repl_local_command_locked(
-            &mut runtime,
-            request_id,
-            ReplCommand::CaptureAndExplain {
-                mode: visionclip_common::ScreenAssistMode::ExplainCode,
-                policy: visionclip_common::AssessmentPolicy::UnknownAssessment,
-            },
-        );
-
-        assert!(matches!(result, JobResult::ActionStatus { .. }));
-        let snapshot = runtime.snapshot();
-        assert_eq!(
-            snapshot.session.policy,
-            visionclip_common::AssessmentPolicy::UnknownAssessment
-        );
-        assert_eq!(
-            snapshot.session.status,
-            visionclip_common::SessionStatus::AwaitingConfirmation
-        );
-    }
-
-    #[test]
-    fn repl_dismiss_confirmation_returns_session_to_idle() {
-        let mut runtime = ReplRuntimeState::new(&AppConfig::default());
-        let request_id = uuid::Uuid::new_v4();
-
-        process_repl_local_command_locked(
-            &mut runtime,
-            request_id,
-            ReplCommand::CaptureAndExplain {
-                mode: visionclip_common::ScreenAssistMode::ExplainCode,
-                policy: visionclip_common::AssessmentPolicy::UnknownAssessment,
-            },
-        );
-        let result = process_repl_local_command_locked(
-            &mut runtime,
-            request_id,
-            ReplCommand::DismissConfirmation,
-        );
-
-        assert!(matches!(result, JobResult::ActionStatus { .. }));
-        assert_eq!(
-            runtime.snapshot().session.status,
-            visionclip_common::SessionStatus::Idle
-        );
-    }
-
-    #[test]
-    fn repl_capture_and_explain_blocks_restricted_multiple_choice() {
-        let mut runtime = ReplRuntimeState::new(&AppConfig::default());
-        let request_id = uuid::Uuid::new_v4();
-
-        let result = process_repl_local_command_locked(
-            &mut runtime,
-            request_id,
-            ReplCommand::CaptureAndExplain {
-                mode: visionclip_common::ScreenAssistMode::MultipleChoice,
-                policy: visionclip_common::AssessmentPolicy::RestrictedAssessment,
-            },
-        );
-
-        assert!(matches!(
-            result,
-            JobResult::Error {
-                code,
-                ..
-            } if code == "assessment_policy_blocked"
-        ));
-        assert_eq!(
-            runtime.snapshot().session.status,
-            visionclip_common::SessionStatus::Error
-        );
-    }
-
-    #[test]
-    fn repl_ask_keeps_plain_messages_in_agent_mode() {
-        assert_eq!(explicit_repl_web_search_query("olá"), None);
-        assert_eq!(explicit_repl_web_search_query("explique esse código"), None);
-        assert_eq!(explicit_repl_web_search_query("terminal"), None);
-    }
-
-    #[test]
-    fn repl_ask_uses_web_search_only_for_explicit_search_prefixes() {
-        assert_eq!(
-            explicit_repl_web_search_query("pesquise quando foi fundada a NASA").as_deref(),
-            Some("quando foi fundada a NASA")
-        );
-        assert_eq!(
-            explicit_repl_web_search_query("search rust ownership").as_deref(),
-            Some("rust ownership")
-        );
-        assert_eq!(
-            explicit_repl_web_search_query("Google: Quem foi Rousseau?").as_deref(),
-            Some("Quem foi Rousseau?")
-        );
-    }
-
-    #[test]
-    fn repl_capture_and_explain_records_authorized_screen_assist_lifecycle() {
-        let mut runtime = ReplRuntimeState::new(&AppConfig::default());
-        let request_id = uuid::Uuid::new_v4();
-
-        let result = process_repl_local_command_locked(
-            &mut runtime,
-            request_id,
-            ReplCommand::CaptureAndExplain {
-                mode: visionclip_common::ScreenAssistMode::DebugError,
-                policy: visionclip_common::AssessmentPolicy::Practice,
-            },
-        );
-
-        assert!(matches!(result, JobResult::ActionStatus { .. }));
-        let (events, _) = runtime.events_after(1);
-        assert!(matches!(
-            events[0].event,
-            ReplEvent::PolicyEvaluated { allowed: true, .. }
-        ));
-        assert!(matches!(events[1].event, ReplEvent::RunStarted { .. }));
-        assert!(matches!(
-            events[2].event,
-            ReplEvent::IntentDetected {
-                intent: ReplIntent::DebugCode,
-                ..
-            }
-        ));
-        assert!(matches!(events[3].event, ReplEvent::ToolStarted { .. }));
-        assert!(matches!(
-            events[4].event,
-            ReplEvent::ToolCompleted {
-                status: ToolStatus::Cancelled,
-                ..
-            }
-        ));
-        assert!(matches!(events[5].event, ReplEvent::RunCompleted { .. }));
-        assert_eq!(
-            runtime.snapshot().session.status,
-            visionclip_common::SessionStatus::Idle
-        );
-    }
-
-    #[test]
-    fn browser_query_assistant_message_prefers_search_summary() {
-        let summary = Some("Resumo estruturado da pesquisa.".to_string());
-
-        assert_eq!(
-            assistant_message_for_browser_query("Quem foi Rousseau?", &summary),
-            "Resumo estruturado da pesquisa."
-        );
-    }
-
-    #[test]
-    fn browser_query_assistant_message_falls_back_when_search_summary_is_missing() {
-        let message = assistant_message_for_browser_query("Quem foi Rousseau?", &None);
-
-        assert!(message.contains("Pesquisa: Quem foi Rousseau?"));
-        assert!(message.contains("Leitura inicial:"));
-    }
-
-    #[test]
-    fn tool_status_maps_result_state() {
-        let ok: Result<JobResult> = Ok(JobResult::ActionStatus {
-            request_id: uuid::Uuid::new_v4(),
-            message: "ok".to_string(),
-            spoken: false,
-        });
-        let error: Result<JobResult> = Err(anyhow::anyhow!("boom"));
-
-        assert_eq!(tool_status_for_result(&ok), ToolStatus::Succeeded);
-        assert_eq!(tool_status_for_result(&error), ToolStatus::Failed);
     }
 
     #[tokio::test]

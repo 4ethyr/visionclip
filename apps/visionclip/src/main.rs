@@ -279,12 +279,6 @@ async fn main() -> Result<()> {
             );
             println!("{}", message);
         }
-        JobResult::ReplSessionSnapshot { .. } => {
-            anyhow::bail!("daemon returned unexpected REPL session snapshot for capture request");
-        }
-        JobResult::ReplEvents { .. } => {
-            anyhow::bail!("daemon returned unexpected REPL events for capture request");
-        }
     }
 
     Ok(())
@@ -352,10 +346,7 @@ async fn run_open_application(
         JobResult::Error { code, message, .. } => {
             anyhow::bail!("daemon returned error {code}: {message}");
         }
-        JobResult::ClipboardText { .. }
-        | JobResult::BrowserQuery { .. }
-        | JobResult::ReplSessionSnapshot { .. }
-        | JobResult::ReplEvents { .. } => {
+        JobResult::ClipboardText { .. } | JobResult::BrowserQuery { .. } => {
             anyhow::bail!("daemon returned unexpected response for open application");
         }
     }
@@ -428,10 +419,7 @@ async fn run_open_url(
         JobResult::Error { code, message, .. } => {
             anyhow::bail!("daemon returned error {code}: {message}");
         }
-        JobResult::ClipboardText { .. }
-        | JobResult::BrowserQuery { .. }
-        | JobResult::ReplSessionSnapshot { .. }
-        | JobResult::ReplEvents { .. } => {
+        JobResult::ClipboardText { .. } | JobResult::BrowserQuery { .. } => {
             anyhow::bail!("daemon returned unexpected response for open url");
         }
     }
@@ -508,12 +496,6 @@ async fn run_voice_search(
         }
         JobResult::ClipboardText { .. } => {
             anyhow::bail!("daemon returned unexpected clipboard response for voice search");
-        }
-        JobResult::ReplSessionSnapshot { .. } => {
-            anyhow::bail!("daemon returned unexpected REPL session snapshot for voice search");
-        }
-        JobResult::ReplEvents { .. } => {
-            anyhow::bail!("daemon returned unexpected REPL events for voice search");
         }
         JobResult::ActionStatus { .. } => {
             anyhow::bail!("daemon returned unexpected action status for voice search");

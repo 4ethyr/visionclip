@@ -19,8 +19,8 @@ pub use config::AppConfig;
 pub use error::{AppError, AppResult};
 pub use intent::{IntentDetection, IntentKind};
 pub use ipc::{
-    read_message, write_message, Action, ApplicationLaunchJob, CaptureJob, HealthCheckJob,
-    JobResult, ReplCommandJob, ReplEventStreamJob, ReplEventsJob, ReplSessionSnapshotJob,
+    decode_message_payload, encode_message_payload, read_message, read_message_payload,
+    write_message, Action, ApplicationLaunchJob, CaptureJob, HealthCheckJob, JobResult,
     SessionType, UrlOpenJob, VisionRequest, VoiceSearchJob,
 };
 pub use portal::{
@@ -28,11 +28,3 @@ pub use portal::{
     PortalBackendDescriptor,
 };
 pub use router::{AgentDecision, ProposedAction};
-
-pub use coddy_core::{
-    evaluate_assistance, resolve_voice_turn_intent, AssessmentPolicy, ContextPolicy, ModelRef,
-    ModelRole, ReplCommand, ReplEvent, ReplEventBroker, ReplEventEnvelope, ReplEventLog,
-    ReplEventSubscription, ReplIntent, ReplMessage, ReplMode, ReplSession, ReplSessionSnapshot,
-    RequestedHelp, ScreenAssistMode, SearchResultContext, SessionStatus, ShortcutConflictPolicy,
-    ShortcutDecision, ToolStatus, VoiceTurnIntent,
-};

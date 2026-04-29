@@ -23,9 +23,13 @@ VisionClip é um serviço local para Linux que transforma seus modelos locais em
 4. O resultado é pós-processado conforme a ação pedida.
 5. A saída é enviada para clipboard, navegador ou TTS.
 
-## Próximas frentes
+## Projeto Coddy
 
-- A especificação do futuro **Coddy**, o REPL visual/CLI do VisionClip com modo terminal flutuante, modo desktop app, voz, screen understanding e assistência segura para coding practice/assessments, está em [docs/repl/README.md](docs/repl/README.md).
+O **Coddy**, REPL visual/CLI com modo terminal flutuante, modo desktop app, voz, screen understanding e assistência segura para coding practice/assessments, foi separado para o repositório local `/home/aethyr/Documents/coddy`.
+
+Enquanto a integração entre os projetos ainda existir, o daemon do VisionClip mantém uma camada local de compatibilidade de wire atrás da feature explícita `coddy-protocol`. O build padrão do VisionClip não depende do checkout Coddy. A documentação do Coddy foi movida para [../coddy/docs/repl/README.md](../coddy/docs/repl/README.md).
+
+A fronteira atual entre os repositórios está registrada em [docs/repository-boundaries.md](docs/repository-boundaries.md).
 
 ## Status atual
 

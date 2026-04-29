@@ -284,61 +284,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "coddy"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "coddy-client",
- "coddy-core",
- "coddy-ipc",
- "directories",
- "gtk4",
- "serde",
- "serde_json",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "visionclip-voice-input",
-]
-
-[[package]]
-name = "coddy-client"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "coddy-core",
- "coddy-ipc",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "coddy-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "coddy-ipc"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "coddy-core",
- "serde",
- "thiserror 2.0.18",
- "tokio",
- "uuid",
-]
-
-[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2720,8 +2665,6 @@ name = "visionclip-common"
 version = "0.1.0"
 dependencies = [
  "bincode",
- "coddy-core",
- "coddy-ipc",
  "directories",
  "serde",
  "serde_json",
@@ -2750,7 +2693,7 @@ name = "visionclip-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "coddy-ipc",
+ "bincode",
  "reqwest",
  "scraper",
  "serde",
@@ -2806,18 +2749,6 @@ dependencies = [
  "tracing",
  "uuid",
  "visionclip-common",
- "which",
-]
-
-[[package]]
-name = "visionclip-voice-input"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "tokio",
- "tracing",
- "uuid",
  "which",
 ]
 
