@@ -55,6 +55,13 @@ record_command = ""
 transcribe_command = "venv/bin/python tools/stt/faster_whisper_transcribe.py {wav_path} --model base --language pt --cache-dir tools/stt-cache"
 transcribe_timeout_ms = 60000
 
+[documents]
+enabled = true
+chunk_chars = 3200
+chunk_overlap_chars = 320
+cache_translations = true
+cache_audio = true
+
 [ui]
 overlay = "compact"
 show_notification = true

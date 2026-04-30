@@ -9,16 +9,35 @@ mod search;
 use crate::linux_apps::open_application;
 use crate::search::{GoogleSearchClient, SearchEnrichment};
 use anyhow::{Context, Result};
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 #[cfg(feature = "coddy-protocol")]
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::{future::Future, path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    future::Future,
+    path::PathBuf,
+    sync::Arc,
+    time::Instant,
+};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use visionclip_common::{
-    decode_message_payload, read_message_payload, write_message, Action, AppConfig,
-    ApplicationLaunchJob, CaptureJob, HealthCheckJob, JobResult, UrlOpenJob, VisionRequest,
-    VoiceSearchJob,
+    decode_message_payload, read_message_payload, redact_for_audit, write_message, Action,
+    AppConfig, ApplicationLaunchJob, AuditLog, CaptureJob, DocumentAskJob, DocumentControlJob,
+    DocumentControlKind, DocumentIngestJob, DocumentReadJob, DocumentSummarizeJob,
+    DocumentTranslateJob, HealthCheckJob, JobResult, PermissionEngine, PolicyDecision, PolicyInput,
+    RiskContext, RiskLevel, SessionId, SessionManager, ToolCall, ToolRegistry, UrlOpenJob,
+    VisionRequest, VoiceSearchJob,
+};
+use visionclip_documents::{
+    AudioChunk, AudioSink, ChunkerConfig, DocumentChunk, DocumentRuntime, IngestedDocument,
+    ReadingProgress, ReadingProgressStore, ReadingSession, ReadingStatus,
+    TranslatedReadingPipeline, TranslatedUnit, TranslationProvider, TranslationRequest,
+    TtsProvider, TtsRequest,
 };
 use visionclip_infer::{
     postprocess::{sanitize_for_speech, sanitize_output},
@@ -43,6 +62,16 @@ async fn main() -> Result<()> {
         .with_context(|| format!("failed to bind socket at {}", socket_path.display()))?;
 
     info!(socket = %socket_path.display(), "visionclip-daemon listening");
+    let document_store = match DocumentStore::load(&config) {
+        Ok(store) => store,
+        Err(error) => {
+            warn!(
+                ?error,
+                "failed to load persisted document store; starting with an empty store"
+            );
+            DocumentStore::new(&config)?
+        }
+    };
 
     let state = Arc::new(AppState {
         config: config.clone(),
@@ -59,6 +88,11 @@ async fn main() -> Result<()> {
             None
         },
         tts_gate: TtsPlaybackGate::default(),
+        tools: ToolRegistry::builtin(),
+        permission_engine: PermissionEngine::default(),
+        audit_log: AuditLog::default(),
+        sessions: Mutex::new(SessionManager::default()),
+        documents: Arc::new(Mutex::new(document_store)),
         #[cfg(feature = "coddy-protocol")]
         repl: Mutex::new(coddy_bridge::ReplRuntimeState::new(&config)),
     });
@@ -81,8 +115,192 @@ struct AppState {
     search: Option<GoogleSearchClient>,
     piper: Option<PiperHttpClient>,
     tts_gate: TtsPlaybackGate,
+    tools: ToolRegistry,
+    permission_engine: PermissionEngine,
+    audit_log: AuditLog,
+    sessions: Mutex<SessionManager>,
+    documents: Arc<Mutex<DocumentStore>>,
     #[cfg(feature = "coddy-protocol")]
     repl: Mutex<coddy_bridge::ReplRuntimeState>,
+}
+
+struct DocumentStore {
+    runtime: DocumentRuntime,
+    storage_path: PathBuf,
+    documents: HashMap<String, IngestedDocument>,
+    reading_sessions: HashMap<String, ReadingSession>,
+    progress: HashMap<String, ReadingProgress>,
+    translations: HashMap<String, Vec<TranslatedUnit>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DocumentStoreSnapshot {
+    version: u32,
+    documents: HashMap<String, IngestedDocument>,
+    reading_sessions: HashMap<String, ReadingSession>,
+    progress: HashMap<String, ReadingProgress>,
+    translations: HashMap<String, Vec<TranslatedUnit>>,
+}
+
+impl DocumentStore {
+    fn new(config: &AppConfig) -> Result<Self> {
+        Ok(Self::empty(config, config.documents_store_path()?))
+    }
+
+    fn load(config: &AppConfig) -> Result<Self> {
+        Self::load_from_path(config, config.documents_store_path()?)
+    }
+
+    fn load_from_path(config: &AppConfig, storage_path: PathBuf) -> Result<Self> {
+        let mut store = Self::empty(config, storage_path.clone());
+        if !storage_path.exists() {
+            return Ok(store);
+        }
+
+        let raw = fs::read_to_string(&storage_path)
+            .with_context(|| format!("failed to read {}", storage_path.display()))?;
+        if raw.trim().is_empty() {
+            return Ok(store);
+        }
+
+        let snapshot: DocumentStoreSnapshot = serde_json::from_str(&raw)
+            .with_context(|| format!("failed to parse {}", storage_path.display()))?;
+        if snapshot.version != 1 {
+            anyhow::bail!(
+                "unsupported document store version {} in {}",
+                snapshot.version,
+                storage_path.display()
+            );
+        }
+
+        store.documents = snapshot.documents;
+        store.reading_sessions = snapshot.reading_sessions;
+        store.progress = snapshot.progress;
+        store.translations = snapshot.translations;
+        Ok(store)
+    }
+
+    fn empty(config: &AppConfig, storage_path: PathBuf) -> Self {
+        Self {
+            runtime: DocumentRuntime::new(ChunkerConfig {
+                target_chars: config.documents.chunk_chars,
+                overlap_chars: config.documents.chunk_overlap_chars,
+            }),
+            storage_path,
+            documents: HashMap::new(),
+            reading_sessions: HashMap::new(),
+            progress: HashMap::new(),
+            translations: HashMap::new(),
+        }
+    }
+
+    fn persist(&self) -> Result<()> {
+        if let Some(parent) = self.storage_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+
+        let snapshot = DocumentStoreSnapshot {
+            version: 1,
+            documents: self.documents.clone(),
+            reading_sessions: self.reading_sessions.clone(),
+            progress: self.progress.clone(),
+            translations: self.translations.clone(),
+        };
+        let encoded = serde_json::to_vec_pretty(&snapshot)?;
+        let tmp_path = self.storage_path.with_extension("json.tmp");
+        fs::write(&tmp_path, encoded)
+            .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+        fs::rename(&tmp_path, &self.storage_path).with_context(|| {
+            format!(
+                "failed to replace {} with {}",
+                self.storage_path.display(),
+                tmp_path.display()
+            )
+        })?;
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct OllamaDocumentTranslator {
+    infer: OllamaBackend,
+    request_id: uuid::Uuid,
+}
+
+#[async_trait]
+impl TranslationProvider for OllamaDocumentTranslator {
+    async fn translate(&self, request: TranslationRequest) -> Result<String> {
+        ensure_supported_document_target_language(&request.target_language)?;
+        let output = self
+            .infer
+            .infer_from_text(
+                format!(
+                    "{}-document-translate-{}",
+                    self.request_id, request.chunk_index
+                ),
+                Action::TranslatePtBr,
+                Some("document".to_string()),
+                request.source_text,
+            )
+            .await?;
+        Ok(sanitize_output(&Action::TranslatePtBr, &output.text))
+    }
+}
+
+#[derive(Clone)]
+struct PiperDocumentTts {
+    piper: PiperHttpClient,
+}
+
+#[async_trait]
+impl TtsProvider for PiperDocumentTts {
+    async fn synthesize(&self, request: TtsRequest) -> Result<Vec<u8>> {
+        self.piper
+            .synthesize(&request.text, request.voice_id.as_deref())
+            .await
+    }
+}
+
+#[derive(Clone)]
+struct PiperDocumentAudioSink {
+    piper: PiperHttpClient,
+    tts_gate: TtsPlaybackGate,
+}
+
+#[async_trait]
+impl AudioSink for PiperDocumentAudioSink {
+    async fn play(&self, chunk: AudioChunk) -> Result<()> {
+        let piper = self.piper.clone();
+        self.tts_gate
+            .run(async move {
+                tokio::task::spawn_blocking(move || piper.play_wav(&chunk.bytes))
+                    .await
+                    .context("document audio playback task failed")?
+            })
+            .await
+    }
+}
+
+#[derive(Clone)]
+struct DaemonReadingProgressStore {
+    documents: Arc<Mutex<DocumentStore>>,
+}
+
+#[async_trait]
+impl ReadingProgressStore for DaemonReadingProgressStore {
+    async fn save_progress(&self, progress: ReadingProgress) -> Result<()> {
+        let mut documents = self.documents.lock().await;
+        if let Some(session) = documents.reading_sessions.get_mut(&progress.session_id) {
+            session.current_chunk_index = progress.current_chunk_index;
+            session.status = progress.status;
+        }
+        documents
+            .progress
+            .insert(progress.session_id.clone(), progress);
+        documents.persist()?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Default)]
@@ -133,6 +351,12 @@ async fn process_request(state: &AppState, request: VisionRequest) -> Result<Job
         VisionRequest::OpenApplication(job) => process_open_application(state, job).await,
         VisionRequest::OpenUrl(job) => process_open_url(state, job).await,
         VisionRequest::HealthCheck(job) => process_health_check(job).await,
+        VisionRequest::DocumentIngest(job) => process_document_ingest(state, job).await,
+        VisionRequest::DocumentTranslate(job) => process_document_translate(state, job).await,
+        VisionRequest::DocumentRead(job) => process_document_read(state, job).await,
+        VisionRequest::DocumentControl(job) => process_document_control(state, job).await,
+        VisionRequest::DocumentAsk(job) => process_document_ask(state, job).await,
+        VisionRequest::DocumentSummarize(job) => process_document_summarize(state, job).await,
     }
 }
 
@@ -154,6 +378,7 @@ async fn process_open_application(
     let speak_requested = state
         .config
         .action_should_speak("OpenApplication", job.speak);
+    let session_id = ensure_request_session(state, request_id).await;
 
     info!(
         request_id = %request_id,
@@ -163,8 +388,37 @@ async fn process_open_application(
         "processing open application job"
     );
 
-    let result = open_application(app_name)?;
+    let authorized_tool = authorize_tool_call(
+        state,
+        &session_id,
+        ToolCall::new(
+            format!("{request_id}-open-application"),
+            "open_application",
+            json!({"app_name": app_name}),
+        ),
+        RiskContext::user_initiated(),
+    )?;
+
+    let result = match open_application(app_name) {
+        Ok(result) => result,
+        Err(error) => {
+            record_tool_failed(
+                state,
+                &session_id,
+                &authorized_tool.name,
+                authorized_tool.risk_level,
+                &error.to_string(),
+            );
+            return Err(error);
+        }
+    };
     let message = result.message;
+    record_tool_executed(
+        state,
+        &session_id,
+        &authorized_tool,
+        json!({"resolved_app": result.resolved_app, "message": message}),
+    );
     let (tts_enqueue_ms, spoken) = enqueue_tts(
         state.piper.as_ref(),
         &state.tts_gate,
@@ -203,8 +457,29 @@ async fn process_open_url(state: &AppState, job: UrlOpenJob) -> Result<JobResult
         || state
             .config
             .action_should_speak("OpenApplication", job.speak);
+    let session_id = ensure_request_session(state, request_id).await;
 
-    validate_browser_url(url)?;
+    let authorized_tool = authorize_tool_call(
+        state,
+        &session_id,
+        ToolCall::new(
+            format!("{request_id}-open-url"),
+            "open_url",
+            json!({"url": url, "label": label}),
+        ),
+        RiskContext::user_initiated(),
+    )?;
+
+    if let Err(error) = validate_browser_url(url) {
+        record_tool_failed(
+            state,
+            &session_id,
+            &authorized_tool.name,
+            authorized_tool.risk_level,
+            &error.to_string(),
+        );
+        return Err(error);
+    }
 
     info!(
         request_id = %request_id,
@@ -215,12 +490,27 @@ async fn process_open_url(state: &AppState, job: UrlOpenJob) -> Result<JobResult
         "processing open url job"
     );
 
-    open_url(url)?;
+    if let Err(error) = open_url(url) {
+        record_tool_failed(
+            state,
+            &session_id,
+            &authorized_tool.name,
+            authorized_tool.risk_level,
+            &error.to_string(),
+        );
+        return Err(error);
+    }
     let message = if label.is_empty() {
         "Abrindo o site.".to_string()
     } else {
         format!("Abrindo {label}.")
     };
+    record_tool_executed(
+        state,
+        &session_id,
+        &authorized_tool,
+        json!({"url": url, "label": label, "message": message}),
+    );
     let (tts_enqueue_ms, spoken) = enqueue_tts(
         state.piper.as_ref(),
         &state.tts_gate,
@@ -248,6 +538,652 @@ async fn process_open_url(state: &AppState, job: UrlOpenJob) -> Result<JobResult
         message,
         spoken,
     })
+}
+
+async fn process_document_ingest(state: &AppState, job: DocumentIngestJob) -> Result<JobResult> {
+    let request_id = job.request_id;
+    let session_id = ensure_request_session(state, request_id).await;
+    let path_text = job.path.display().to_string();
+    let authorized_tool = authorize_tool_call(
+        state,
+        &session_id,
+        ToolCall::new(
+            format!("{request_id}-document-ingest"),
+            "ingest_document",
+            json!({"path": path_text}),
+        ),
+        RiskContext::user_initiated(),
+    )?;
+
+    let runtime = {
+        let documents = state.documents.lock().await;
+        documents.runtime.clone()
+    };
+    let ingested = runtime.ingest_path(&job.path)?;
+    let document_id = ingested.document.id.as_str().to_string();
+    let title = ingested.document.title.clone();
+    let chunks = ingested.chunks.len();
+
+    {
+        let mut documents = state.documents.lock().await;
+        documents.documents.insert(document_id.clone(), ingested);
+        documents.persist()?;
+    }
+
+    record_tool_executed(
+        state,
+        &session_id,
+        &authorized_tool,
+        json!({"document_id": document_id, "title": title, "chunks": chunks}),
+    );
+    state.audit_log.record_tool_event(
+        "document.ingested",
+        Some(session_id),
+        "ingest_document",
+        RiskLevel::Level2,
+        "ingested",
+        json!({"document_id": document_id, "title": title, "chunks": chunks}),
+    );
+
+    Ok(JobResult::DocumentStatus {
+        request_id,
+        document_id: Some(document_id),
+        reading_session_id: None,
+        chunks: Some(chunks),
+        message: format!("Documento ingerido: {title}."),
+        spoken: false,
+    })
+}
+
+async fn process_document_translate(
+    state: &AppState,
+    job: DocumentTranslateJob,
+) -> Result<JobResult> {
+    let request_id = job.request_id;
+    let target_language = normalize_document_target_language(&job.target_language)?;
+    let session_id = ensure_request_session(state, request_id).await;
+    let authorized_tool = authorize_tool_call(
+        state,
+        &session_id,
+        ToolCall::new(
+            format!("{request_id}-document-translate"),
+            "translate_document",
+            json!({"document_id": &job.document_id, "target_language": &target_language}),
+        ),
+        RiskContext::user_initiated(),
+    )?;
+
+    let (document_id, title, chunks) = {
+        let documents = state.documents.lock().await;
+        let ingested = documents.documents.get(&job.document_id).with_context(|| {
+            format!(
+                "document `{}` was not ingested in this daemon session",
+                job.document_id
+            )
+        })?;
+        (
+            ingested.document.id.clone(),
+            ingested.document.title.clone(),
+            ingested.chunks.clone(),
+        )
+    };
+
+    let translator = OllamaDocumentTranslator {
+        infer: state.infer.clone(),
+        request_id,
+    };
+    let translation_session_id = format!("{request_id}-translate");
+    let mut translated_units = Vec::with_capacity(chunks.len());
+    for chunk in chunks {
+        let translated_text = translator
+            .translate(TranslationRequest {
+                chunk_index: chunk.chunk_index,
+                source_text: chunk.text.clone(),
+                target_language: target_language.clone(),
+            })
+            .await?;
+        translated_units.push(TranslatedUnit {
+            session_id: translation_session_id.clone(),
+            chunk_id: chunk.id,
+            chunk_index: chunk.chunk_index,
+            source_text: chunk.text,
+            translated_text,
+            target_language: target_language.clone(),
+        });
+    }
+
+    let translated_text = translated_units
+        .iter()
+        .map(|unit| unit.translated_text.trim())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if !translated_text.trim().is_empty() {
+        state.clipboard.set_text(&translated_text)?;
+    }
+
+    let translated_chunks = translated_units.len();
+    {
+        let mut documents = state.documents.lock().await;
+        documents
+            .translations
+            .insert(document_id.as_str().to_string(), translated_units);
+        documents.persist()?;
+    }
+
+    record_tool_executed(
+        state,
+        &session_id,
+        &authorized_tool,
+        json!({
+            "document_id": document_id.as_str(),
+            "target_language": &target_language,
+            "translated_chunks": translated_chunks,
+        }),
+    );
+
+    Ok(JobResult::DocumentStatus {
+        request_id,
+        document_id: Some(document_id.as_str().to_string()),
+        reading_session_id: None,
+        chunks: Some(translated_chunks),
+        message: format!("Documento traduzido e copiado para o clipboard: {title}."),
+        spoken: false,
+    })
+}
+
+async fn process_document_read(state: &AppState, job: DocumentReadJob) -> Result<JobResult> {
+    let request_id = job.request_id;
+    let target_language = normalize_document_target_language(&job.target_language)?;
+    let session_id = ensure_request_session(state, request_id).await;
+    let authorized_tool = authorize_tool_call(
+        state,
+        &session_id,
+        ToolCall::new(
+            format!("{request_id}-document-read"),
+            "read_document_aloud",
+            json!({"document_id": &job.document_id, "target_language": &target_language}),
+        ),
+        RiskContext::user_initiated(),
+    )?;
+
+    let Some(piper) = state.piper.clone() else {
+        anyhow::bail!(
+            "audio is disabled; enable [audio] and configure Piper HTTP before reading documents aloud"
+        );
+    };
+    let (document_id, title, chunks, reading_session) = {
+        let mut documents = state.documents.lock().await;
+        let ingested = documents.documents.get(&job.document_id).with_context(|| {
+            format!(
+                "document `{}` was not ingested in this daemon session",
+                job.document_id
+            )
+        })?;
+        let document_id = ingested.document.id.clone();
+        let title = ingested.document.title.clone();
+        let chunks = ingested.chunks.clone();
+        let mut reading_session = ReadingSession::new(document_id.clone(), target_language.clone());
+        reading_session.start();
+        documents
+            .reading_sessions
+            .insert(reading_session.id.clone(), reading_session.clone());
+        documents.persist()?;
+        (document_id, title, chunks, reading_session)
+    };
+
+    state.audit_log.record_tool_event(
+        "document.reading_started",
+        Some(session_id.clone()),
+        "read_document_aloud",
+        RiskLevel::Level2,
+        "started",
+        json!({
+            "document_id": document_id.as_str(),
+            "reading_session_id": &reading_session.id,
+            "target_language": &target_language,
+            "chunks": chunks.len(),
+        }),
+    );
+
+    let pipeline = TranslatedReadingPipeline::new(
+        Arc::new(OllamaDocumentTranslator {
+            infer: state.infer.clone(),
+            request_id,
+        }),
+        Arc::new(PiperDocumentTts {
+            piper: piper.clone(),
+        }),
+        Arc::new(PiperDocumentAudioSink {
+            piper,
+            tts_gate: state.tts_gate.clone(),
+        }),
+        Arc::new(DaemonReadingProgressStore {
+            documents: Arc::clone(&state.documents),
+        }),
+    );
+
+    let summary = pipeline
+        .run(document_id.clone(), reading_session.clone(), chunks)
+        .await?;
+    record_tool_executed(
+        state,
+        &session_id,
+        &authorized_tool,
+        json!({
+            "document_id": document_id.as_str(),
+            "reading_session_id": &summary.session_id,
+            "chunks_played": summary.chunks_played,
+        }),
+    );
+
+    Ok(JobResult::DocumentStatus {
+        request_id,
+        document_id: Some(document_id.as_str().to_string()),
+        reading_session_id: Some(summary.session_id),
+        chunks: Some(summary.chunks_played),
+        message: format!("Leitura concluída: {title}."),
+        spoken: true,
+    })
+}
+
+async fn process_document_control(state: &AppState, job: DocumentControlJob) -> Result<JobResult> {
+    let request_id = job.request_id;
+    let session_id = ensure_request_session(state, request_id).await;
+    let tool_name = match job.control {
+        DocumentControlKind::Pause => "pause_reading",
+        DocumentControlKind::Resume => "resume_reading",
+        DocumentControlKind::Stop => "stop_reading",
+    };
+    let authorized_tool = authorize_tool_call(
+        state,
+        &session_id,
+        ToolCall::new(
+            format!("{request_id}-{tool_name}"),
+            tool_name,
+            json!({"reading_session_id": &job.reading_session_id}),
+        ),
+        RiskContext::user_initiated(),
+    )?;
+
+    let status = match job.control {
+        DocumentControlKind::Pause => ReadingStatus::Paused,
+        DocumentControlKind::Resume => ReadingStatus::Reading,
+        DocumentControlKind::Stop => ReadingStatus::Stopped,
+    };
+    {
+        let mut documents = state.documents.lock().await;
+        let session = documents
+            .reading_sessions
+            .get_mut(&job.reading_session_id)
+            .with_context(|| {
+                format!("reading session `{}` was not found", job.reading_session_id)
+            })?;
+        match job.control {
+            DocumentControlKind::Pause => session.pause(),
+            DocumentControlKind::Resume => session.resume(),
+            DocumentControlKind::Stop => session.stop(),
+        }
+        documents.persist()?;
+    }
+
+    record_tool_executed(
+        state,
+        &session_id,
+        &authorized_tool,
+        json!({"reading_session_id": &job.reading_session_id, "status": format!("{status:?}")}),
+    );
+
+    Ok(JobResult::DocumentStatus {
+        request_id,
+        document_id: None,
+        reading_session_id: Some(job.reading_session_id),
+        chunks: None,
+        message: format!("Sessão de leitura marcada como {status:?}."),
+        spoken: false,
+    })
+}
+
+async fn process_document_ask(state: &AppState, job: DocumentAskJob) -> Result<JobResult> {
+    let request_id = job.request_id;
+    let question = job.question.trim();
+    if question.is_empty() {
+        anyhow::bail!("document question cannot be empty");
+    }
+    let session_id = ensure_request_session(state, request_id).await;
+    let authorized_tool = authorize_tool_call(
+        state,
+        &session_id,
+        ToolCall::new(
+            format!("{request_id}-document-ask"),
+            "ask_document",
+            json!({"document_id": &job.document_id, "question": question}),
+        ),
+        RiskContext::user_initiated(),
+    )?;
+
+    let (document_id, title, selected_chunks) = {
+        let documents = state.documents.lock().await;
+        let ingested = documents.documents.get(&job.document_id).with_context(|| {
+            format!(
+                "document `{}` was not ingested in this daemon session",
+                job.document_id
+            )
+        })?;
+        (
+            ingested.document.id.as_str().to_string(),
+            ingested.document.title.clone(),
+            select_document_context(&ingested.chunks, question, 4, 12_000),
+        )
+    };
+    let context = document_context_text(&selected_chunks);
+    let prompt = document_question_prompt(&title, question, &context);
+    let output = state
+        .infer
+        .infer_from_text(
+            format!("{request_id}-document-ask"),
+            Action::Explain,
+            Some("document".to_string()),
+            prompt,
+        )
+        .await?;
+    let answer = sanitize_output(&Action::Explain, &output.text);
+    let result_text = format!(
+        "Documento: {title}\nPergunta: {question}\n\nResposta:\n{}",
+        answer.trim()
+    );
+    state.clipboard.set_text(&result_text)?;
+
+    let speech_text = sanitize_for_speech(&Action::Explain, &answer);
+    let (tts_enqueue_ms, spoken) = enqueue_tts(
+        state.piper.as_ref(),
+        &state.tts_gate,
+        request_id,
+        "AskDocument",
+        &speech_text,
+        None,
+        job.speak,
+    );
+
+    record_tool_executed(
+        state,
+        &session_id,
+        &authorized_tool,
+        json!({
+            "document_id": &document_id,
+            "question_chars": question.chars().count(),
+            "context_chunks": selected_chunks.len(),
+            "answer_chars": answer.chars().count(),
+            "spoken": spoken,
+            "tts_enqueue_ms": tts_enqueue_ms,
+        }),
+    );
+    state.audit_log.record_tool_event(
+        "document.question_answered",
+        Some(session_id),
+        "ask_document",
+        RiskLevel::Level1,
+        "answered",
+        json!({
+            "document_id": &document_id,
+            "context_chunks": selected_chunks.len(),
+            "answer_chars": answer.chars().count(),
+        }),
+    );
+
+    Ok(JobResult::ClipboardText {
+        request_id,
+        text: result_text,
+        spoken,
+    })
+}
+
+async fn process_document_summarize(
+    state: &AppState,
+    job: DocumentSummarizeJob,
+) -> Result<JobResult> {
+    let request_id = job.request_id;
+    let session_id = ensure_request_session(state, request_id).await;
+    let authorized_tool = authorize_tool_call(
+        state,
+        &session_id,
+        ToolCall::new(
+            format!("{request_id}-document-summarize"),
+            "summarize_document",
+            json!({"document_id": &job.document_id}),
+        ),
+        RiskContext::user_initiated(),
+    )?;
+
+    let (document_id, title, selected_chunks, total_chunks) = {
+        let documents = state.documents.lock().await;
+        let ingested = documents.documents.get(&job.document_id).with_context(|| {
+            format!(
+                "document `{}` was not ingested in this daemon session",
+                job.document_id
+            )
+        })?;
+        (
+            ingested.document.id.as_str().to_string(),
+            ingested.document.title.clone(),
+            select_document_prefix(&ingested.chunks, 6, 16_000),
+            ingested.chunks.len(),
+        )
+    };
+    let context = document_context_text(&selected_chunks);
+    let prompt = document_summary_prompt(&title, &context, total_chunks);
+    let output = state
+        .infer
+        .infer_from_text(
+            format!("{request_id}-document-summary"),
+            Action::Explain,
+            Some("document".to_string()),
+            prompt,
+        )
+        .await?;
+    let summary = sanitize_output(&Action::Explain, &output.text);
+    let result_text = format!("Documento: {title}\n\nResumo:\n{}", summary.trim());
+    state.clipboard.set_text(&result_text)?;
+
+    let speech_text = sanitize_for_speech(&Action::Explain, &summary);
+    let (tts_enqueue_ms, spoken) = enqueue_tts(
+        state.piper.as_ref(),
+        &state.tts_gate,
+        request_id,
+        "SummarizeDocument",
+        &speech_text,
+        None,
+        job.speak,
+    );
+
+    record_tool_executed(
+        state,
+        &session_id,
+        &authorized_tool,
+        json!({
+            "document_id": &document_id,
+            "context_chunks": selected_chunks.len(),
+            "total_chunks": total_chunks,
+            "summary_chars": summary.chars().count(),
+            "spoken": spoken,
+            "tts_enqueue_ms": tts_enqueue_ms,
+        }),
+    );
+    state.audit_log.record_tool_event(
+        "document.summarized",
+        Some(session_id),
+        "summarize_document",
+        RiskLevel::Level1,
+        "summarized",
+        json!({
+            "document_id": &document_id,
+            "context_chunks": selected_chunks.len(),
+            "total_chunks": total_chunks,
+            "summary_chars": summary.chars().count(),
+        }),
+    );
+
+    Ok(JobResult::ClipboardText {
+        request_id,
+        text: result_text,
+        spoken,
+    })
+}
+
+fn normalize_document_target_language(target_language: &str) -> Result<String> {
+    let target = target_language.trim();
+    if target.is_empty() {
+        return Ok("pt-BR".to_string());
+    }
+    ensure_supported_document_target_language(target)?;
+    Ok("pt-BR".to_string())
+}
+
+fn ensure_supported_document_target_language(target_language: &str) -> Result<()> {
+    let normalized = target_language
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    if matches!(
+        normalized.as_str(),
+        "pt" | "pt-br" | "portuguese" | "portugues" | "português"
+    ) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "document translation currently supports only pt-BR; requested `{}`",
+        target_language
+    );
+}
+
+fn select_document_context(
+    chunks: &[DocumentChunk],
+    query: &str,
+    max_chunks: usize,
+    max_chars: usize,
+) -> Vec<DocumentChunk> {
+    let terms = document_terms(query);
+    if terms.is_empty() {
+        return select_document_prefix(chunks, max_chunks, max_chars);
+    }
+
+    let mut scored = chunks
+        .iter()
+        .map(|chunk| (document_chunk_score(chunk, &terms), chunk))
+        .filter(|(score, _)| *score > 0)
+        .collect::<Vec<_>>();
+    scored.sort_by(|(left_score, left), (right_score, right)| {
+        right_score
+            .cmp(left_score)
+            .then_with(|| left.chunk_index.cmp(&right.chunk_index))
+    });
+
+    let ranked = scored
+        .into_iter()
+        .map(|(_, chunk)| chunk)
+        .collect::<Vec<_>>();
+    let selected = collect_context_chunks(ranked, max_chunks, max_chars);
+    if selected.is_empty() {
+        select_document_prefix(chunks, max_chunks, max_chars)
+    } else {
+        selected
+    }
+}
+
+fn select_document_prefix(
+    chunks: &[DocumentChunk],
+    max_chunks: usize,
+    max_chars: usize,
+) -> Vec<DocumentChunk> {
+    collect_context_chunks(chunks.iter().collect::<Vec<_>>(), max_chunks, max_chars)
+}
+
+fn collect_context_chunks(
+    chunks: Vec<&DocumentChunk>,
+    max_chunks: usize,
+    max_chars: usize,
+) -> Vec<DocumentChunk> {
+    let mut selected = Vec::new();
+    let mut used_chars = 0_usize;
+    let max_chunks = max_chunks.max(1);
+    let max_chars = max_chars.max(512);
+
+    for chunk in chunks {
+        if selected.len() >= max_chunks {
+            break;
+        }
+        let chunk_chars = chunk.text.chars().count();
+        if !selected.is_empty() && used_chars.saturating_add(chunk_chars) > max_chars {
+            continue;
+        }
+        used_chars = used_chars.saturating_add(chunk_chars);
+        selected.push(chunk.clone());
+    }
+
+    selected.sort_by_key(|chunk| chunk.chunk_index);
+    selected
+}
+
+fn document_terms(text: &str) -> Vec<String> {
+    let mut terms = text
+        .split(|ch: char| !ch.is_alphanumeric())
+        .map(str::trim)
+        .filter(|term| term.chars().count() >= 3)
+        .map(|term| term.to_lowercase())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    terms.sort();
+    terms
+}
+
+fn document_chunk_score(chunk: &DocumentChunk, terms: &[String]) -> usize {
+    let text = chunk.text.to_lowercase();
+    let title = chunk
+        .section_title
+        .as_deref()
+        .unwrap_or_default()
+        .to_lowercase();
+    terms
+        .iter()
+        .map(|term| {
+            let text_score = text.matches(term).count();
+            let title_score = if title.contains(term) { 2 } else { 0 };
+            text_score + title_score
+        })
+        .sum()
+}
+
+fn document_context_text(chunks: &[DocumentChunk]) -> String {
+    chunks
+        .iter()
+        .map(|chunk| {
+            let title = chunk
+                .section_title
+                .as_deref()
+                .map(|value| format!(" | seção: {value}"))
+                .unwrap_or_default();
+            format!(
+                "[chunk {}{}]\n{}",
+                chunk.chunk_index,
+                title,
+                chunk.text.trim()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn document_question_prompt(title: &str, question: &str, context: &str) -> String {
+    format!(
+        "Você é um assistente local de leitura de documentos. Responda em PT-BR usando somente os trechos fornecidos. Se os trechos não contiverem a resposta, diga isso claramente e sugira qual parte do documento consultar.\n\nDocumento: {title}\nPergunta: {question}\n\nTrechos relevantes:\n{context}\n\nResposta:"
+    )
+}
+
+fn document_summary_prompt(title: &str, context: &str, total_chunks: usize) -> String {
+    format!(
+        "Você é um assistente local de leitura de documentos. Faça um resumo em PT-BR, claro e fiel ao conteúdo fornecido. Não invente conteúdo ausente. Se o contexto for parcial, indique que o resumo cobre apenas os trechos carregados.\n\nDocumento: {title}\nTotal de chunks no documento: {total_chunks}\n\nTrechos para resumir:\n{context}\n\nResumo:"
+    )
 }
 
 #[cfg(feature = "coddy-protocol")]
@@ -398,6 +1334,134 @@ fn validate_browser_url(url: &str) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+struct AuthorizedTool {
+    name: String,
+    risk_level: RiskLevel,
+}
+
+async fn ensure_request_session(state: &AppState, request_id: uuid::Uuid) -> SessionId {
+    let session_id = SessionId::from_request_id(request_id);
+    let mut sessions = state.sessions.lock().await;
+    sessions.ensure_session(session_id.clone(), "pt-BR");
+    session_id
+}
+
+fn authorize_tool_call(
+    state: &AppState,
+    session_id: &SessionId,
+    call: ToolCall,
+    context: RiskContext,
+) -> Result<AuthorizedTool> {
+    let definition = match state.tools.validate_call(&call) {
+        Ok(definition) => definition,
+        Err(error) => {
+            state.audit_log.record_tool_event(
+                "security.blocked",
+                Some(session_id.clone()),
+                call.name,
+                RiskLevel::Level5,
+                "schema_rejected",
+                json!({"error": error.to_string()}),
+            );
+            anyhow::bail!("tool call rejected: {error}");
+        }
+    };
+
+    state.audit_log.record_tool_event(
+        "tool.proposed",
+        Some(session_id.clone()),
+        definition.name.clone(),
+        definition.risk_level,
+        "proposed",
+        json!({"arguments": redact_for_audit(&call.arguments)}),
+    );
+
+    let policy_input = PolicyInput {
+        tool_name: definition.name.clone(),
+        risk_level: definition.risk_level,
+        permissions: definition.permissions.clone(),
+        confirmation: definition.confirmation,
+        arguments: call.arguments,
+        context,
+    };
+
+    match state.permission_engine.evaluate(&policy_input) {
+        PolicyDecision::Allow => {
+            state.audit_log.record_tool_event(
+                "tool.confirmed",
+                Some(session_id.clone()),
+                definition.name.clone(),
+                definition.risk_level,
+                "auto_allowed",
+                json!({}),
+            );
+            Ok(AuthorizedTool {
+                name: definition.name.clone(),
+                risk_level: definition.risk_level,
+            })
+        }
+        PolicyDecision::RequireConfirmation(request) => {
+            state.audit_log.record_tool_event(
+                "tool.confirmation_requested",
+                Some(session_id.clone()),
+                definition.name.clone(),
+                definition.risk_level,
+                "require_confirmation",
+                json!({"reason": request.reason}),
+            );
+            anyhow::bail!(
+                "tool `{}` requires confirmation before execution",
+                definition.name
+            );
+        }
+        PolicyDecision::Deny(reason) => {
+            state.audit_log.record_tool_event(
+                "tool.denied",
+                Some(session_id.clone()),
+                definition.name.clone(),
+                definition.risk_level,
+                "deny",
+                json!({"reason": reason.to_string()}),
+            );
+            anyhow::bail!("tool `{}` denied by policy: {reason}", definition.name);
+        }
+    }
+}
+
+fn record_tool_executed(
+    state: &AppState,
+    session_id: &SessionId,
+    tool: &AuthorizedTool,
+    data: serde_json::Value,
+) {
+    state.audit_log.record_tool_event(
+        "tool.executed",
+        Some(session_id.clone()),
+        tool.name.clone(),
+        tool.risk_level,
+        "executed",
+        redact_for_audit(&data),
+    );
+}
+
+fn record_tool_failed(
+    state: &AppState,
+    session_id: &SessionId,
+    tool_name: &str,
+    risk_level: RiskLevel,
+    error: &str,
+) {
+    state.audit_log.record_tool_event(
+        "tool.failed",
+        Some(session_id.clone()),
+        tool_name.to_string(),
+        risk_level,
+        "failed",
+        json!({"error": error}),
+    );
+}
+
 async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
     let request_id = job.request_id;
     let action_name = job.action.as_str();
@@ -409,6 +1473,17 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
         speak_requested = job.speak,
         "processing capture job"
     );
+    let session_id = ensure_request_session(state, request_id).await;
+    let capture_tool = authorize_tool_call(
+        state,
+        &session_id,
+        ToolCall::new(
+            format!("{request_id}-capture-screen-context"),
+            "capture_screen_context",
+            json!({"mode": "screenshot_ocr"}),
+        ),
+        RiskContext::user_initiated(),
+    )?;
 
     let ocr_started_at = Instant::now();
     let mut ocr_ms = 0_u64;
@@ -582,6 +1657,12 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                 total_ms = elapsed_ms(total_started_at),
                 "capture job completed"
             );
+            record_tool_executed(
+                state,
+                &session_id,
+                &capture_tool,
+                json!({"action": action_name, "mode": inference_mode, "output_chars": output_chars}),
+            );
 
             Ok(JobResult::BrowserQuery {
                 request_id,
@@ -631,6 +1712,12 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                 tts_enqueue_ms,
                 total_ms = elapsed_ms(total_started_at),
                 "capture job completed"
+            );
+            record_tool_executed(
+                state,
+                &session_id,
+                &capture_tool,
+                json!({"action": action_name, "mode": inference_mode, "output_chars": output_chars}),
             );
 
             Ok(JobResult::ClipboardText {
@@ -711,6 +1798,20 @@ async fn execute_search_query(
     speak_requested: bool,
     total_started_at: Instant,
 ) -> Result<SearchExecution> {
+    let session_id = ensure_request_session(state, request_id).await;
+    let search_tool = authorize_tool_call(
+        state,
+        &session_id,
+        ToolCall::new(
+            format!("{request_id}-search-web"),
+            "search_web",
+            json!({
+                "query": query,
+                "max_results": state.config.search.max_results.clamp(1, 10),
+            }),
+        ),
+        RiskContext::user_initiated(),
+    )?;
     let mut search_fetch_ms = 0_u64;
     let mut search_summary = None;
     let mut search_spoken_text = None;
@@ -830,6 +1931,17 @@ async fn execute_search_query(
         spoken,
         total_ms = elapsed_ms(total_started_at),
         "search query executed"
+    );
+    record_tool_executed(
+        state,
+        &session_id,
+        &search_tool,
+        json!({
+            "query": query,
+            "result_count": search_result_count,
+            "ai_overview_chars": ai_overview_chars,
+            "spoken": spoken,
+        }),
     );
 
     Ok(SearchExecution {
@@ -1203,6 +2315,62 @@ mod tests {
         assert!(validate_browser_url("https://example.com/a b").is_err());
     }
 
+    #[test]
+    fn document_context_selection_prefers_matching_chunks() {
+        let chunks = test_document_chunks(&[
+            "Introdução geral sobre o livro.",
+            "Capítulo de redes com VPN, DNS e configuração de Wi-Fi.",
+            "Apêndice sobre atalhos de teclado.",
+        ]);
+
+        let selected = select_document_context(&chunks, "Como configurar VPN?", 1, 4_000);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].chunk_index, 1);
+    }
+
+    #[test]
+    fn document_context_selection_falls_back_to_prefix_without_terms() {
+        let chunks = test_document_chunks(&["Primeiro trecho.", "Segundo trecho."]);
+
+        let selected = select_document_context(&chunks, "??", 2, 4_000);
+
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].chunk_index, 0);
+        assert_eq!(selected[1].chunk_index, 1);
+    }
+
+    #[test]
+    fn document_store_persists_and_reloads_snapshot() {
+        let config = AppConfig::default();
+        let storage_path = std::env::temp_dir().join(format!(
+            "visionclip-document-store-test-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let document_id = visionclip_documents::DocumentId::new();
+        let chunks = test_document_chunks_with_id(&document_id, &["Persisted chunk."]);
+        let mut store = DocumentStore::empty(&config, storage_path.clone());
+        store.documents.insert(
+            document_id.as_str().to_string(),
+            IngestedDocument {
+                document: visionclip_documents::LoadedDocument {
+                    id: document_id.clone(),
+                    source_path: PathBuf::from("/tmp/persisted.txt"),
+                    title: "persisted".into(),
+                    format: visionclip_documents::DocumentFormat::Text,
+                    text: "Persisted chunk.".into(),
+                },
+                chunks,
+            },
+        );
+
+        store.persist().unwrap();
+        let loaded = DocumentStore::load_from_path(&config, storage_path.clone()).unwrap();
+
+        assert!(loaded.documents.contains_key(document_id.as_str()));
+        let _ = std::fs::remove_file(storage_path);
+    }
+
     #[tokio::test]
     async fn tts_playback_gate_serializes_concurrent_jobs() {
         let gate = TtsPlaybackGate::default();
@@ -1233,5 +2401,30 @@ mod tests {
             })
             .await;
         })
+    }
+
+    fn test_document_chunks(texts: &[&str]) -> Vec<DocumentChunk> {
+        let document_id = visionclip_documents::DocumentId::new();
+        test_document_chunks_with_id(&document_id, texts)
+    }
+
+    fn test_document_chunks_with_id(
+        document_id: &visionclip_documents::DocumentId,
+        texts: &[&str],
+    ) -> Vec<DocumentChunk> {
+        texts
+            .iter()
+            .enumerate()
+            .map(|(index, text)| DocumentChunk {
+                id: format!("chunk_{index}"),
+                document_id: document_id.clone(),
+                chunk_index: index,
+                page_start: None,
+                page_end: None,
+                section_title: None,
+                text: (*text).to_string(),
+                token_count: text.split_whitespace().count(),
+            })
+            .collect()
     }
 }

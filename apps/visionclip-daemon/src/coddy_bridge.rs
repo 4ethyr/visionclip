@@ -984,6 +984,16 @@ fn map_job_result(result: JobResult) -> CoddyResult {
             message,
             spoken,
         },
+        JobResult::DocumentStatus {
+            request_id,
+            message,
+            spoken,
+            ..
+        } => CoddyResult::ActionStatus {
+            request_id,
+            message,
+            spoken,
+        },
         JobResult::Error {
             request_id,
             code,

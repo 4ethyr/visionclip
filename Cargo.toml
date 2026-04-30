@@ -4,6 +4,7 @@ members = [
   "apps/visionclip-daemon",
   "apps/visionclip-config",
   "crates/common",
+  "crates/documents",
   "crates/infer",
   "crates/output",
   "crates/tts",

@@ -4,21 +4,26 @@ mod voice;
 mod voice_overlay;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::time::Instant;
 use tokio::net::UnixStream;
 use tracing::{info, warn};
 use uuid::Uuid;
 use visionclip_common::{
-    read_message, write_message, AppConfig, ApplicationLaunchJob, CaptureJob, JobResult,
-    SessionType, UrlOpenJob, VisionRequest, VoiceSearchJob,
+    read_message, write_message, AppConfig, ApplicationLaunchJob, CaptureJob, DocumentAskJob,
+    DocumentControlJob, DocumentControlKind, DocumentIngestJob, DocumentReadJob,
+    DocumentSummarizeJob, DocumentTranslateJob, JobResult, SessionType, UrlOpenJob, VisionRequest,
+    VoiceSearchJob,
 };
 
 #[derive(Debug, Parser)]
 #[command(name = "visionclip")]
 #[command(about = "CLI do VisionClip para enviar capturas ao daemon")]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
     #[arg(long)]
     action: Option<String>,
 
@@ -62,6 +67,45 @@ struct Cli {
     voice_overlay_duration_ms: u64,
 }
 
+#[derive(Debug, Subcommand)]
+enum Commands {
+    #[command(subcommand)]
+    Document(DocumentCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum DocumentCommand {
+    Ingest {
+        path: PathBuf,
+    },
+    Translate {
+        document_id: String,
+        #[arg(long, default_value = "pt-BR")]
+        target_lang: String,
+    },
+    Read {
+        document_id: String,
+        #[arg(long, default_value = "pt-BR")]
+        target_lang: String,
+    },
+    Ask {
+        document_id: String,
+        question: String,
+    },
+    Summarize {
+        document_id: String,
+    },
+    Pause {
+        reading_session_id: String,
+    },
+    Resume {
+        reading_session_id: String,
+    },
+    Stop {
+        reading_session_id: String,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -83,6 +127,10 @@ async fn main() -> Result<()> {
             std::process::exit(1);
         }
         return Ok(());
+    }
+
+    if let Some(command) = &cli.command {
+        return run_command(&config, command, cli.speak).await;
     }
 
     if (cli.action.is_some() || cli.open_app.is_some() || cli.open_url.is_some())
@@ -279,9 +327,149 @@ async fn main() -> Result<()> {
             );
             println!("{}", message);
         }
+        JobResult::DocumentStatus { .. } => {
+            anyhow::bail!("daemon returned unexpected document response for capture request");
+        }
     }
 
     Ok(())
+}
+
+async fn run_command(config: &AppConfig, command: &Commands, speak: bool) -> Result<()> {
+    match command {
+        Commands::Document(command) => run_document_command(config, command, speak).await,
+    }
+}
+
+async fn run_document_command(
+    config: &AppConfig,
+    command: &DocumentCommand,
+    speak: bool,
+) -> Result<()> {
+    let request_id = Uuid::new_v4();
+    let total_started_at = Instant::now();
+    let request = match command {
+        DocumentCommand::Ingest { path } => VisionRequest::DocumentIngest(DocumentIngestJob {
+            request_id,
+            path: path.clone(),
+        }),
+        DocumentCommand::Translate {
+            document_id,
+            target_lang,
+        } => VisionRequest::DocumentTranslate(DocumentTranslateJob {
+            request_id,
+            document_id: document_id.clone(),
+            target_language: target_lang.clone(),
+        }),
+        DocumentCommand::Read {
+            document_id,
+            target_lang,
+        } => VisionRequest::DocumentRead(DocumentReadJob {
+            request_id,
+            document_id: document_id.clone(),
+            target_language: target_lang.clone(),
+        }),
+        DocumentCommand::Ask {
+            document_id,
+            question,
+        } => VisionRequest::DocumentAsk(DocumentAskJob {
+            request_id,
+            document_id: document_id.clone(),
+            question: question.clone(),
+            speak,
+        }),
+        DocumentCommand::Summarize { document_id } => {
+            VisionRequest::DocumentSummarize(DocumentSummarizeJob {
+                request_id,
+                document_id: document_id.clone(),
+                speak,
+            })
+        }
+        DocumentCommand::Pause { reading_session_id } => {
+            VisionRequest::DocumentControl(DocumentControlJob {
+                request_id,
+                reading_session_id: reading_session_id.clone(),
+                control: DocumentControlKind::Pause,
+            })
+        }
+        DocumentCommand::Resume { reading_session_id } => {
+            VisionRequest::DocumentControl(DocumentControlJob {
+                request_id,
+                reading_session_id: reading_session_id.clone(),
+                control: DocumentControlKind::Resume,
+            })
+        }
+        DocumentCommand::Stop { reading_session_id } => {
+            VisionRequest::DocumentControl(DocumentControlJob {
+                request_id,
+                reading_session_id: reading_session_id.clone(),
+                control: DocumentControlKind::Stop,
+            })
+        }
+    };
+
+    info!(request_id = %request_id, "document command request started");
+    let response = send_request(config, request).await?;
+
+    match response {
+        JobResult::DocumentStatus {
+            document_id,
+            reading_session_id,
+            chunks,
+            message,
+            spoken,
+            ..
+        } => {
+            info!(
+                request_id = %request_id,
+                spoken,
+                total_ms = elapsed_ms(total_started_at),
+                "document command response received"
+            );
+            println!("{}", message);
+            if let Some(document_id) = document_id {
+                println!("document_id: {}", document_id);
+            }
+            if let Some(reading_session_id) = reading_session_id {
+                println!("reading_session_id: {}", reading_session_id);
+            }
+            if let Some(chunks) = chunks {
+                println!("chunks: {}", chunks);
+            }
+        }
+        JobResult::ClipboardText { text, spoken, .. } => {
+            info!(
+                request_id = %request_id,
+                spoken,
+                total_ms = elapsed_ms(total_started_at),
+                "document text response received"
+            );
+            println!("Resultado copiado para o clipboard:\n{}", text);
+        }
+        JobResult::Error { code, message, .. } => {
+            anyhow::bail!("daemon returned error {code}: {message}");
+        }
+        JobResult::ActionStatus { message, .. } => {
+            println!("{}", message);
+        }
+        JobResult::BrowserQuery { .. } => {
+            anyhow::bail!("daemon returned unexpected browser query for document command");
+        }
+    }
+
+    Ok(())
+}
+
+async fn send_request(config: &AppConfig, request: VisionRequest) -> Result<JobResult> {
+    let socket_path = config.socket_path()?;
+    let mut stream = UnixStream::connect(&socket_path).await.with_context(|| {
+        format!(
+            "failed to connect to daemon socket {}",
+            socket_path.display()
+        )
+    })?;
+    write_message(&mut stream, &request).await?;
+    Ok(read_message(&mut stream).await?)
 }
 
 async fn run_open_application(
@@ -346,7 +534,9 @@ async fn run_open_application(
         JobResult::Error { code, message, .. } => {
             anyhow::bail!("daemon returned error {code}: {message}");
         }
-        JobResult::ClipboardText { .. } | JobResult::BrowserQuery { .. } => {
+        JobResult::ClipboardText { .. }
+        | JobResult::BrowserQuery { .. }
+        | JobResult::DocumentStatus { .. } => {
             anyhow::bail!("daemon returned unexpected response for open application");
         }
     }
@@ -419,7 +609,9 @@ async fn run_open_url(
         JobResult::Error { code, message, .. } => {
             anyhow::bail!("daemon returned error {code}: {message}");
         }
-        JobResult::ClipboardText { .. } | JobResult::BrowserQuery { .. } => {
+        JobResult::ClipboardText { .. }
+        | JobResult::BrowserQuery { .. }
+        | JobResult::DocumentStatus { .. } => {
             anyhow::bail!("daemon returned unexpected response for open url");
         }
     }
@@ -497,7 +689,7 @@ async fn run_voice_search(
         JobResult::ClipboardText { .. } => {
             anyhow::bail!("daemon returned unexpected clipboard response for voice search");
         }
-        JobResult::ActionStatus { .. } => {
+        JobResult::ActionStatus { .. } | JobResult::DocumentStatus { .. } => {
             anyhow::bail!("daemon returned unexpected action status for voice search");
         }
     }

@@ -1,5 +1,6 @@
 use crate::error::AppResult;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::path::PathBuf;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
@@ -88,12 +89,67 @@ pub struct HealthCheckJob {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentIngestJob {
+    pub request_id: Uuid,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentTranslateJob {
+    pub request_id: Uuid,
+    pub document_id: String,
+    pub target_language: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentReadJob {
+    pub request_id: Uuid,
+    pub document_id: String,
+    pub target_language: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DocumentControlKind {
+    Pause,
+    Resume,
+    Stop,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentControlJob {
+    pub request_id: Uuid,
+    pub reading_session_id: String,
+    pub control: DocumentControlKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentAskJob {
+    pub request_id: Uuid,
+    pub document_id: String,
+    pub question: String,
+    pub speak: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentSummarizeJob {
+    pub request_id: Uuid,
+    pub document_id: String,
+    pub speak: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum VisionRequest {
     Capture(CaptureJob),
     VoiceSearch(VoiceSearchJob),
     OpenApplication(ApplicationLaunchJob),
     OpenUrl(UrlOpenJob),
     HealthCheck(HealthCheckJob),
+    DocumentIngest(DocumentIngestJob),
+    DocumentTranslate(DocumentTranslateJob),
+    DocumentRead(DocumentReadJob),
+    DocumentControl(DocumentControlJob),
+    DocumentAsk(DocumentAskJob),
+    DocumentSummarize(DocumentSummarizeJob),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +167,14 @@ pub enum JobResult {
     },
     ActionStatus {
         request_id: Uuid,
+        message: String,
+        spoken: bool,
+    },
+    DocumentStatus {
+        request_id: Uuid,
+        document_id: Option<String>,
+        reading_session_id: Option<String>,
+        chunks: Option<usize>,
         message: String,
         spoken: bool,
     },
@@ -245,6 +309,54 @@ mod tests {
             encoded_variant_tag(&VisionRequest::HealthCheck(HealthCheckJob { request_id })),
             4
         );
+        assert_eq!(
+            encoded_variant_tag(&VisionRequest::DocumentIngest(DocumentIngestJob {
+                request_id,
+                path: PathBuf::from("/tmp/book.txt"),
+            })),
+            5
+        );
+        assert_eq!(
+            encoded_variant_tag(&VisionRequest::DocumentTranslate(DocumentTranslateJob {
+                request_id,
+                document_id: "doc_1".into(),
+                target_language: "pt-BR".into(),
+            })),
+            6
+        );
+        assert_eq!(
+            encoded_variant_tag(&VisionRequest::DocumentRead(DocumentReadJob {
+                request_id,
+                document_id: "doc_1".into(),
+                target_language: "pt-BR".into(),
+            })),
+            7
+        );
+        assert_eq!(
+            encoded_variant_tag(&VisionRequest::DocumentControl(DocumentControlJob {
+                request_id,
+                reading_session_id: "read_1".into(),
+                control: DocumentControlKind::Stop,
+            })),
+            8
+        );
+        assert_eq!(
+            encoded_variant_tag(&VisionRequest::DocumentAsk(DocumentAskJob {
+                request_id,
+                document_id: "doc_1".into(),
+                question: "Qual é o tema?".into(),
+                speak: false,
+            })),
+            9
+        );
+        assert_eq!(
+            encoded_variant_tag(&VisionRequest::DocumentSummarize(DocumentSummarizeJob {
+                request_id,
+                document_id: "doc_1".into(),
+                speak: false,
+            })),
+            10
+        );
     }
 
     #[test]
@@ -268,6 +380,39 @@ mod tests {
                 assert!(job.speak);
             }
             _ => panic!("unexpected decoded request"),
+        }
+    }
+
+    #[test]
+    fn document_status_roundtrips_through_bincode() {
+        let request_id = Uuid::new_v4();
+        let result = JobResult::DocumentStatus {
+            request_id,
+            document_id: Some("doc_1".into()),
+            reading_session_id: Some("read_1".into()),
+            chunks: Some(3),
+            message: "ok".into(),
+            spoken: true,
+        };
+        let payload = encode_message_payload(&result).expect("encode document status");
+        let decoded: JobResult = decode_message_payload(&payload).expect("decode document status");
+
+        match decoded {
+            JobResult::DocumentStatus {
+                request_id: decoded_id,
+                document_id,
+                reading_session_id,
+                chunks,
+                spoken,
+                ..
+            } => {
+                assert_eq!(decoded_id, request_id);
+                assert_eq!(document_id.as_deref(), Some("doc_1"));
+                assert_eq!(reading_session_id.as_deref(), Some("read_1"));
+                assert_eq!(chunks, Some(3));
+                assert!(spoken);
+            }
+            _ => panic!("unexpected decoded response"),
         }
     }
 

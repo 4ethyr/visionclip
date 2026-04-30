@@ -2693,6 +2693,7 @@ name = "visionclip-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bincode",
  "reqwest",
  "scraper",
@@ -2704,10 +2705,22 @@ dependencies = [
  "urlencoding",
  "uuid",
  "visionclip-common",
+ "visionclip-documents",
  "visionclip-infer",
  "visionclip-output",
  "visionclip-tts",
  "which",
+]
+
+[[package]]
+name = "visionclip-documents"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "serde",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
