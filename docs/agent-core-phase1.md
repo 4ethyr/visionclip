@@ -1,0 +1,53 @@
+# VisionClip Agent Core Phase 1
+
+## Arquitetura atual detectada
+
+O fluxo nativo permanece:
+
+```text
+visionclip CLI -> Unix Socket -> visionclip-daemon -> inferencia/acoes/saidas
+```
+
+Principais módulos atuais:
+
+- `apps/visionclip`: CLI fino, captura, voz one-shot e envio de `VisionRequest`.
+- `apps/visionclip-daemon`: runtime residente, dispatch de jobs, Ollama, busca, clipboard, TTS e abertura de apps/URLs.
+- `crates/common`: IPC, config, intents e registry declarativo de ações.
+- `crates/infer`: `OllamaBackend` e prompts.
+- `crates/output`: clipboard, browser e notificação.
+- `crates/tts`: Piper HTTP e playback por player externo.
+
+## Gaps principais
+
+- O daemon ainda não tem loop agentic multi-step com tool result retornando ao modelo.
+- Provider router ainda não existe; Ollama segue acoplado em `visionclip-infer`.
+- Session manager e audit log ainda são MVPs em memória.
+- Não existe fluxo de confirmação UI/IPC para ações que exigem confirmação.
+- Document runtime agora tem uma base Phase 1 com IPC/CLI/daemon e snapshot JSON local; PDF, RAG, SQLite e audio runtime controlável ainda estão pendentes.
+
+## Fase 1 implementada
+
+- `ToolRegistry` declarativo com validação de schema JSON para tools existentes.
+- `PermissionEngine` básico com risco 0-5, confirmação para risco >= 3, bloqueio de risco 5, shell arbitrário e cloud em contexto sensível.
+- `SessionManager` básico com contexto, histórico curto, documento atual e expiração.
+- `AuditLog` básico em memória com redaction de campos sensíveis.
+- `AgentOrchestrator` mínimo com planejamento determinístico para comandos simples e validação de tool calls.
+- O daemon agora valida e audita `open_application`, `open_url`, `search_web` e `capture_screen_context` antes da execução nativa.
+
+## Revisão e continuação
+
+- `AgentTurn.policy` agora influencia a avaliação de cada turno.
+- `open_url` é bloqueado pelo `PermissionEngine` quando a URL não é `http://`/`https://`, contém whitespace/control chars ou usa esquemas como `javascript:`/`file:`.
+- `set_volume`, `set_brightness` e `toggle_vpn` foram registrados como tools de risco 3. Elas exigem confirmação e ainda não possuem executor nativo nesta fase.
+- Alterações de rede/VPN sempre exigem confirmação, mesmo quando o contexto é iniciado pelo usuário.
+- `visionclip-documents` adiciona loader TXT/Markdown, chunker, sessão de leitura e pipeline incremental traduzir -> TTS -> áudio com backpressure.
+- `ingest_document`, `ask_document`, `summarize_document`, `read_document_aloud`, `translate_document` e controles de leitura já passam por IPC/CLI/daemon com validação de tool e store local persistido.
+- `ask_document` e `summarize_document` usam recuperação lexical local nesta fase; embeddings/vector store continuam pendentes.
+
+## Próximos passos
+
+1. Adicionar confirmação real via IPC/UI para tools que retornam `RequireConfirmation`.
+2. Persistir audit log e sessões em SQLite.
+3. Migrar `OllamaBackend` para `AiProvider` + `ProviderRouter`.
+4. Extrair DesktopController para apps/URLs, volume, brilho e VPN com command runner mockável.
+5. Conectar voz e CLI ao `AgentOrchestrator` para substituir roteamento local duplicado.
