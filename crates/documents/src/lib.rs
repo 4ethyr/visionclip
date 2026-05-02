@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     convert::TryInto,
     path::{Path, PathBuf},
+    process::Command,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -48,6 +49,7 @@ impl std::fmt::Display for DocumentId {
 pub enum DocumentFormat {
     Text,
     Markdown,
+    Pdf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -128,8 +130,11 @@ pub fn load_document(path: impl AsRef<Path>) -> Result<LoadedDocument> {
     }
 
     let format = document_format(&canonical)?;
-    let text = std::fs::read_to_string(&canonical)
-        .with_context(|| format!("failed to read document `{}`", canonical.display()))?;
+    let text = match format {
+        DocumentFormat::Text | DocumentFormat::Markdown => std::fs::read_to_string(&canonical)
+            .with_context(|| format!("failed to read document `{}`", canonical.display()))?,
+        DocumentFormat::Pdf => extract_pdf_text(&canonical)?,
+    };
     if text.trim().is_empty() {
         bail!("document is empty: {}", canonical.display());
     }
@@ -156,12 +161,64 @@ fn document_format(path: &Path) -> Result<DocumentFormat> {
     {
         Some("txt") => Ok(DocumentFormat::Text),
         Some("md" | "markdown") => Ok(DocumentFormat::Markdown),
-        Some("pdf") => {
-            bail!("PDF extraction is not implemented yet; use TXT or Markdown for this MVP")
-        }
+        Some("pdf") => Ok(DocumentFormat::Pdf),
         Some(other) => bail!("unsupported document extension `{other}`"),
         None => bail!("document path has no extension"),
     }
+}
+
+fn extract_pdf_text(path: &Path) -> Result<String> {
+    extract_pdf_text_with_command(path, Path::new("pdftotext"))
+}
+
+fn extract_pdf_text_with_command(path: &Path, extractor: &Path) -> Result<String> {
+    let output = Command::new(extractor)
+        .args(["-layout", "-enc", "UTF-8"])
+        .arg(path)
+        .arg("-")
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to execute `pdftotext`; install poppler-utils to ingest PDF `{}`",
+                path.display()
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "`pdftotext` failed for `{}` with status {}: {}",
+            path.display(),
+            output.status,
+            stderr.trim()
+        );
+    }
+
+    let text = String::from_utf8(output.stdout)
+        .context("pdftotext returned non-UTF-8 output despite UTF-8 encoding request")?;
+    let text = normalize_pdf_text(&text);
+    if text.trim().is_empty() {
+        bail!(
+            "PDF text extraction produced no text for `{}`; scanned PDFs need OCR support",
+            path.display()
+        );
+    }
+    Ok(text)
+}
+
+fn normalize_pdf_text(input: &str) -> String {
+    let input = input.replace('\u{0c}', "\n\n");
+    let mut normalized = Vec::new();
+    let mut previous_blank = false;
+    for line in input.lines().map(str::trim_end) {
+        let blank = line.trim().is_empty();
+        if blank && previous_blank {
+            continue;
+        }
+        normalized.push(line);
+        previous_blank = blank;
+    }
+    normalized.join("\n").trim().to_string()
 }
 
 pub fn chunk_document(document: &LoadedDocument, config: &ChunkerConfig) -> Vec<DocumentChunk> {
@@ -1058,6 +1115,7 @@ fn encode_document_format(format: DocumentFormat) -> &'static str {
     match format {
         DocumentFormat::Text => "text",
         DocumentFormat::Markdown => "markdown",
+        DocumentFormat::Pdf => "pdf",
     }
 }
 
@@ -1065,6 +1123,7 @@ fn decode_document_format(value: &str) -> Result<DocumentFormat> {
     match value {
         "text" => Ok(DocumentFormat::Text),
         "markdown" => Ok(DocumentFormat::Markdown),
+        "pdf" => Ok(DocumentFormat::Pdf),
         other => bail!("unknown document format `{other}`"),
     }
 }
@@ -1455,6 +1514,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Mutex,
@@ -1503,11 +1563,54 @@ mod tests {
     }
 
     #[test]
-    fn loader_rejects_pdf_until_pdf_extractor_exists() {
-        let error = document_format(Path::new("book.pdf")).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("PDF extraction is not implemented"));
+    fn document_format_supports_pdf_files() {
+        assert_eq!(
+            document_format(Path::new("book.pdf")).unwrap(),
+            DocumentFormat::Pdf
+        );
+    }
+
+    #[test]
+    fn pdf_text_normalization_replaces_page_breaks() {
+        assert_eq!(
+            normalize_pdf_text("Page one  \n\n\u{0c}Page two\n"),
+            "Page one\n\nPage two"
+        );
+    }
+
+    #[test]
+    fn pdf_loader_uses_fixed_pdftotext_arguments() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "visionclip-pdf-extractor-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let script_path = temp_dir.join("pdftotext-test");
+        let args_path = temp_dir.join("args.txt");
+        let pdf_path = temp_dir.join("book.pdf");
+        std::fs::write(&pdf_path, b"%PDF test placeholder").unwrap();
+        std::fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf 'First page\\fSecond page\\n'\n",
+                args_path.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).unwrap();
+
+        let text = extract_pdf_text_with_command(&pdf_path, &script_path).unwrap();
+        let args = std::fs::read_to_string(&args_path).unwrap();
+
+        assert_eq!(text, "First page\n\nSecond page");
+        assert_eq!(
+            args,
+            format!("-layout\n-enc\nUTF-8\n{}\n-\n", pdf_path.display())
+        );
+
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     #[test]

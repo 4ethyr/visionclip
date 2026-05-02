@@ -1,15 +1,15 @@
 # Document Runtime Phase 1
 
 This phase adds the first local-first document runtime foundation for VisionClip.
-It is intentionally small and safe: text and Markdown are supported now, with
-local JSON snapshot compatibility plus SQLite persistence. PDF extraction, OCR,
-sqlite-vec indexing, and a controllable audio runtime remain future integration
-work.
+It is intentionally small and safe: text, Markdown, and textual PDFs are
+supported now, with local JSON snapshot compatibility plus SQLite persistence.
+OCR, sqlite-vec indexing, and a controllable audio runtime remain future
+integration work.
 
 ## Scope Delivered
 
-- `visionclip-documents` crate with document IDs, loaders, chunking, reading
-  sessions, and a translated reading pipeline.
+- `visionclip-documents` crate with document IDs, TXT/Markdown/PDF loaders,
+  chunking, reading sessions, and a translated reading pipeline.
 - Bounded realtime pipeline matching the product plan:
   `DocumentChunkProducer -> TranslationWorker -> TtsWorker -> AudioSink`.
 - Backpressure defaults:
@@ -57,13 +57,15 @@ work.
   the local app data directory and stores cache metadata in SQLite when
   `documents.cache_audio` is enabled; cache hits are loaded before calling TTS
   again.
+- Textual PDF ingestion via optional `pdftotext`/poppler-utils using fixed
+  process arguments and no shell execution.
 
 ## Safety Decisions
 
 - Document ingestion is a level 2 tool and uses `FileRead`.
 - Reading and translation are level 2 tools with once-per-resource confirmation.
 - Pause, resume, and stop are level 0 audio-control tools.
-- PDF paths are rejected with an explicit error until a real extractor is added.
+- Textual PDF extraction uses local `pdftotext`; scanned PDFs still require OCR.
 - The runtime does not send content to cloud providers. The daemon adapter uses
   the existing local Ollama backend and Piper HTTP TTS.
 - Non-PT-BR document translation is rejected until a generic translation prompt
@@ -71,7 +73,7 @@ work.
 
 ## Current Limitations
 
-- TXT and Markdown only.
+- TXT, Markdown, and textual PDFs only.
 - SQLite is wired into the daemon as a compatibility mirror and fallback load
   source. JSON remains written during the migration window.
 - No vector index/RAG retrieval yet.
@@ -87,7 +89,7 @@ work.
 
 1. Make SQLite the single default document store and remove JSON writes after a
    migration window.
-2. Add PDF text extraction behind a feature or optional system dependency.
+2. Add local OCR fallback for scanned PDFs.
 3. Connect translation to ProviderRouter and TTS to a controllable AudioRuntime.
 4. Replace in-process embedding ranking with sqlite-vec vector storage/search.
 5. Add cache eviction and user-facing reading/cache controls.

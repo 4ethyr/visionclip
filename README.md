@@ -15,7 +15,7 @@ VisionClip é um serviço local para Linux que transforma seus modelos locais em
 - Embeddings locais opcionais via Ollama `/api/embed`, ativados por `infer.embedding_model`.
 - Integração com Piper HTTP, com fallback de playback entre `paplay`, `pw-play` e `aplay`.
 - Captura automática com resolução de backend via config: portal com `gdbus`, GNOME Shell Screenshot via D-Bus, `gnome-screenshot`, `grim` e `maim`.
-- Runtime inicial de documentos com ingestão TXT/Markdown, perguntas, resumo, tradução, leitura em voz alta e controles de pausa/retomada/parada.
+- Runtime inicial de documentos com ingestão TXT/Markdown/PDF textual, perguntas, resumo, tradução, leitura em voz alta e controles de pausa/retomada/parada.
 - Persistência local de documentos em snapshot JSON de compatibilidade e SQLite (`documents.sqlite3`) com documentos, chunks, sessões, progresso, traduções, embeddings, metadados de cache de áudio e eventos de auditoria.
 - Configuração local em `~/.config/visionclip/config.toml`.
 
@@ -49,6 +49,7 @@ Nesta etapa, o projeto passa a validar o fluxo principal com `gemma4:e2b` tanto 
 - Modelo de embeddings Ollama opcional, configurado em `infer.embedding_model`, para melhorar `visionclip document ask`
 - Piper HTTP para áudio real, se você quiser TTS fora dos mocks de teste
 - SQLite é embutido via `rusqlite`/`libsqlite3-sys`; não exige serviço externo
+- `pdftotext`/`poppler-utils` opcional para ingestão de PDFs textuais
 - Ferramentas nativas de desktop como `xdg-open`, `notify-send` e algum player de áudio suportado
 - Para captura automática: `gdbus` com portal/serviço nativo do desktop, ou ferramentas como `gnome-screenshot`, `grim` ou `maim`
 - Para observar a AI Overview renderizada no navegador em GNOME/Kali: GNOME Shell Screenshot via D-Bus, `gnome-screenshot`, `grim` ou `maim`
@@ -78,13 +79,14 @@ VISIONCLIP_CONFIG=/home/aethyr/Documents/visionclip/tools/visionclip-hybrid.toml
 
 ## Documentos, RAG local e audiobook
 
-O runtime de documentos atual é local-first e suporta TXT/Markdown. PDFs ainda são rejeitados com erro explícito até existir um extrator/OCR seguro.
+O runtime de documentos atual é local-first e suporta TXT, Markdown e PDFs textuais via `pdftotext`. PDFs escaneados ainda exigem OCR futuro e retornam erro se a extração textual vier vazia.
 
 Fluxos disponíveis:
 
 ```bash
 # Ingerir documento local
 visionclip document ingest /caminho/livro.md
+visionclip document ingest /caminho/livro.pdf
 
 # Perguntar sobre o documento ingerido
 visionclip document ask <document_id> 'Qual é a ideia principal deste capítulo?'

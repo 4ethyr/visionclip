@@ -40,7 +40,7 @@ Principais módulos atuais:
 - `open_url` é bloqueado pelo `PermissionEngine` quando a URL não é `http://`/`https://`, contém whitespace/control chars ou usa esquemas como `javascript:`/`file:`.
 - `set_volume`, `set_brightness` e `toggle_vpn` foram registrados como tools de risco 3. Elas exigem confirmação e ainda não possuem executor nativo nesta fase.
 - Alterações de rede/VPN sempre exigem confirmação, mesmo quando o contexto é iniciado pelo usuário.
-- `visionclip-documents` adiciona loader TXT/Markdown, chunker, sessão de leitura e pipeline incremental traduzir -> TTS -> áudio com backpressure.
+- `visionclip-documents` adiciona loader TXT/Markdown/PDF textual, chunker, sessão de leitura e pipeline incremental traduzir -> TTS -> áudio com backpressure.
 - `ingest_document`, `ask_document`, `summarize_document`, `read_document_aloud`, `translate_document` e controles de leitura já passam por IPC/CLI/daemon com validação de tool e store local persistido.
 - `ask_document` usa embeddings locais via Ollama quando `infer.embedding_model` esta configurado e ha vetores persistidos para o documento; caso contrario volta para recuperação lexical. `summarize_document` ainda usa prefixo local.
 - `visionclip-documents` agora tem `SqliteDocumentStore` com schema versionado para documentos, chunks, sessões, progresso, traduções, embeddings, cache de áudio e eventos de auditoria; o daemon espelha o snapshot JSON para SQLite e consegue recarregar do SQLite quando o JSON nao existe.
