@@ -216,6 +216,7 @@ Use `visionclip-config doctor` para verificar:
 - modelo de embeddings configurado, quando houver
 - probe real de carregamento do modelo configurado
 - reachability do Piper HTTP
+- disponibilidade opcional de `pdftotext` para PDFs textuais
 - ferramentas nativas do host usadas pelo fluxo
 
 Use `visionclip --doctor` para validar especificamente o fluxo operacional do cliente de voz:
