@@ -51,6 +51,8 @@ pub struct InferConfig {
     pub model: String,
     #[serde(default = "default_ollama_ocr_model")]
     pub ocr_model: String,
+    #[serde(default)]
+    pub embedding_model: String,
     #[serde(default = "default_keep_alive")]
     pub keep_alive: String,
     #[serde(default = "default_temperature")]
@@ -260,6 +262,7 @@ impl Default for InferConfig {
             base_url: default_ollama_base_url(),
             model: default_ollama_model(),
             ocr_model: default_ollama_ocr_model(),
+            embedding_model: String::new(),
             keep_alive: default_keep_alive(),
             temperature: default_temperature(),
             thinking_default: default_thinking(),
@@ -539,6 +542,7 @@ mod tests {
         let cfg = AppConfig::default();
         assert_eq!(cfg.infer.model, "gemma4:e2b");
         assert_eq!(cfg.infer.ocr_model, "gemma4:e2b");
+        assert!(cfg.infer.embedding_model.is_empty());
         assert!(cfg.infer.thinking_default.is_empty());
         assert_eq!(cfg.infer.context_window_tokens, 8192);
         assert!(cfg.audio.enabled);

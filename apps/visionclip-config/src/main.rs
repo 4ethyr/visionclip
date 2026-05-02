@@ -91,6 +91,14 @@ async fn run_doctor() -> Result<()> {
     } else {
         println!("Configured OCR model: {}", config.infer.ocr_model);
     }
+    if config.infer.embedding_model.trim().is_empty() {
+        println!("Configured embedding model: disabled");
+    } else {
+        println!(
+            "Configured embedding model: {}",
+            config.infer.embedding_model
+        );
+    }
     println!("Ollama URL: {}", config.infer.base_url);
 
     match list_ollama_models(&config.infer.base_url).await {
@@ -98,11 +106,19 @@ async fn run_doctor() -> Result<()> {
             let available = model_available(&models, &config.infer.model);
             let ocr_available = !config.infer.ocr_model.trim().is_empty()
                 && model_available(&models, &config.infer.ocr_model);
+            let embedding_available = !config.infer.embedding_model.trim().is_empty()
+                && model_available(&models, &config.infer.embedding_model);
             println!("Ollama API: ok");
             println!("Ollama models: {}", models.len());
             println!("Configured model available: {}", yes_no(available));
             if !config.infer.ocr_model.trim().is_empty() {
                 println!("Configured OCR model available: {}", yes_no(ocr_available));
+            }
+            if !config.infer.embedding_model.trim().is_empty() {
+                println!(
+                    "Configured embedding model available: {}",
+                    yes_no(embedding_available)
+                );
             }
 
             if available {
