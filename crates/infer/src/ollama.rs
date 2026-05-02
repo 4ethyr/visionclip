@@ -1,4 +1,7 @@
-use crate::backend::{InferenceBackend, InferenceInput, InferenceOutput};
+use crate::backend::{
+    EmbeddingBackend, EmbeddingInput, EmbeddingOutput, InferenceBackend, InferenceInput,
+    InferenceOutput,
+};
 use crate::prompts::{
     policy_for_action, repl_agent_system_prompt, repl_agent_user_prompt,
     search_answer_system_prompt, search_answer_user_prompt, system_prompt, user_prompt,
@@ -30,6 +33,18 @@ impl OllamaBackend {
 
     pub fn has_ocr_model(&self) -> bool {
         !self.config.ocr_model.trim().is_empty()
+    }
+
+    pub fn has_embedding_model(&self) -> bool {
+        !self.config.embedding_model.trim().is_empty()
+    }
+
+    pub async fn embed_texts(
+        &self,
+        request_id: String,
+        texts: Vec<String>,
+    ) -> Result<EmbeddingOutput> {
+        self.embed(EmbeddingInput { request_id, texts }).await
     }
 
     pub async fn infer_with_ocr_model(
@@ -309,6 +324,89 @@ impl OllamaBackend {
 
         Ok(InferenceOutput { text: content })
     }
+
+    async fn send_embed_request(&self, input: EmbeddingInput) -> Result<EmbeddingOutput> {
+        let EmbeddingInput { request_id, texts } = input;
+        let model = self.config.embedding_model.trim();
+        if model.is_empty() {
+            return Err(anyhow!("Ollama embedding model is not configured"));
+        }
+
+        if texts.is_empty() {
+            return Err(anyhow!("embedding input must contain at least one text"));
+        }
+
+        if texts.iter().any(|text| text.trim().is_empty()) {
+            return Err(anyhow!("embedding input cannot contain blank texts"));
+        }
+
+        let url = format!("{}/api/embed", self.config.base_url.trim_end_matches('/'));
+        let expected_vectors = texts.len();
+        let payload = json!({
+            "model": model,
+            "input": texts,
+            "keep_alive": self.config.keep_alive,
+        });
+        let request_started_at = Instant::now();
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&payload)
+            .send()
+            .await
+            .context("failed to call Ollama embeddings")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "failed to read Ollama embeddings error body".to_string());
+            let body = body.trim();
+            if body.is_empty() {
+                return Err(anyhow!("Ollama embeddings returned {}", status));
+            }
+
+            return Err(anyhow!("Ollama embeddings returned {}: {}", status, body));
+        }
+
+        let decoded: OllamaEmbedResponse = response
+            .json()
+            .await
+            .context("failed to parse Ollama embeddings response")?;
+
+        if decoded.embeddings.len() != expected_vectors {
+            return Err(anyhow!(
+                "Ollama embeddings returned {} vectors for {} inputs",
+                decoded.embeddings.len(),
+                expected_vectors
+            ));
+        }
+
+        if decoded.embeddings.iter().any(Vec::is_empty) {
+            return Err(anyhow!("Ollama embeddings returned an empty vector"));
+        }
+
+        let request_ms = elapsed_ms(request_started_at);
+        let vector_dims = decoded.embeddings.first().map(Vec::len).unwrap_or_default();
+
+        info!(
+            request_id = %request_id,
+            model,
+            input_count = expected_vectors,
+            vector_dims,
+            request_ms,
+            ollama_total_ms = duration_ms(decoded.total_duration),
+            ollama_load_ms = duration_ms(decoded.load_duration),
+            prompt_eval_count = decoded.prompt_eval_count.unwrap_or_default(),
+            "ollama embeddings completed"
+        );
+
+        Ok(EmbeddingOutput {
+            vectors: decoded.embeddings,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -334,6 +432,18 @@ struct OllamaMessage {
     content: String,
     #[serde(default)]
     thinking: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaEmbedResponse {
+    #[serde(default)]
+    embeddings: Vec<Vec<f32>>,
+    #[serde(default)]
+    total_duration: Option<u64>,
+    #[serde(default)]
+    load_duration: Option<u64>,
+    #[serde(default)]
+    prompt_eval_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -377,6 +487,13 @@ impl InferenceBackend for OllamaBackend {
     async fn infer(&self, input: InferenceInput) -> Result<InferenceOutput> {
         self.infer_image_with_model(&input, &self.config.model)
             .await
+    }
+}
+
+#[async_trait]
+impl EmbeddingBackend for OllamaBackend {
+    async fn embed(&self, input: EmbeddingInput) -> Result<EmbeddingOutput> {
+        self.send_embed_request(input).await
     }
 }
 
@@ -681,6 +798,77 @@ mod tests {
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].name, "gemma4:test");
         assert_eq!(models[0].details.family, "gemma4");
+    }
+
+    #[tokio::test]
+    async fn embed_posts_batch_payload_to_ollama() {
+        let server = TestServer::spawn(
+            r#"{"embeddings":[[0.1,0.2,0.3],[0.4,0.5,0.6]],"total_duration":12000000,"load_duration":3000000,"prompt_eval_count":2}"#,
+        );
+        let backend = OllamaBackend::new(InferConfig {
+            base_url: server.base_url.clone(),
+            embedding_model: "embeddinggemma".into(),
+            keep_alive: "5m".into(),
+            ..InferConfig::default()
+        });
+
+        let output = backend
+            .embed_texts(
+                "req-embed".into(),
+                vec!["primeiro trecho".into(), "segundo trecho".into()],
+            )
+            .await
+            .unwrap();
+
+        let requests = server.finish();
+        let (headers, body) = &requests[0];
+        assert!(headers.starts_with("POST /api/embed HTTP/1.1"));
+        assert_eq!(
+            output,
+            EmbeddingOutput {
+                vectors: vec![vec![0.1, 0.2, 0.3], vec![0.4, 0.5, 0.6]]
+            }
+        );
+
+        let json: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(json["model"], "embeddinggemma");
+        assert_eq!(json["input"][0], "primeiro trecho");
+        assert_eq!(json["input"][1], "segundo trecho");
+        assert_eq!(json["keep_alive"], "5m");
+    }
+
+    #[tokio::test]
+    async fn embed_requires_configured_model() {
+        let backend = OllamaBackend::new(InferConfig {
+            embedding_model: String::new(),
+            ..InferConfig::default()
+        });
+
+        let error = backend
+            .embed_texts("req-embed".into(), vec!["texto".into()])
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("not configured"));
+    }
+
+    #[tokio::test]
+    async fn embed_rejects_mismatched_vector_count() {
+        let server = TestServer::spawn(r#"{"embeddings":[[0.1,0.2,0.3]]}"#);
+        let backend = OllamaBackend::new(InferConfig {
+            base_url: server.base_url.clone(),
+            embedding_model: "embeddinggemma".into(),
+            ..InferConfig::default()
+        });
+
+        let error = backend
+            .embed_texts("req-embed".into(), vec!["um".into(), "dois".into()])
+            .await
+            .unwrap_err();
+
+        let requests = server.finish();
+        assert!(requests[0].0.starts_with("POST /api/embed HTTP/1.1"));
+        assert!(error.to_string().contains("1 vectors for 2 inputs"));
     }
 
     #[test]

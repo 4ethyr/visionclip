@@ -8,24 +8,33 @@ VisionClip é um serviço local para Linux que transforma seus modelos locais em
 - `visionclip-daemon`: serviço residente com socket Unix, integração com Ollama, clipboard e TTS.
 - `visionclip-config`: utilitário de bootstrap, diagnóstico do host e listagem de modelos locais.
 - Suporte a ações de `CopyText`, `ExtractCode`, `TranslatePtBr`, `Explain` e `SearchWeb`.
+- Núcleo agentic inicial com `ToolRegistry`, `PermissionEngine`, `SessionManager` e `AuditLog` básicos para validar ferramentas antes da execução.
 - Pipeline padrão com `gemma4:e2b` para OCR e raciocínio textual no mesmo stack local.
 - `SearchWeb` agora gera a query, tenta enriquecer a resposta com scrape best-effort do Google e pode copiar um resumo inicial para o clipboard antes de abrir o navegador.
 - Integração com Ollama via `/api/chat`, com retry automático quando o modelo não suporta `think`.
+- Embeddings locais opcionais via Ollama `/api/embed`, ativados por `infer.embedding_model`.
 - Integração com Piper HTTP, com fallback de playback entre `paplay`, `pw-play` e `aplay`.
 - Captura automática com resolução de backend via config: portal com `gdbus`, GNOME Shell Screenshot via D-Bus, `gnome-screenshot`, `grim` e `maim`.
+- Runtime inicial de documentos com ingestão TXT/Markdown, perguntas, resumo, tradução, leitura em voz alta e controles de pausa/retomada/parada.
+- Persistência local de documentos em snapshot JSON de compatibilidade e SQLite (`documents.sqlite3`) com documentos, chunks, sessões, progresso, traduções e embeddings.
 - Configuração local em `~/.config/visionclip/config.toml`.
 
 ## Arquitetura resumida
 
-1. `visionclip` recebe uma captura já existente, executa um comando externo ou resolve automaticamente um backend nativo de screenshot.
-2. A imagem é enviada por socket Unix ao `visionclip-daemon`.
-3. O daemon extrai texto com `infer.ocr_model` e envia esse texto para o modelo principal configurado no Ollama. No default atual, `gemma4:e2b` faz as duas etapas.
-4. O resultado é pós-processado conforme a ação pedida.
-5. A saída é enviada para clipboard, navegador ou TTS.
+1. `visionclip` recebe uma captura, comando de voz, abertura de app/URL ou comando de documento.
+2. A requisição é enviada por socket Unix ao `visionclip-daemon`.
+3. O daemon valida a ferramenta no registry e aplica política de risco/permissão antes de executar efeitos colaterais.
+4. Para screenshots, o daemon extrai texto com `infer.ocr_model` e envia esse texto para o modelo principal configurado no Ollama. No default atual, `gemma4:e2b` faz as duas etapas.
+5. Para documentos, o daemon usa chunks locais, embeddings opcionais e prompts locais para responder, resumir, traduzir ou narrar.
+6. A saída é enviada para clipboard, navegador ou TTS, e eventos relevantes são auditados.
 
-## Próximas frentes
+## Projeto Coddy
 
-- A especificação do futuro **Coddy**, o REPL visual/CLI do VisionClip com modo terminal flutuante, modo desktop app, voz, screen understanding e assistência segura para coding practice/assessments, está em [docs/repl/README.md](docs/repl/README.md).
+O **Coddy**, REPL visual/CLI com modo terminal flutuante, modo desktop app, voz, screen understanding e assistência segura para coding practice/assessments, foi separado para o repositório local `/home/aethyr/Documents/coddy`.
+
+Enquanto a integração entre os projetos ainda existir, o daemon do VisionClip mantém uma camada local de compatibilidade de wire atrás da feature explícita `coddy-protocol`. O build padrão do VisionClip não depende do checkout Coddy. A documentação do Coddy foi movida para [../coddy/docs/repl/README.md](../coddy/docs/repl/README.md).
+
+A fronteira atual entre os repositórios está registrada em [docs/repository-boundaries.md](docs/repository-boundaries.md).
 
 ## Status atual
 
@@ -37,7 +46,9 @@ Nesta etapa, o projeto passa a validar o fluxo principal com `gemma4:e2b` tanto 
 - Rust toolchain
 - Ollama instalado e ativo
 - `gemma4:e2b`
+- Modelo de embeddings Ollama opcional, configurado em `infer.embedding_model`, para melhorar `visionclip document ask`
 - Piper HTTP para áudio real, se você quiser TTS fora dos mocks de teste
+- SQLite é embutido via `rusqlite`/`libsqlite3-sys`; não exige serviço externo
 - Ferramentas nativas de desktop como `xdg-open`, `notify-send` e algum player de áudio suportado
 - Para captura automática: `gdbus` com portal/serviço nativo do desktop, ou ferramentas como `gnome-screenshot`, `grim` ou `maim`
 - Para observar a AI Overview renderizada no navegador em GNOME/Kali: GNOME Shell Screenshot via D-Bus, `gnome-screenshot`, `grim` ou `maim`
@@ -64,6 +75,43 @@ VISIONCLIP_CONFIG=/home/aethyr/Documents/visionclip/tools/visionclip-hybrid.toml
 # Explicar uma captura gerada por um backend externo
 VISIONCLIP_CONFIG=/home/aethyr/Documents/visionclip/tools/visionclip-hybrid.toml visionclip --action explain --capture-command 'maim -s -u'
 ```
+
+## Documentos, RAG local e audiobook
+
+O runtime de documentos atual é local-first e suporta TXT/Markdown. PDFs ainda são rejeitados com erro explícito até existir um extrator/OCR seguro.
+
+Fluxos disponíveis:
+
+```bash
+# Ingerir documento local
+visionclip document ingest /caminho/livro.md
+
+# Perguntar sobre o documento ingerido
+visionclip document ask <document_id> 'Qual é a ideia principal deste capítulo?'
+
+# Resumir trechos iniciais do documento
+visionclip document summarize <document_id>
+
+# Traduzir o documento para PT-BR e copiar para o clipboard
+visionclip document translate <document_id> --target-lang pt-BR
+
+# Ler o documento em voz alta com tradução incremental para PT-BR
+visionclip document read <document_id> --target-lang pt-BR
+
+# Controlar uma sessão de leitura
+visionclip document pause <reading_session_id>
+visionclip document resume <reading_session_id>
+visionclip document stop <reading_session_id>
+```
+
+Quando `infer.embedding_model` está configurado, a ingestão tenta gerar embeddings locais via Ollama para cada chunk. `document ask` usa ranking semântico quando há vetores persistidos e volta para busca lexical se o modelo não estiver configurado, falhar ou retornar vetores inválidos.
+
+Persistência:
+
+- `documents-store.json`: snapshot de compatibilidade durante a janela de migração.
+- `documents.sqlite3`: store SQLite local com documentos, chunks, sessões, progresso, traduções e embeddings.
+
+O SQLite já é espelhado pelo daemon e pode ser usado para recarregar documentos quando o snapshot JSON não existe. O próximo passo planejado é tornar SQLite o store único e adicionar `sqlite-vec`.
 
 ## Scripts locais
 
@@ -162,6 +210,7 @@ Use `visionclip-config doctor` para verificar:
 - backends de screenshot expostos pelo `xdg-desktop-portal`
 - disponibilidade do Ollama
 - modelos locais expostos pelo runtime
+- modelo de embeddings configurado, quando houver
 - probe real de carregamento do modelo configurado
 - reachability do Piper HTTP
 - ferramentas nativas do host usadas pelo fluxo
@@ -176,7 +225,7 @@ Use `visionclip --doctor` para validar especificamente o fluxo operacional do cl
 - wrapper `~/.local/bin/visionclip-voice-search`
 - bindings GNOME `Super+F12` e `Super+Shift+F12`
 
-Use `visionclip-config models` para listar os modelos disponíveis no Ollama e ajustar `infer.model` com o nome exato do runtime. Nesta etapa, o default do projeto usa `model = "gemma4:e2b"`, `ocr_model = "gemma4:e2b"`, `thinking_default = ""` e `context_window_tokens = 8192`.
+Use `visionclip-config models` para listar os modelos disponíveis no Ollama e ajustar `infer.model`, `infer.ocr_model` e `infer.embedding_model` com nomes exatos do runtime. Nesta etapa, o default do projeto usa `model = "gemma4:e2b"`, `ocr_model = "gemma4:e2b"`, `embedding_model = ""`, `thinking_default = ""` e `context_window_tokens = 8192`.
 
 Quando nenhum `--image` ou `--capture-command` é informado, o launcher usa `capture.backend`. Em `auto`, o fluxo tenta portal com `gdbus` quando `prefer_portal = true` e, se necessário, cai para GNOME Shell Screenshot via D-Bus, `gnome-screenshot`, `grim` ou `maim`, conforme a sessão e os mecanismos disponíveis no host.
 
@@ -245,6 +294,9 @@ systemctl --user enable --now visionclip-daemon.service
 - A overlay compacta já existe, mas ainda precisa de validação visual ampla em diferentes compositores e escalas de tela
 - A qualidade do OCR ainda depende da captura e do modelo configurado; se a captura vier ruidosa, erros pequenos como `170 -> 17` ainda podem acontecer
 - O fluxo de áudio real depende de um Piper HTTP ativo no host
+- Documentos ainda suportam TXT/Markdown; PDF, EPUB e OCR de documento escaneado continuam pendentes
+- SQLite já está integrado como persistência local/migração, mas busca vetorial com `sqlite-vec` ainda não foi ligada
+- Pause/resume/stop de leitura persistem estado, mas o pipeline de áudio ainda precisa de um `AudioRuntime` controlável para interrupção em tempo real
 
 ## Licença
 

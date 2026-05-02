@@ -18,6 +18,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub voice: VoiceConfig,
     #[serde(default)]
+    pub documents: DocumentsConfig,
+    #[serde(default)]
     pub ui: UiConfig,
 }
 
@@ -49,6 +51,8 @@ pub struct InferConfig {
     pub model: String,
     #[serde(default = "default_ollama_ocr_model")]
     pub ocr_model: String,
+    #[serde(default)]
+    pub embedding_model: String,
     #[serde(default = "default_keep_alive")]
     pub keep_alive: String,
     #[serde(default = "default_temperature")]
@@ -130,6 +134,20 @@ pub struct VoiceConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentsConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_document_chunk_chars")]
+    pub chunk_chars: usize,
+    #[serde(default = "default_document_chunk_overlap_chars")]
+    pub chunk_overlap_chars: usize,
+    #[serde(default = "default_true")]
+    pub cache_translations: bool,
+    #[serde(default = "default_true")]
+    pub cache_audio: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiConfig {
     #[serde(default = "default_overlay")]
     pub overlay: String,
@@ -199,6 +217,18 @@ impl AppConfig {
         Ok(socket_dir.join("daemon.sock"))
     }
 
+    pub fn data_dir() -> AppResult<PathBuf> {
+        project_data_dir("io", "4ethyr", "visionclip")
+    }
+
+    pub fn documents_store_path(&self) -> AppResult<PathBuf> {
+        Ok(Self::data_dir()?.join("documents-store.json"))
+    }
+
+    pub fn documents_sqlite_path(&self) -> AppResult<PathBuf> {
+        Ok(Self::data_dir()?.join("documents.sqlite3"))
+    }
+
     pub fn action_should_speak(&self, action: &str, requested: bool) -> bool {
         if !self.audio.enabled || !requested {
             return false;
@@ -236,6 +266,7 @@ impl Default for InferConfig {
             base_url: default_ollama_base_url(),
             model: default_ollama_model(),
             ocr_model: default_ollama_ocr_model(),
+            embedding_model: String::new(),
             keep_alive: default_keep_alive(),
             temperature: default_temperature(),
             thinking_default: default_thinking(),
@@ -290,6 +321,18 @@ impl Default for VoiceConfig {
             record_command: String::new(),
             transcribe_command: String::new(),
             transcribe_timeout_ms: default_voice_transcribe_timeout_ms(),
+        }
+    }
+}
+
+impl Default for DocumentsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            chunk_chars: default_document_chunk_chars(),
+            chunk_overlap_chars: default_document_chunk_overlap_chars(),
+            cache_translations: default_true(),
+            cache_audio: default_true(),
         }
     }
 }
@@ -407,6 +450,14 @@ fn default_voice_transcribe_timeout_ms() -> u64 {
     60_000
 }
 
+fn default_document_chunk_chars() -> usize {
+    3_200
+}
+
+fn default_document_chunk_overlap_chars() -> usize {
+    320
+}
+
 fn default_piper_base_url() -> String {
     "http://127.0.0.1:5000".to_string()
 }
@@ -469,6 +520,12 @@ fn project_config_path(
     Ok(dirs.config_dir().join("config.toml"))
 }
 
+fn project_data_dir(qualifier: &str, organization: &str, application: &str) -> AppResult<PathBuf> {
+    let dirs = ProjectDirs::from(qualifier, organization, application)
+        .ok_or_else(|| AppError::Config("failed to resolve data directory".into()))?;
+    Ok(dirs.data_dir().to_path_buf())
+}
+
 fn ensure_config_file(path: PathBuf) -> AppResult<PathBuf> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -489,6 +546,7 @@ mod tests {
         let cfg = AppConfig::default();
         assert_eq!(cfg.infer.model, "gemma4:e2b");
         assert_eq!(cfg.infer.ocr_model, "gemma4:e2b");
+        assert!(cfg.infer.embedding_model.is_empty());
         assert!(cfg.infer.thinking_default.is_empty());
         assert_eq!(cfg.infer.context_window_tokens, 8192);
         assert!(cfg.audio.enabled);
@@ -499,6 +557,9 @@ mod tests {
         assert!(cfg.voice.overlay_enabled);
         assert_eq!(cfg.voice.shortcut, "<Super>F12");
         assert_eq!(cfg.voice.record_duration_ms, 4_000);
+        assert!(cfg.documents.enabled);
+        assert_eq!(cfg.documents.chunk_chars, 3_200);
+        assert_eq!(cfg.documents.chunk_overlap_chars, 320);
     }
 
     #[test]
@@ -527,6 +588,26 @@ mod tests {
                 Some("/home/demo/.config/ai-snap/config.toml".into())
             ),
             Some(PathBuf::from("/home/demo/.config/visionclip/config.toml"))
+        );
+    }
+
+    #[test]
+    fn documents_store_path_uses_data_directory() {
+        let path = AppConfig::default().documents_store_path().unwrap();
+
+        assert_eq!(
+            path.file_name().and_then(|value| value.to_str()),
+            Some("documents-store.json")
+        );
+    }
+
+    #[test]
+    fn documents_sqlite_path_uses_data_directory() {
+        let path = AppConfig::default().documents_sqlite_path().unwrap();
+
+        assert_eq!(
+            path.file_name().and_then(|value| value.to_str()),
+            Some("documents.sqlite3")
         );
     }
 }

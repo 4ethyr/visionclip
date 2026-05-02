@@ -13,6 +13,7 @@ backend = "ollama"
 base_url = "http://127.0.0.1:11434"
 model = "gemma4:e2b"
 ocr_model = "gemma4:e2b"
+embedding_model = ""
 keep_alive = "15m"
 temperature = 0.1
 thinking_default = ""
@@ -52,6 +53,13 @@ channels = 1
 record_command = ""
 transcribe_command = "/home/aethyr/Documents/visionclip/venv/bin/python /home/aethyr/Documents/visionclip/tools/stt/faster_whisper_transcribe.py {wav_path} --model base --language pt --cache-dir /home/aethyr/Documents/visionclip/tools/stt-cache"
 transcribe_timeout_ms = 120000
+
+[documents]
+enabled = true
+chunk_chars = 3200
+chunk_overlap_chars = 320
+cache_translations = true
+cache_audio = true
 
 [ui]
 overlay = "compact"

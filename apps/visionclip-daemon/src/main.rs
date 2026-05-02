@@ -1,3 +1,7 @@
+#[cfg(feature = "coddy-protocol")]
+mod coddy_bridge;
+#[cfg(feature = "coddy-protocol")]
+mod coddy_contract;
 mod linux_apps;
 mod rendered_search;
 mod search;
@@ -5,26 +9,35 @@ mod search;
 use crate::linux_apps::open_application;
 use crate::search::{GoogleSearchClient, SearchEnrichment};
 use anyhow::{Context, Result};
-use coddy_ipc::{
-    decode_payload, decode_wire_request_payload, read_frame_payload, write_frame, CoddyRequest,
-    CoddyResult, CoddyWireResult, ReplCommandJob, ReplEventStreamJob, ReplEventsJob,
-    ReplSessionSnapshotJob,
-};
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+#[cfg(feature = "coddy-protocol")]
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
+    collections::{HashMap, HashSet},
+    fs,
     future::Future,
     path::PathBuf,
     sync::Arc,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::Instant,
 };
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use visionclip_common::{
-    evaluate_assistance, resolve_voice_turn_intent, write_message, Action, AppConfig,
-    ApplicationLaunchJob, CaptureJob, HealthCheckJob, JobResult, ModelRef, ReplCommand, ReplEvent,
-    ReplEventBroker, ReplEventEnvelope, ReplEventSubscription, ReplIntent, ReplMessage, ReplMode,
-    ReplSession, RequestedHelp, ScreenAssistMode, ToolStatus, UrlOpenJob, VisionRequest,
-    VoiceSearchJob, VoiceTurnIntent,
+    decode_message_payload, read_message_payload, redact_for_audit, write_message, Action,
+    AppConfig, ApplicationLaunchJob, AuditLog, CaptureJob, DocumentAskJob, DocumentControlJob,
+    DocumentControlKind, DocumentIngestJob, DocumentReadJob, DocumentSummarizeJob,
+    DocumentTranslateJob, HealthCheckJob, JobResult, PermissionEngine, PolicyDecision, PolicyInput,
+    RiskContext, RiskLevel, SessionId, SessionManager, ToolCall, ToolRegistry, UrlOpenJob,
+    VisionRequest, VoiceSearchJob,
+};
+use visionclip_documents::{
+    AudioChunk, AudioSink, ChunkerConfig, DocumentChunk, DocumentRuntime, IngestedDocument,
+    ReadingProgress, ReadingProgressStore, ReadingSession, ReadingStatus, SqliteDocumentStore,
+    StoredChunkEmbedding, TranslatedReadingPipeline, TranslatedUnit, TranslationProvider,
+    TranslationRequest, TtsProvider, TtsRequest,
 };
 use visionclip_infer::{
     postprocess::{sanitize_for_speech, sanitize_output},
@@ -49,6 +62,16 @@ async fn main() -> Result<()> {
         .with_context(|| format!("failed to bind socket at {}", socket_path.display()))?;
 
     info!(socket = %socket_path.display(), "visionclip-daemon listening");
+    let document_store = match DocumentStore::load(&config) {
+        Ok(store) => store,
+        Err(error) => {
+            warn!(
+                ?error,
+                "failed to load persisted document store; starting with an empty store"
+            );
+            DocumentStore::new(&config)?
+        }
+    };
 
     let state = Arc::new(AppState {
         config: config.clone(),
@@ -65,7 +88,13 @@ async fn main() -> Result<()> {
             None
         },
         tts_gate: TtsPlaybackGate::default(),
-        repl: Mutex::new(ReplRuntimeState::new(&config)),
+        tools: ToolRegistry::builtin(),
+        permission_engine: PermissionEngine::default(),
+        audit_log: AuditLog::default(),
+        sessions: Mutex::new(SessionManager::default()),
+        documents: Arc::new(Mutex::new(document_store)),
+        #[cfg(feature = "coddy-protocol")]
+        repl: Mutex::new(coddy_bridge::ReplRuntimeState::new(&config)),
     });
 
     loop {
@@ -86,57 +115,345 @@ struct AppState {
     search: Option<GoogleSearchClient>,
     piper: Option<PiperHttpClient>,
     tts_gate: TtsPlaybackGate,
-    repl: Mutex<ReplRuntimeState>,
+    tools: ToolRegistry,
+    permission_engine: PermissionEngine,
+    audit_log: AuditLog,
+    sessions: Mutex<SessionManager>,
+    documents: Arc<Mutex<DocumentStore>>,
+    #[cfg(feature = "coddy-protocol")]
+    repl: Mutex<coddy_bridge::ReplRuntimeState>,
 }
 
-struct ReplRuntimeState {
-    session: ReplSession,
-    events: ReplEventBroker,
+struct DocumentStore {
+    runtime: DocumentRuntime,
+    storage_path: PathBuf,
+    sqlite_path: PathBuf,
+    sqlite: Option<SqliteDocumentStore>,
+    embedding_model: String,
+    documents: HashMap<String, IngestedDocument>,
+    reading_sessions: HashMap<String, ReadingSession>,
+    progress: HashMap<String, ReadingProgress>,
+    translations: HashMap<String, Vec<TranslatedUnit>>,
+    embeddings: HashMap<String, Vec<DocumentChunkEmbedding>>,
 }
 
-impl ReplRuntimeState {
-    fn new(config: &AppConfig) -> Self {
-        let session = ReplSession::new(
-            ReplMode::FloatingTerminal,
-            ModelRef {
-                provider: config.infer.backend.clone(),
-                name: config.infer.model.clone(),
-            },
-        );
-        let mut events = ReplEventBroker::new(session.id, 256);
-        events.publish(
-            ReplEvent::SessionStarted {
-                session_id: session.id,
-            },
-            None,
-            unix_ms_now(),
-        );
-        let session = events.replay(session);
+#[derive(Debug, Serialize, Deserialize)]
+struct DocumentStoreSnapshot {
+    version: u32,
+    documents: HashMap<String, IngestedDocument>,
+    reading_sessions: HashMap<String, ReadingSession>,
+    progress: HashMap<String, ReadingProgress>,
+    translations: HashMap<String, Vec<TranslatedUnit>>,
+    #[serde(default)]
+    embeddings: HashMap<String, Vec<DocumentChunkEmbedding>>,
+}
 
-        Self { session, events }
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DocumentChunkEmbedding {
+    chunk_id: String,
+    chunk_index: usize,
+    vector: Vec<f32>,
+}
 
-    fn record(&mut self, event: ReplEvent, run_id: Option<uuid::Uuid>) {
-        let envelope = self.events.publish(event, run_id, unix_ms_now());
-        self.session.apply_event(&envelope.event);
-    }
+#[derive(Debug, Clone, Copy)]
+struct DocumentContextLimits {
+    max_chunks: usize,
+    max_chars: usize,
+}
 
-    fn snapshot(&self) -> visionclip_common::ReplSessionSnapshot {
-        visionclip_common::ReplSessionSnapshot {
-            session: self.session.clone(),
-            last_sequence: self.events.last_sequence(),
-        }
-    }
-
-    fn events_after(&self, sequence: u64) -> (Vec<ReplEventEnvelope>, u64) {
-        (
-            self.events.events_after(sequence),
-            self.events.last_sequence(),
+impl DocumentStore {
+    fn new(config: &AppConfig) -> Result<Self> {
+        Self::empty(
+            config,
+            config.documents_store_path()?,
+            config.documents_sqlite_path()?,
         )
     }
 
-    fn subscribe_after(&self, sequence: u64) -> ReplEventSubscription {
-        self.events.subscribe_after(sequence)
+    fn load(config: &AppConfig) -> Result<Self> {
+        Self::load_from_path(
+            config,
+            config.documents_store_path()?,
+            config.documents_sqlite_path()?,
+        )
+    }
+
+    fn load_from_path(
+        config: &AppConfig,
+        storage_path: PathBuf,
+        sqlite_path: PathBuf,
+    ) -> Result<Self> {
+        let mut store = Self::empty(config, storage_path.clone(), sqlite_path)?;
+        if !storage_path.exists() {
+            store.load_from_sqlite()?;
+            return Ok(store);
+        }
+
+        let raw = fs::read_to_string(&storage_path)
+            .with_context(|| format!("failed to read {}", storage_path.display()))?;
+        if raw.trim().is_empty() {
+            store.load_from_sqlite()?;
+            return Ok(store);
+        }
+
+        let snapshot: DocumentStoreSnapshot = serde_json::from_str(&raw)
+            .with_context(|| format!("failed to parse {}", storage_path.display()))?;
+        if snapshot.version != 1 {
+            anyhow::bail!(
+                "unsupported document store version {} in {}",
+                snapshot.version,
+                storage_path.display()
+            );
+        }
+
+        store.documents = snapshot.documents;
+        store.reading_sessions = snapshot.reading_sessions;
+        store.progress = snapshot.progress;
+        store.translations = snapshot.translations;
+        store.embeddings = snapshot.embeddings;
+        store.persist_sqlite()?;
+        Ok(store)
+    }
+
+    fn empty(config: &AppConfig, storage_path: PathBuf, sqlite_path: PathBuf) -> Result<Self> {
+        let sqlite = match SqliteDocumentStore::open(&sqlite_path) {
+            Ok(store) => Some(store),
+            Err(error) => {
+                warn!(
+                    ?error,
+                    path = %sqlite_path.display(),
+                    "failed to open SQLite document store; JSON snapshot remains available"
+                );
+                None
+            }
+        };
+        Ok(Self {
+            runtime: DocumentRuntime::new(ChunkerConfig {
+                target_chars: config.documents.chunk_chars,
+                overlap_chars: config.documents.chunk_overlap_chars,
+            }),
+            storage_path,
+            sqlite_path,
+            sqlite,
+            embedding_model: config.infer.embedding_model.trim().to_string(),
+            documents: HashMap::new(),
+            reading_sessions: HashMap::new(),
+            progress: HashMap::new(),
+            translations: HashMap::new(),
+            embeddings: HashMap::new(),
+        })
+    }
+
+    fn persist(&mut self) -> Result<()> {
+        if let Some(parent) = self.storage_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+
+        let snapshot = DocumentStoreSnapshot {
+            version: 1,
+            documents: self.documents.clone(),
+            reading_sessions: self.reading_sessions.clone(),
+            progress: self.progress.clone(),
+            translations: self.translations.clone(),
+            embeddings: self.embeddings.clone(),
+        };
+        let encoded = serde_json::to_vec_pretty(&snapshot)?;
+        let tmp_path = self.storage_path.with_extension("json.tmp");
+        fs::write(&tmp_path, encoded)
+            .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+        fs::rename(&tmp_path, &self.storage_path).with_context(|| {
+            format!(
+                "failed to replace {} with {}",
+                self.storage_path.display(),
+                tmp_path.display()
+            )
+        })?;
+        self.persist_sqlite()?;
+        Ok(())
+    }
+
+    fn load_from_sqlite(&mut self) -> Result<()> {
+        let Some(sqlite) = self.sqlite.as_ref() else {
+            return Ok(());
+        };
+
+        let documents = sqlite.load_documents()?;
+        if documents.is_empty() {
+            return Ok(());
+        }
+
+        self.documents = documents
+            .into_iter()
+            .map(|document| (document.document.id.as_str().to_string(), document))
+            .collect();
+        self.reading_sessions = sqlite
+            .load_reading_sessions()?
+            .into_iter()
+            .map(|session| (session.id.clone(), session))
+            .collect();
+        self.progress = sqlite
+            .load_all_progress()?
+            .into_iter()
+            .map(|progress| (progress.session_id.clone(), progress))
+            .collect();
+
+        let mut translations = HashMap::new();
+        let mut embeddings = HashMap::new();
+        for document_id in self.documents.keys() {
+            let units = sqlite.load_translations_for_document(document_id)?;
+            if !units.is_empty() {
+                translations.insert(document_id.clone(), units);
+            }
+
+            if !self.embedding_model.is_empty() {
+                let stored = sqlite.load_embeddings(document_id, &self.embedding_model)?;
+                if !stored.is_empty() {
+                    embeddings.insert(
+                        document_id.clone(),
+                        stored
+                            .into_iter()
+                            .map(|embedding| DocumentChunkEmbedding {
+                                chunk_id: embedding.chunk_id,
+                                chunk_index: embedding.chunk_index,
+                                vector: embedding.vector,
+                            })
+                            .collect(),
+                    );
+                }
+            }
+        }
+        self.translations = translations;
+        self.embeddings = embeddings;
+
+        info!(
+            path = %self.sqlite_path.display(),
+            documents = self.documents.len(),
+            sessions = self.reading_sessions.len(),
+            "loaded document store from SQLite"
+        );
+        Ok(())
+    }
+
+    fn persist_sqlite(&mut self) -> Result<()> {
+        let Some(sqlite) = self.sqlite.as_mut() else {
+            return Ok(());
+        };
+
+        for document in self.documents.values() {
+            sqlite.save_document(document)?;
+        }
+        for session in self.reading_sessions.values() {
+            sqlite.save_reading_session(session)?;
+        }
+        for progress in self.progress.values() {
+            sqlite.save_progress(progress)?;
+        }
+        for units in self.translations.values() {
+            sqlite.save_translations(units)?;
+        }
+
+        if !self.embedding_model.is_empty() {
+            for (document_id, embeddings) in &self.embeddings {
+                let Some(document) = self.documents.get(document_id) else {
+                    continue;
+                };
+                let stored = embeddings
+                    .iter()
+                    .map(|embedding| StoredChunkEmbedding {
+                        document_id: document.document.id.clone(),
+                        chunk_id: embedding.chunk_id.clone(),
+                        chunk_index: embedding.chunk_index,
+                        model: self.embedding_model.clone(),
+                        vector: embedding.vector.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                sqlite.save_embeddings(&stored)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct OllamaDocumentTranslator {
+    infer: OllamaBackend,
+    request_id: uuid::Uuid,
+}
+
+#[async_trait]
+impl TranslationProvider for OllamaDocumentTranslator {
+    async fn translate(&self, request: TranslationRequest) -> Result<String> {
+        ensure_supported_document_target_language(&request.target_language)?;
+        let output = self
+            .infer
+            .infer_from_text(
+                format!(
+                    "{}-document-translate-{}",
+                    self.request_id, request.chunk_index
+                ),
+                Action::TranslatePtBr,
+                Some("document".to_string()),
+                request.source_text,
+            )
+            .await?;
+        Ok(sanitize_output(&Action::TranslatePtBr, &output.text))
+    }
+}
+
+#[derive(Clone)]
+struct PiperDocumentTts {
+    piper: PiperHttpClient,
+}
+
+#[async_trait]
+impl TtsProvider for PiperDocumentTts {
+    async fn synthesize(&self, request: TtsRequest) -> Result<Vec<u8>> {
+        self.piper
+            .synthesize(&request.text, request.voice_id.as_deref())
+            .await
+    }
+}
+
+#[derive(Clone)]
+struct PiperDocumentAudioSink {
+    piper: PiperHttpClient,
+    tts_gate: TtsPlaybackGate,
+}
+
+#[async_trait]
+impl AudioSink for PiperDocumentAudioSink {
+    async fn play(&self, chunk: AudioChunk) -> Result<()> {
+        let piper = self.piper.clone();
+        self.tts_gate
+            .run(async move {
+                tokio::task::spawn_blocking(move || piper.play_wav(&chunk.bytes))
+                    .await
+                    .context("document audio playback task failed")?
+            })
+            .await
+    }
+}
+
+#[derive(Clone)]
+struct DaemonReadingProgressStore {
+    documents: Arc<Mutex<DocumentStore>>,
+}
+
+#[async_trait]
+impl ReadingProgressStore for DaemonReadingProgressStore {
+    async fn save_progress(&self, progress: ReadingProgress) -> Result<()> {
+        let mut documents = self.documents.lock().await;
+        if let Some(session) = documents.reading_sessions.get_mut(&progress.session_id) {
+            session.current_chunk_index = progress.current_chunk_index;
+            session.status = progress.status;
+        }
+        documents
+            .progress
+            .insert(progress.session_id.clone(), progress);
+        documents.persist()?;
+        Ok(())
     }
 }
 
@@ -153,19 +470,17 @@ impl TtsPlaybackGate {
 }
 
 async fn handle_connection(mut stream: UnixStream, state: Arc<AppState>) -> Result<()> {
-    let payload = read_frame_payload(&mut stream).await?;
+    let payload = read_message_payload(&mut stream).await?;
 
-    if let Some(request) = decode_coddy_wire_request(&payload)? {
-        return handle_coddy_connection(&mut stream, &state, request).await;
+    #[cfg(feature = "coddy-protocol")]
+    {
+        if let Some(request) = coddy_bridge::decode_request(&payload)? {
+            let services = DaemonReplNativeServices;
+            return coddy_bridge::handle_connection(&mut stream, &state, request, &services).await;
+        }
     }
 
-    let request: VisionRequest = decode_payload(&payload)?;
-    let request = match request {
-        VisionRequest::ReplEventStream(job) => {
-            return stream_repl_events(&mut stream, &state, job).await;
-        }
-        request => request,
-    };
+    let request: VisionRequest = decode_message_payload(&payload)?;
 
     let response = match process_request(&state, request).await {
         Ok(result) => result,
@@ -183,128 +498,19 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<AppState>) -> Resu
     Ok(())
 }
 
-fn decode_coddy_wire_request(payload: &[u8]) -> Result<Option<CoddyRequest>> {
-    Ok(decode_wire_request_payload(payload)?)
-}
-
-async fn handle_coddy_connection(
-    stream: &mut UnixStream,
-    state: &AppState,
-    request: CoddyRequest,
-) -> Result<()> {
-    let request_id = request.request_id();
-    let request = match request {
-        CoddyRequest::EventStream(job) => {
-            return stream_coddy_repl_events(stream, state, job).await;
-        }
-        request => request,
-    };
-
-    let response = match process_coddy_request(state, request).await {
-        Ok(result) => result,
-        Err(error) => {
-            error!(?error, "Coddy job processing failed");
-            CoddyResult::Error {
-                request_id,
-                code: "processing_error".into(),
-                message: error.to_string(),
-            }
-        }
-    };
-
-    write_frame(stream, &CoddyWireResult::new(response)).await?;
-    Ok(())
-}
-
 async fn process_request(state: &AppState, request: VisionRequest) -> Result<JobResult> {
     match request {
         VisionRequest::Capture(job) => process_job(state, job).await,
         VisionRequest::VoiceSearch(job) => process_voice_search(state, job).await,
         VisionRequest::OpenApplication(job) => process_open_application(state, job).await,
         VisionRequest::OpenUrl(job) => process_open_url(state, job).await,
-        VisionRequest::ReplCommand(job) => process_repl_command(state, job).await,
-        VisionRequest::ReplSessionSnapshot(job) => process_repl_session_snapshot(state, job).await,
-        VisionRequest::ReplEvents(job) => process_repl_events(state, job).await,
-        VisionRequest::ReplEventStream(job) => Ok(JobResult::Error {
-            request_id: job.request_id,
-            code: "invalid_repl_stream_dispatch".to_string(),
-            message: "ReplEventStream requires a persistent connection.".to_string(),
-        }),
         VisionRequest::HealthCheck(job) => process_health_check(job).await,
-    }
-}
-
-async fn process_coddy_request(state: &AppState, request: CoddyRequest) -> Result<CoddyResult> {
-    let result = match request {
-        CoddyRequest::Command(job) => process_repl_command(state, job).await?,
-        CoddyRequest::SessionSnapshot(job) => process_repl_session_snapshot(state, job).await?,
-        CoddyRequest::Events(job) => process_repl_events(state, job).await?,
-        CoddyRequest::EventStream(job) => JobResult::Error {
-            request_id: job.request_id,
-            code: "invalid_repl_stream_dispatch".to_string(),
-            message: "EventStream requires a persistent connection.".to_string(),
-        },
-    };
-
-    Ok(map_job_result_to_coddy(result))
-}
-
-fn map_job_result_to_coddy(result: JobResult) -> CoddyResult {
-    match result {
-        JobResult::ClipboardText {
-            request_id,
-            text,
-            spoken,
-        } => CoddyResult::Text {
-            request_id,
-            text,
-            spoken,
-        },
-        JobResult::BrowserQuery {
-            request_id,
-            query,
-            summary,
-            spoken,
-        } => CoddyResult::BrowserQuery {
-            request_id,
-            query,
-            summary,
-            spoken,
-        },
-        JobResult::ActionStatus {
-            request_id,
-            message,
-            spoken,
-        } => CoddyResult::ActionStatus {
-            request_id,
-            message,
-            spoken,
-        },
-        JobResult::Error {
-            request_id,
-            code,
-            message,
-        } => CoddyResult::Error {
-            request_id,
-            code,
-            message,
-        },
-        JobResult::ReplSessionSnapshot {
-            request_id,
-            snapshot,
-        } => CoddyResult::ReplSessionSnapshot {
-            request_id,
-            snapshot,
-        },
-        JobResult::ReplEvents {
-            request_id,
-            events,
-            last_sequence,
-        } => CoddyResult::ReplEvents {
-            request_id,
-            events,
-            last_sequence,
-        },
+        VisionRequest::DocumentIngest(job) => process_document_ingest(state, job).await,
+        VisionRequest::DocumentTranslate(job) => process_document_translate(state, job).await,
+        VisionRequest::DocumentRead(job) => process_document_read(state, job).await,
+        VisionRequest::DocumentControl(job) => process_document_control(state, job).await,
+        VisionRequest::DocumentAsk(job) => process_document_ask(state, job).await,
+        VisionRequest::DocumentSummarize(job) => process_document_summarize(state, job).await,
     }
 }
 
@@ -314,105 +520,6 @@ async fn process_health_check(job: HealthCheckJob) -> Result<JobResult> {
         message: "VisionClip daemon ativo.".to_string(),
         spoken: false,
     })
-}
-
-async fn process_repl_session_snapshot(
-    state: &AppState,
-    job: ReplSessionSnapshotJob,
-) -> Result<JobResult> {
-    let repl = state.repl.lock().await;
-    Ok(JobResult::ReplSessionSnapshot {
-        request_id: job.request_id,
-        snapshot: Box::new(repl.snapshot()),
-    })
-}
-
-async fn process_repl_events(state: &AppState, job: ReplEventsJob) -> Result<JobResult> {
-    let repl = state.repl.lock().await;
-    let (events, last_sequence) = repl.events_after(job.after_sequence);
-    Ok(JobResult::ReplEvents {
-        request_id: job.request_id,
-        events,
-        last_sequence,
-    })
-}
-
-async fn stream_repl_events(
-    stream: &mut UnixStream,
-    state: &AppState,
-    job: ReplEventStreamJob,
-) -> Result<()> {
-    let mut subscription = {
-        let repl = state.repl.lock().await;
-        repl.subscribe_after(job.after_sequence)
-    };
-
-    info!(
-        request_id = %job.request_id,
-        after_sequence = job.after_sequence,
-        "starting Coddy REPL event stream"
-    );
-
-    while let Some(event) = subscription.next().await {
-        let last_sequence = event.sequence;
-        let response = JobResult::ReplEvents {
-            request_id: job.request_id,
-            events: vec![event],
-            last_sequence,
-        };
-
-        if let Err(error) = write_message(stream, &response).await {
-            info!(
-                request_id = %job.request_id,
-                ?error,
-                "Coddy REPL event stream closed"
-            );
-            return Ok(());
-        }
-    }
-
-    Ok(())
-}
-
-async fn stream_coddy_repl_events(
-    stream: &mut UnixStream,
-    state: &AppState,
-    job: ReplEventStreamJob,
-) -> Result<()> {
-    let mut subscription = {
-        let repl = state.repl.lock().await;
-        repl.subscribe_after(job.after_sequence)
-    };
-
-    info!(
-        request_id = %job.request_id,
-        after_sequence = job.after_sequence,
-        "starting direct Coddy REPL event stream"
-    );
-
-    while let Some(event) = subscription.next().await {
-        let last_sequence = event.sequence;
-        let response = CoddyWireResult::new(CoddyResult::ReplEvents {
-            request_id: job.request_id,
-            events: vec![event],
-            last_sequence,
-        });
-
-        if let Err(error) = write_frame(stream, &response).await {
-            info!(
-                request_id = %job.request_id,
-                ?error,
-                "direct Coddy REPL event stream closed"
-            );
-            return Ok(());
-        }
-    }
-
-    Ok(())
-}
-
-async fn record_repl_event(state: &AppState, event: ReplEvent, run_id: Option<uuid::Uuid>) {
-    state.repl.lock().await.record(event, run_id);
 }
 
 async fn process_open_application(
@@ -425,6 +532,7 @@ async fn process_open_application(
     let speak_requested = state
         .config
         .action_should_speak("OpenApplication", job.speak);
+    let session_id = ensure_request_session(state, request_id).await;
 
     info!(
         request_id = %request_id,
@@ -434,8 +542,37 @@ async fn process_open_application(
         "processing open application job"
     );
 
-    let result = open_application(app_name)?;
+    let authorized_tool = authorize_tool_call(
+        state,
+        &session_id,
+        ToolCall::new(
+            format!("{request_id}-open-application"),
+            "open_application",
+            json!({"app_name": app_name}),
+        ),
+        RiskContext::user_initiated(),
+    )?;
+
+    let result = match open_application(app_name) {
+        Ok(result) => result,
+        Err(error) => {
+            record_tool_failed(
+                state,
+                &session_id,
+                &authorized_tool.name,
+                authorized_tool.risk_level,
+                &error.to_string(),
+            );
+            return Err(error);
+        }
+    };
     let message = result.message;
+    record_tool_executed(
+        state,
+        &session_id,
+        &authorized_tool,
+        json!({"resolved_app": result.resolved_app, "message": message}),
+    );
     let (tts_enqueue_ms, spoken) = enqueue_tts(
         state.piper.as_ref(),
         &state.tts_gate,
@@ -474,8 +611,29 @@ async fn process_open_url(state: &AppState, job: UrlOpenJob) -> Result<JobResult
         || state
             .config
             .action_should_speak("OpenApplication", job.speak);
+    let session_id = ensure_request_session(state, request_id).await;
 
-    validate_browser_url(url)?;
+    let authorized_tool = authorize_tool_call(
+        state,
+        &session_id,
+        ToolCall::new(
+            format!("{request_id}-open-url"),
+            "open_url",
+            json!({"url": url, "label": label}),
+        ),
+        RiskContext::user_initiated(),
+    )?;
+
+    if let Err(error) = validate_browser_url(url) {
+        record_tool_failed(
+            state,
+            &session_id,
+            &authorized_tool.name,
+            authorized_tool.risk_level,
+            &error.to_string(),
+        );
+        return Err(error);
+    }
 
     info!(
         request_id = %request_id,
@@ -486,12 +644,27 @@ async fn process_open_url(state: &AppState, job: UrlOpenJob) -> Result<JobResult
         "processing open url job"
     );
 
-    open_url(url)?;
+    if let Err(error) = open_url(url) {
+        record_tool_failed(
+            state,
+            &session_id,
+            &authorized_tool.name,
+            authorized_tool.risk_level,
+            &error.to_string(),
+        );
+        return Err(error);
+    }
     let message = if label.is_empty() {
         "Abrindo o site.".to_string()
     } else {
         format!("Abrindo {label}.")
     };
+    record_tool_executed(
+        state,
+        &session_id,
+        &authorized_tool,
+        json!({"url": url, "label": label, "message": message}),
+    );
     let (tts_enqueue_ms, spoken) = enqueue_tts(
         state.piper.as_ref(),
         &state.tts_gate,
@@ -521,110 +694,883 @@ async fn process_open_url(state: &AppState, job: UrlOpenJob) -> Result<JobResult
     })
 }
 
-async fn process_repl_command(state: &AppState, job: ReplCommandJob) -> Result<JobResult> {
+async fn process_document_ingest(state: &AppState, job: DocumentIngestJob) -> Result<JobResult> {
     let request_id = job.request_id;
-    let total_started_at = Instant::now();
+    let session_id = ensure_request_session(state, request_id).await;
+    let path_text = job.path.display().to_string();
+    let authorized_tool = authorize_tool_call(
+        state,
+        &session_id,
+        ToolCall::new(
+            format!("{request_id}-document-ingest"),
+            "ingest_document",
+            json!({"path": path_text}),
+        ),
+        RiskContext::user_initiated(),
+    )?;
 
-    info!(
-        request_id = %request_id,
-        command = ?job.command,
-        speak_requested = job.speak,
-        "processing Coddy REPL command"
+    let runtime = {
+        let documents = state.documents.lock().await;
+        documents.runtime.clone()
+    };
+    let ingested = runtime.ingest_path(&job.path)?;
+    let document_id = ingested.document.id.as_str().to_string();
+    let title = ingested.document.title.clone();
+    let chunks = ingested.chunks.len();
+    let generated_embeddings =
+        generate_document_embeddings(state, request_id, &document_id, &ingested.chunks).await;
+    let embeddings_status = if generated_embeddings.is_some() {
+        "stored"
+    } else {
+        "not_stored"
+    };
+
+    {
+        let mut documents = state.documents.lock().await;
+        documents.documents.insert(document_id.clone(), ingested);
+        if let Some(embeddings) = generated_embeddings {
+            documents.embeddings.insert(document_id.clone(), embeddings);
+        }
+        documents.persist()?;
+    }
+
+    record_tool_executed(
+        state,
+        &session_id,
+        &authorized_tool,
+        json!({
+            "document_id": document_id,
+            "title": title,
+            "chunks": chunks,
+            "embeddings": embeddings_status,
+        }),
+    );
+    state.audit_log.record_tool_event(
+        "document.ingested",
+        Some(session_id),
+        "ingest_document",
+        RiskLevel::Level2,
+        "ingested",
+        json!({
+            "document_id": document_id,
+            "title": title,
+            "chunks": chunks,
+            "embeddings": embeddings_status,
+        }),
     );
 
-    match job.command {
-        ReplCommand::Ask { text, .. } => {
-            let command_text = text.trim().to_string();
-            if command_text.is_empty() {
-                record_repl_event(
-                    state,
-                    ReplEvent::Error {
-                        code: "empty_repl_query".to_string(),
-                        message: "Comando Coddy vazio.".to_string(),
-                    },
-                    Some(request_id),
-                )
-                .await;
-                return Ok(JobResult::Error {
-                    request_id,
-                    code: "empty_repl_query".to_string(),
-                    message: "Comando Coddy vazio.".to_string(),
-                });
+    Ok(JobResult::DocumentStatus {
+        request_id,
+        document_id: Some(document_id),
+        reading_session_id: None,
+        chunks: Some(chunks),
+        message: format!("Documento ingerido: {title}."),
+        spoken: false,
+    })
+}
+
+async fn process_document_translate(
+    state: &AppState,
+    job: DocumentTranslateJob,
+) -> Result<JobResult> {
+    let request_id = job.request_id;
+    let target_language = normalize_document_target_language(&job.target_language)?;
+    let session_id = ensure_request_session(state, request_id).await;
+    let authorized_tool = authorize_tool_call(
+        state,
+        &session_id,
+        ToolCall::new(
+            format!("{request_id}-document-translate"),
+            "translate_document",
+            json!({"document_id": &job.document_id, "target_language": &target_language}),
+        ),
+        RiskContext::user_initiated(),
+    )?;
+
+    let (document_id, title, chunks) = {
+        let documents = state.documents.lock().await;
+        let ingested = documents.documents.get(&job.document_id).with_context(|| {
+            format!(
+                "document `{}` was not ingested in this daemon session",
+                job.document_id
+            )
+        })?;
+        (
+            ingested.document.id.clone(),
+            ingested.document.title.clone(),
+            ingested.chunks.clone(),
+        )
+    };
+
+    let translator = OllamaDocumentTranslator {
+        infer: state.infer.clone(),
+        request_id,
+    };
+    let translation_session_id = format!("{request_id}-translate");
+    let mut translated_units = Vec::with_capacity(chunks.len());
+    for chunk in chunks {
+        let translated_text = translator
+            .translate(TranslationRequest {
+                chunk_index: chunk.chunk_index,
+                source_text: chunk.text.clone(),
+                target_language: target_language.clone(),
+            })
+            .await?;
+        translated_units.push(TranslatedUnit {
+            session_id: translation_session_id.clone(),
+            chunk_id: chunk.id,
+            chunk_index: chunk.chunk_index,
+            source_text: chunk.text,
+            translated_text,
+            target_language: target_language.clone(),
+        });
+    }
+
+    let translated_text = translated_units
+        .iter()
+        .map(|unit| unit.translated_text.trim())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if !translated_text.trim().is_empty() {
+        state.clipboard.set_text(&translated_text)?;
+    }
+
+    let translated_chunks = translated_units.len();
+    {
+        let mut documents = state.documents.lock().await;
+        documents
+            .translations
+            .insert(document_id.as_str().to_string(), translated_units);
+        documents.persist()?;
+    }
+
+    record_tool_executed(
+        state,
+        &session_id,
+        &authorized_tool,
+        json!({
+            "document_id": document_id.as_str(),
+            "target_language": &target_language,
+            "translated_chunks": translated_chunks,
+        }),
+    );
+
+    Ok(JobResult::DocumentStatus {
+        request_id,
+        document_id: Some(document_id.as_str().to_string()),
+        reading_session_id: None,
+        chunks: Some(translated_chunks),
+        message: format!("Documento traduzido e copiado para o clipboard: {title}."),
+        spoken: false,
+    })
+}
+
+async fn process_document_read(state: &AppState, job: DocumentReadJob) -> Result<JobResult> {
+    let request_id = job.request_id;
+    let target_language = normalize_document_target_language(&job.target_language)?;
+    let session_id = ensure_request_session(state, request_id).await;
+    let authorized_tool = authorize_tool_call(
+        state,
+        &session_id,
+        ToolCall::new(
+            format!("{request_id}-document-read"),
+            "read_document_aloud",
+            json!({"document_id": &job.document_id, "target_language": &target_language}),
+        ),
+        RiskContext::user_initiated(),
+    )?;
+
+    let Some(piper) = state.piper.clone() else {
+        anyhow::bail!(
+            "audio is disabled; enable [audio] and configure Piper HTTP before reading documents aloud"
+        );
+    };
+    let (document_id, title, chunks, reading_session) = {
+        let mut documents = state.documents.lock().await;
+        let ingested = documents.documents.get(&job.document_id).with_context(|| {
+            format!(
+                "document `{}` was not ingested in this daemon session",
+                job.document_id
+            )
+        })?;
+        let document_id = ingested.document.id.clone();
+        let title = ingested.document.title.clone();
+        let chunks = ingested.chunks.clone();
+        let mut reading_session = ReadingSession::new(document_id.clone(), target_language.clone());
+        reading_session.start();
+        documents
+            .reading_sessions
+            .insert(reading_session.id.clone(), reading_session.clone());
+        documents.persist()?;
+        (document_id, title, chunks, reading_session)
+    };
+
+    state.audit_log.record_tool_event(
+        "document.reading_started",
+        Some(session_id.clone()),
+        "read_document_aloud",
+        RiskLevel::Level2,
+        "started",
+        json!({
+            "document_id": document_id.as_str(),
+            "reading_session_id": &reading_session.id,
+            "target_language": &target_language,
+            "chunks": chunks.len(),
+        }),
+    );
+
+    let pipeline = TranslatedReadingPipeline::new(
+        Arc::new(OllamaDocumentTranslator {
+            infer: state.infer.clone(),
+            request_id,
+        }),
+        Arc::new(PiperDocumentTts {
+            piper: piper.clone(),
+        }),
+        Arc::new(PiperDocumentAudioSink {
+            piper,
+            tts_gate: state.tts_gate.clone(),
+        }),
+        Arc::new(DaemonReadingProgressStore {
+            documents: Arc::clone(&state.documents),
+        }),
+    );
+
+    let summary = pipeline
+        .run(document_id.clone(), reading_session.clone(), chunks)
+        .await?;
+    record_tool_executed(
+        state,
+        &session_id,
+        &authorized_tool,
+        json!({
+            "document_id": document_id.as_str(),
+            "reading_session_id": &summary.session_id,
+            "chunks_played": summary.chunks_played,
+        }),
+    );
+
+    Ok(JobResult::DocumentStatus {
+        request_id,
+        document_id: Some(document_id.as_str().to_string()),
+        reading_session_id: Some(summary.session_id),
+        chunks: Some(summary.chunks_played),
+        message: format!("Leitura concluída: {title}."),
+        spoken: true,
+    })
+}
+
+async fn process_document_control(state: &AppState, job: DocumentControlJob) -> Result<JobResult> {
+    let request_id = job.request_id;
+    let session_id = ensure_request_session(state, request_id).await;
+    let tool_name = match job.control {
+        DocumentControlKind::Pause => "pause_reading",
+        DocumentControlKind::Resume => "resume_reading",
+        DocumentControlKind::Stop => "stop_reading",
+    };
+    let authorized_tool = authorize_tool_call(
+        state,
+        &session_id,
+        ToolCall::new(
+            format!("{request_id}-{tool_name}"),
+            tool_name,
+            json!({"reading_session_id": &job.reading_session_id}),
+        ),
+        RiskContext::user_initiated(),
+    )?;
+
+    let status = match job.control {
+        DocumentControlKind::Pause => ReadingStatus::Paused,
+        DocumentControlKind::Resume => ReadingStatus::Reading,
+        DocumentControlKind::Stop => ReadingStatus::Stopped,
+    };
+    {
+        let mut documents = state.documents.lock().await;
+        let session = documents
+            .reading_sessions
+            .get_mut(&job.reading_session_id)
+            .with_context(|| {
+                format!("reading session `{}` was not found", job.reading_session_id)
+            })?;
+        match job.control {
+            DocumentControlKind::Pause => session.pause(),
+            DocumentControlKind::Resume => session.resume(),
+            DocumentControlKind::Stop => session.stop(),
+        }
+        documents.persist()?;
+    }
+
+    record_tool_executed(
+        state,
+        &session_id,
+        &authorized_tool,
+        json!({"reading_session_id": &job.reading_session_id, "status": format!("{status:?}")}),
+    );
+
+    Ok(JobResult::DocumentStatus {
+        request_id,
+        document_id: None,
+        reading_session_id: Some(job.reading_session_id),
+        chunks: None,
+        message: format!("Sessão de leitura marcada como {status:?}."),
+        spoken: false,
+    })
+}
+
+async fn process_document_ask(state: &AppState, job: DocumentAskJob) -> Result<JobResult> {
+    let request_id = job.request_id;
+    let question = job.question.trim();
+    if question.is_empty() {
+        anyhow::bail!("document question cannot be empty");
+    }
+    let session_id = ensure_request_session(state, request_id).await;
+    let authorized_tool = authorize_tool_call(
+        state,
+        &session_id,
+        ToolCall::new(
+            format!("{request_id}-document-ask"),
+            "ask_document",
+            json!({"document_id": &job.document_id, "question": question}),
+        ),
+        RiskContext::user_initiated(),
+    )?;
+
+    let (document_id, title, chunks, stored_embeddings) = {
+        let documents = state.documents.lock().await;
+        let ingested = documents.documents.get(&job.document_id).with_context(|| {
+            format!(
+                "document `{}` was not ingested in this daemon session",
+                job.document_id
+            )
+        })?;
+        (
+            ingested.document.id.as_str().to_string(),
+            ingested.document.title.clone(),
+            ingested.chunks.clone(),
+            documents.embeddings.get(&job.document_id).cloned(),
+        )
+    };
+    let selected_chunks = select_document_context_with_optional_embeddings(
+        state,
+        request_id,
+        &document_id,
+        &chunks,
+        stored_embeddings.as_deref(),
+        question,
+        DocumentContextLimits {
+            max_chunks: 4,
+            max_chars: 12_000,
+        },
+    )
+    .await;
+    let context = document_context_text(&selected_chunks);
+    let prompt = document_question_prompt(&title, question, &context);
+    let output = state
+        .infer
+        .infer_from_text(
+            format!("{request_id}-document-ask"),
+            Action::Explain,
+            Some("document".to_string()),
+            prompt,
+        )
+        .await?;
+    let answer = sanitize_output(&Action::Explain, &output.text);
+    let result_text = format!(
+        "Documento: {title}\nPergunta: {question}\n\nResposta:\n{}",
+        answer.trim()
+    );
+    state.clipboard.set_text(&result_text)?;
+
+    let speech_text = sanitize_for_speech(&Action::Explain, &answer);
+    let (tts_enqueue_ms, spoken) = enqueue_tts(
+        state.piper.as_ref(),
+        &state.tts_gate,
+        request_id,
+        "AskDocument",
+        &speech_text,
+        None,
+        job.speak,
+    );
+
+    record_tool_executed(
+        state,
+        &session_id,
+        &authorized_tool,
+        json!({
+            "document_id": &document_id,
+            "question_chars": question.chars().count(),
+            "context_chunks": selected_chunks.len(),
+            "answer_chars": answer.chars().count(),
+            "spoken": spoken,
+            "tts_enqueue_ms": tts_enqueue_ms,
+        }),
+    );
+    state.audit_log.record_tool_event(
+        "document.question_answered",
+        Some(session_id),
+        "ask_document",
+        RiskLevel::Level1,
+        "answered",
+        json!({
+            "document_id": &document_id,
+            "context_chunks": selected_chunks.len(),
+            "answer_chars": answer.chars().count(),
+        }),
+    );
+
+    Ok(JobResult::ClipboardText {
+        request_id,
+        text: result_text,
+        spoken,
+    })
+}
+
+async fn process_document_summarize(
+    state: &AppState,
+    job: DocumentSummarizeJob,
+) -> Result<JobResult> {
+    let request_id = job.request_id;
+    let session_id = ensure_request_session(state, request_id).await;
+    let authorized_tool = authorize_tool_call(
+        state,
+        &session_id,
+        ToolCall::new(
+            format!("{request_id}-document-summarize"),
+            "summarize_document",
+            json!({"document_id": &job.document_id}),
+        ),
+        RiskContext::user_initiated(),
+    )?;
+
+    let (document_id, title, selected_chunks, total_chunks) = {
+        let documents = state.documents.lock().await;
+        let ingested = documents.documents.get(&job.document_id).with_context(|| {
+            format!(
+                "document `{}` was not ingested in this daemon session",
+                job.document_id
+            )
+        })?;
+        (
+            ingested.document.id.as_str().to_string(),
+            ingested.document.title.clone(),
+            select_document_prefix(&ingested.chunks, 6, 16_000),
+            ingested.chunks.len(),
+        )
+    };
+    let context = document_context_text(&selected_chunks);
+    let prompt = document_summary_prompt(&title, &context, total_chunks);
+    let output = state
+        .infer
+        .infer_from_text(
+            format!("{request_id}-document-summary"),
+            Action::Explain,
+            Some("document".to_string()),
+            prompt,
+        )
+        .await?;
+    let summary = sanitize_output(&Action::Explain, &output.text);
+    let result_text = format!("Documento: {title}\n\nResumo:\n{}", summary.trim());
+    state.clipboard.set_text(&result_text)?;
+
+    let speech_text = sanitize_for_speech(&Action::Explain, &summary);
+    let (tts_enqueue_ms, spoken) = enqueue_tts(
+        state.piper.as_ref(),
+        &state.tts_gate,
+        request_id,
+        "SummarizeDocument",
+        &speech_text,
+        None,
+        job.speak,
+    );
+
+    record_tool_executed(
+        state,
+        &session_id,
+        &authorized_tool,
+        json!({
+            "document_id": &document_id,
+            "context_chunks": selected_chunks.len(),
+            "total_chunks": total_chunks,
+            "summary_chars": summary.chars().count(),
+            "spoken": spoken,
+            "tts_enqueue_ms": tts_enqueue_ms,
+        }),
+    );
+    state.audit_log.record_tool_event(
+        "document.summarized",
+        Some(session_id),
+        "summarize_document",
+        RiskLevel::Level1,
+        "summarized",
+        json!({
+            "document_id": &document_id,
+            "context_chunks": selected_chunks.len(),
+            "total_chunks": total_chunks,
+            "summary_chars": summary.chars().count(),
+        }),
+    );
+
+    Ok(JobResult::ClipboardText {
+        request_id,
+        text: result_text,
+        spoken,
+    })
+}
+
+fn normalize_document_target_language(target_language: &str) -> Result<String> {
+    let target = target_language.trim();
+    if target.is_empty() {
+        return Ok("pt-BR".to_string());
+    }
+    ensure_supported_document_target_language(target)?;
+    Ok("pt-BR".to_string())
+}
+
+fn ensure_supported_document_target_language(target_language: &str) -> Result<()> {
+    let normalized = target_language
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    if matches!(
+        normalized.as_str(),
+        "pt" | "pt-br" | "portuguese" | "portugues" | "português"
+    ) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "document translation currently supports only pt-BR; requested `{}`",
+        target_language
+    );
+}
+
+async fn generate_document_embeddings(
+    state: &AppState,
+    request_id: uuid::Uuid,
+    document_id: &str,
+    chunks: &[DocumentChunk],
+) -> Option<Vec<DocumentChunkEmbedding>> {
+    if !state.infer.has_embedding_model() || chunks.is_empty() {
+        return None;
+    }
+
+    let mut embeddings = Vec::with_capacity(chunks.len());
+    for (batch_index, batch) in chunks.chunks(16).enumerate() {
+        let texts = batch
+            .iter()
+            .map(|chunk| chunk.text.clone())
+            .collect::<Vec<_>>();
+        let output = match state
+            .infer
+            .embed_texts(format!("{request_id}-document-embed-{batch_index}"), texts)
+            .await
+        {
+            Ok(output) => output,
+            Err(error) => {
+                warn!(
+                    ?error,
+                    document_id,
+                    batch_index,
+                    "document embeddings failed; lexical retrieval remains available"
+                );
+                return None;
             }
+        };
 
-            record_repl_event(
-                state,
-                ReplEvent::RunStarted { run_id: request_id },
-                Some(request_id),
-            )
-            .await;
-            record_repl_event(
-                state,
-                ReplEvent::MessageAppended {
-                    message: ReplMessage {
-                        id: uuid::Uuid::new_v4(),
-                        role: "user".to_string(),
-                        text: command_text.clone(),
-                    },
-                },
-                Some(request_id),
-            )
-            .await;
+        for (chunk, vector) in batch.iter().zip(output.vectors) {
+            embeddings.push(DocumentChunkEmbedding {
+                chunk_id: chunk.id.clone(),
+                chunk_index: chunk.chunk_index,
+                vector,
+            });
+        }
+    }
 
-            if let Some(query) = explicit_repl_web_search_query(&command_text) {
-                record_repl_event(
-                    state,
-                    ReplEvent::IntentDetected {
-                        intent: ReplIntent::SearchDocs,
-                        confidence: 0.9,
-                    },
-                    Some(request_id),
-                )
-                .await;
+    if embeddings.len() == chunks.len() {
+        info!(
+            request_id = %request_id,
+            document_id,
+            chunks = chunks.len(),
+            "document embeddings generated"
+        );
+        Some(embeddings)
+    } else {
+        warn!(
+            request_id = %request_id,
+            document_id,
+            expected_chunks = chunks.len(),
+            actual_embeddings = embeddings.len(),
+            "document embeddings count mismatch; lexical retrieval remains available"
+        );
+        None
+    }
+}
 
-                let speak_requested = state
-                    .config
-                    .action_should_speak(Action::SearchWeb.as_str(), job.speak);
-                let search_result = execute_search_query(
-                    state,
-                    request_id,
-                    &query,
-                    speak_requested,
-                    total_started_at,
+async fn select_document_context_with_optional_embeddings(
+    state: &AppState,
+    request_id: uuid::Uuid,
+    document_id: &str,
+    chunks: &[DocumentChunk],
+    embeddings: Option<&[DocumentChunkEmbedding]>,
+    query: &str,
+    limits: DocumentContextLimits,
+) -> Vec<DocumentChunk> {
+    if state.infer.has_embedding_model() {
+        if let Some(embeddings) = embeddings {
+            match state
+                .infer
+                .embed_texts(
+                    format!("{request_id}-document-query-embed"),
+                    vec![query.to_string()],
                 )
-                .await?;
-                record_repl_browser_query_response(
-                    state,
-                    request_id,
-                    &query,
-                    &search_result.summary,
-                )
-                .await;
-                record_repl_event(
-                    state,
-                    ReplEvent::RunCompleted { run_id: request_id },
-                    Some(request_id),
-                )
-                .await;
-
-                return Ok(JobResult::BrowserQuery {
-                    request_id,
-                    query,
-                    summary: search_result.summary,
-                    spoken: search_result.spoken,
-                });
+                .await
+            {
+                Ok(output) => {
+                    if let Some(query_vector) = output.vectors.first() {
+                        if let Some(selected) = select_document_context_by_embedding(
+                            chunks,
+                            embeddings,
+                            query_vector,
+                            limits.max_chunks,
+                            limits.max_chars,
+                        ) {
+                            info!(
+                                request_id = %request_id,
+                                document_id,
+                                context_chunks = selected.len(),
+                                "selected document context with embeddings"
+                            );
+                            return selected;
+                        }
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        ?error,
+                        document_id,
+                        "document query embedding failed; lexical retrieval remains available"
+                    );
+                }
             }
+        }
+    }
 
-            record_repl_event(
-                state,
-                ReplEvent::IntentDetected {
-                    intent: ReplIntent::AskTechnicalQuestion,
-                    confidence: 0.84,
-                },
-                Some(request_id),
+    select_document_context(chunks, query, limits.max_chunks, limits.max_chars)
+}
+
+fn select_document_context_by_embedding(
+    chunks: &[DocumentChunk],
+    embeddings: &[DocumentChunkEmbedding],
+    query_vector: &[f32],
+    max_chunks: usize,
+    max_chars: usize,
+) -> Option<Vec<DocumentChunk>> {
+    if chunks.is_empty() || embeddings.is_empty() || query_vector.is_empty() {
+        return None;
+    }
+
+    let chunks_by_id = chunks
+        .iter()
+        .map(|chunk| (chunk.id.as_str(), chunk))
+        .collect::<HashMap<_, _>>();
+    let mut scored = embeddings
+        .iter()
+        .filter_map(|embedding| {
+            let chunk = chunks_by_id.get(embedding.chunk_id.as_str())?;
+            let score = cosine_similarity(query_vector, &embedding.vector);
+            (score > 0.0 && score.is_finite()).then_some((score, *chunk))
+        })
+        .collect::<Vec<_>>();
+
+    if scored.is_empty() {
+        return None;
+    }
+
+    scored.sort_by(|(left_score, left), (right_score, right)| {
+        right_score
+            .total_cmp(left_score)
+            .then_with(|| left.chunk_index.cmp(&right.chunk_index))
+    });
+
+    let selected = collect_context_chunks(
+        scored
+            .into_iter()
+            .map(|(_, chunk)| chunk)
+            .collect::<Vec<_>>(),
+        max_chunks,
+        max_chars,
+    );
+    (!selected.is_empty()).then_some(selected)
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
+    if left.len() != right.len() || left.is_empty() {
+        return 0.0;
+    }
+
+    let mut dot = 0.0_f32;
+    let mut left_norm = 0.0_f32;
+    let mut right_norm = 0.0_f32;
+    for (left_value, right_value) in left.iter().zip(right.iter()) {
+        dot += left_value * right_value;
+        left_norm += left_value * left_value;
+        right_norm += right_value * right_value;
+    }
+
+    if left_norm <= f32::EPSILON || right_norm <= f32::EPSILON {
+        return 0.0;
+    }
+
+    dot / (left_norm.sqrt() * right_norm.sqrt())
+}
+
+fn select_document_context(
+    chunks: &[DocumentChunk],
+    query: &str,
+    max_chunks: usize,
+    max_chars: usize,
+) -> Vec<DocumentChunk> {
+    let terms = document_terms(query);
+    if terms.is_empty() {
+        return select_document_prefix(chunks, max_chunks, max_chars);
+    }
+
+    let mut scored = chunks
+        .iter()
+        .map(|chunk| (document_chunk_score(chunk, &terms), chunk))
+        .filter(|(score, _)| *score > 0)
+        .collect::<Vec<_>>();
+    scored.sort_by(|(left_score, left), (right_score, right)| {
+        right_score
+            .cmp(left_score)
+            .then_with(|| left.chunk_index.cmp(&right.chunk_index))
+    });
+
+    let ranked = scored
+        .into_iter()
+        .map(|(_, chunk)| chunk)
+        .collect::<Vec<_>>();
+    let selected = collect_context_chunks(ranked, max_chunks, max_chars);
+    if selected.is_empty() {
+        select_document_prefix(chunks, max_chunks, max_chars)
+    } else {
+        selected
+    }
+}
+
+fn select_document_prefix(
+    chunks: &[DocumentChunk],
+    max_chunks: usize,
+    max_chars: usize,
+) -> Vec<DocumentChunk> {
+    collect_context_chunks(chunks.iter().collect::<Vec<_>>(), max_chunks, max_chars)
+}
+
+fn collect_context_chunks(
+    chunks: Vec<&DocumentChunk>,
+    max_chunks: usize,
+    max_chars: usize,
+) -> Vec<DocumentChunk> {
+    let mut selected = Vec::new();
+    let mut used_chars = 0_usize;
+    let max_chunks = max_chunks.max(1);
+    let max_chars = max_chars.max(512);
+
+    for chunk in chunks {
+        if selected.len() >= max_chunks {
+            break;
+        }
+        let chunk_chars = chunk.text.chars().count();
+        if !selected.is_empty() && used_chars.saturating_add(chunk_chars) > max_chars {
+            continue;
+        }
+        used_chars = used_chars.saturating_add(chunk_chars);
+        selected.push(chunk.clone());
+    }
+
+    selected.sort_by_key(|chunk| chunk.chunk_index);
+    selected
+}
+
+fn document_terms(text: &str) -> Vec<String> {
+    let mut terms = text
+        .split(|ch: char| !ch.is_alphanumeric())
+        .map(str::trim)
+        .filter(|term| term.chars().count() >= 3)
+        .map(|term| term.to_lowercase())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    terms.sort();
+    terms
+}
+
+fn document_chunk_score(chunk: &DocumentChunk, terms: &[String]) -> usize {
+    let text = chunk.text.to_lowercase();
+    let title = chunk
+        .section_title
+        .as_deref()
+        .unwrap_or_default()
+        .to_lowercase();
+    terms
+        .iter()
+        .map(|term| {
+            let text_score = text.matches(term).count();
+            let title_score = if title.contains(term) { 2 } else { 0 };
+            text_score + title_score
+        })
+        .sum()
+}
+
+fn document_context_text(chunks: &[DocumentChunk]) -> String {
+    chunks
+        .iter()
+        .map(|chunk| {
+            let title = chunk
+                .section_title
+                .as_deref()
+                .map(|value| format!(" | seção: {value}"))
+                .unwrap_or_default();
+            format!(
+                "[chunk {}{}]\n{}",
+                chunk.chunk_index,
+                title,
+                chunk.text.trim()
             )
-            .await;
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
 
+fn document_question_prompt(title: &str, question: &str, context: &str) -> String {
+    format!(
+        "Você é um assistente local de leitura de documentos. Responda em PT-BR usando somente os trechos fornecidos. Se os trechos não contiverem a resposta, diga isso claramente e sugira qual parte do documento consultar.\n\nDocumento: {title}\nPergunta: {question}\n\nTrechos relevantes:\n{context}\n\nResposta:"
+    )
+}
+
+fn document_summary_prompt(title: &str, context: &str, total_chunks: usize) -> String {
+    format!(
+        "Você é um assistente local de leitura de documentos. Faça um resumo em PT-BR, claro e fiel ao conteúdo fornecido. Não invente conteúdo ausente. Se o contexto for parcial, indique que o resumo cobre apenas os trechos carregados.\n\nDocumento: {title}\nTotal de chunks no documento: {total_chunks}\n\nTrechos para resumir:\n{context}\n\nResumo:"
+    )
+}
+
+#[cfg(feature = "coddy-protocol")]
+struct DaemonReplNativeServices;
+
+#[cfg(feature = "coddy-protocol")]
+impl coddy_bridge::ReplNativeServices for DaemonReplNativeServices {
+    fn sanitize_search_query(&self, query: &str) -> String {
+        sanitize_output(&Action::SearchWeb, query)
+    }
+
+    fn answer_repl_question<'a>(
+        &'a self,
+        state: &'a AppState,
+        request_id: uuid::Uuid,
+        command_text: String,
+        speak: bool,
+    ) -> coddy_bridge::ReplJobFuture<'a> {
+        Box::pin(async move {
             let output = state
                 .infer
                 .answer_repl_turn(format!("{request_id}-repl-agent"), &command_text)
@@ -632,7 +1578,7 @@ async fn process_repl_command(state: &AppState, job: ReplCommandJob) -> Result<J
             let answer = sanitize_output(&Action::Explain, &output.text);
             let speak_requested = state
                 .config
-                .action_should_speak(Action::Explain.as_str(), job.speak);
+                .action_should_speak(Action::Explain.as_str(), speak);
             let speech_text = sanitize_for_speech(&Action::Explain, &answer);
             let (_, spoken) = enqueue_tts(
                 state.piper.as_ref(),
@@ -643,473 +1589,106 @@ async fn process_repl_command(state: &AppState, job: ReplCommandJob) -> Result<J
                 None,
                 speak_requested,
             );
-            record_repl_event(
-                state,
-                ReplEvent::MessageAppended {
-                    message: ReplMessage {
-                        id: uuid::Uuid::new_v4(),
-                        role: "assistant".to_string(),
-                        text: answer.clone(),
-                    },
-                },
-                Some(request_id),
-            )
-            .await;
-            record_repl_event(
-                state,
-                ReplEvent::RunCompleted { run_id: request_id },
-                Some(request_id),
-            )
-            .await;
 
             Ok(JobResult::ClipboardText {
                 request_id,
                 text: answer,
                 spoken,
             })
-        }
-        ReplCommand::VoiceTurn {
-            transcript_override: Some(transcript),
-        } => {
-            record_repl_event(
+        })
+    }
+
+    fn search_web<'a>(
+        &'a self,
+        state: &'a AppState,
+        request_id: uuid::Uuid,
+        query: String,
+        speak: bool,
+        total_started_at: Instant,
+    ) -> coddy_bridge::ReplJobFuture<'a> {
+        Box::pin(async move {
+            let speak_requested = state
+                .config
+                .action_should_speak(Action::SearchWeb.as_str(), speak);
+            let search_result =
+                execute_search_query(state, request_id, &query, speak_requested, total_started_at)
+                    .await?;
+
+            Ok(JobResult::BrowserQuery {
+                request_id,
+                query,
+                summary: search_result.summary,
+                spoken: search_result.spoken,
+            })
+        })
+    }
+
+    fn open_application<'a>(
+        &'a self,
+        state: &'a AppState,
+        request_id: uuid::Uuid,
+        transcript: String,
+        app_name: String,
+        speak: bool,
+    ) -> coddy_bridge::ReplJobFuture<'a> {
+        Box::pin(async move {
+            process_open_application(
                 state,
-                ReplEvent::VoiceTranscriptFinal {
-                    text: transcript.clone(),
-                },
-                Some(request_id),
-            )
-            .await;
-
-            match resolve_voice_turn_intent(&transcript) {
-                Some(VoiceTurnIntent::OpenApplication {
-                    transcript,
+                ApplicationLaunchJob {
+                    request_id,
+                    transcript: Some(transcript),
                     app_name,
-                }) => {
-                    record_repl_event(
-                        state,
-                        ReplEvent::IntentDetected {
-                            intent: ReplIntent::OpenApplication,
-                            confidence: 0.9,
-                        },
-                        Some(request_id),
-                    )
-                    .await;
-                    record_repl_event(
-                        state,
-                        ReplEvent::ToolStarted {
-                            name: "open_application".to_string(),
-                        },
-                        Some(request_id),
-                    )
-                    .await;
+                    speak,
+                },
+            )
+            .await
+        })
+    }
 
-                    let result = process_open_application(
-                        state,
-                        ApplicationLaunchJob {
-                            request_id,
-                            transcript: Some(transcript),
-                            app_name,
-                            speak: job.speak,
-                        },
-                    )
-                    .await;
-
-                    record_repl_event(
-                        state,
-                        ReplEvent::ToolCompleted {
-                            name: "open_application".to_string(),
-                            status: tool_status_for_result(&result),
-                        },
-                        Some(request_id),
-                    )
-                    .await;
-                    result
-                }
-                Some(VoiceTurnIntent::OpenWebsite {
-                    transcript,
+    fn open_url<'a>(
+        &'a self,
+        state: &'a AppState,
+        request_id: uuid::Uuid,
+        transcript: String,
+        label: String,
+        url: String,
+        speak: bool,
+    ) -> coddy_bridge::ReplJobFuture<'a> {
+        Box::pin(async move {
+            process_open_url(
+                state,
+                UrlOpenJob {
+                    request_id,
+                    transcript: Some(transcript),
                     label,
                     url,
-                }) => {
-                    record_repl_event(
-                        state,
-                        ReplEvent::IntentDetected {
-                            intent: ReplIntent::OpenWebsite,
-                            confidence: 0.9,
-                        },
-                        Some(request_id),
-                    )
-                    .await;
-                    record_repl_event(
-                        state,
-                        ReplEvent::ToolStarted {
-                            name: "open_url".to_string(),
-                        },
-                        Some(request_id),
-                    )
-                    .await;
-
-                    let result = process_open_url(
-                        state,
-                        UrlOpenJob {
-                            request_id,
-                            transcript: Some(transcript),
-                            label,
-                            url,
-                            speak: job.speak,
-                        },
-                    )
-                    .await;
-
-                    record_repl_event(
-                        state,
-                        ReplEvent::ToolCompleted {
-                            name: "open_url".to_string(),
-                            status: tool_status_for_result(&result),
-                        },
-                        Some(request_id),
-                    )
-                    .await;
-                    result
-                }
-                Some(VoiceTurnIntent::SearchWeb { transcript, query }) => {
-                    let query = sanitize_output(&Action::SearchWeb, &query);
-                    if query.trim().is_empty() {
-                        record_repl_event(
-                            state,
-                            ReplEvent::Error {
-                                code: "empty_voice_transcript".to_string(),
-                                message: "Transcript de voz vazio.".to_string(),
-                            },
-                            Some(request_id),
-                        )
-                        .await;
-                        return Ok(JobResult::Error {
-                            request_id,
-                            code: "empty_voice_transcript".to_string(),
-                            message: "Transcript de voz vazio.".to_string(),
-                        });
-                    }
-
-                    record_repl_event(
-                        state,
-                        ReplEvent::RunStarted { run_id: request_id },
-                        Some(request_id),
-                    )
-                    .await;
-                    record_repl_event(
-                        state,
-                        ReplEvent::IntentDetected {
-                            intent: ReplIntent::SearchDocs,
-                            confidence: 0.72,
-                        },
-                        Some(request_id),
-                    )
-                    .await;
-                    let result = process_voice_search(
-                        state,
-                        VoiceSearchJob {
-                            request_id,
-                            transcript,
-                            query,
-                            speak: job.speak,
-                        },
-                    )
-                    .await;
-                    if let Ok(JobResult::BrowserQuery { query, summary, .. }) = &result {
-                        record_repl_browser_query_response(state, request_id, query, summary).await;
-                    }
-                    record_repl_event(
-                        state,
-                        ReplEvent::RunCompleted { run_id: request_id },
-                        Some(request_id),
-                    )
-                    .await;
-                    result
-                }
-                None => {
-                    record_repl_event(
-                        state,
-                        ReplEvent::Error {
-                            code: "empty_voice_transcript".to_string(),
-                            message: "Transcript de voz vazio.".to_string(),
-                        },
-                        Some(request_id),
-                    )
-                    .await;
-                    Ok(JobResult::Error {
-                        request_id,
-                        code: "empty_voice_transcript".to_string(),
-                        message: "Transcript de voz vazio.".to_string(),
-                    })
-                }
-            }
-        }
-        ReplCommand::VoiceTurn {
-            transcript_override: None,
-        } => {
-            if job.speak {
-                warn!(
-                    request_id = %request_id,
-                    "daemon received a voice turn without transcript; the CLI should capture ASR before sending"
-                );
-            }
-            record_repl_event(
-                state,
-                ReplEvent::Error {
-                    code: "missing_voice_transcript".to_string(),
-                    message:
-                        "Coddy não recebeu transcript de voz. Capture/transcreva no cliente antes de enviar."
-                            .to_string(),
+                    speak,
                 },
-                Some(request_id),
             )
-            .await;
-            Ok(JobResult::Error {
-                request_id,
-                code: "missing_voice_transcript".to_string(),
-                message:
-                    "Coddy não recebeu transcript de voz. Capture/transcreva no cliente antes de enviar."
-                        .to_string(),
-            })
-        }
-        command @ (ReplCommand::StopSpeaking
-        | ReplCommand::StopActiveRun
-        | ReplCommand::OpenUi { .. }
-        | ReplCommand::SelectModel { .. }
-        | ReplCommand::CaptureAndExplain { .. }
-        | ReplCommand::DismissConfirmation) => {
-            Ok(process_repl_local_command(state, request_id, command).await)
-        }
-    }
-}
-
-fn explicit_repl_web_search_query(text: &str) -> Option<String> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let lower = trimmed.to_lowercase();
-    let prefixes = [
-        "pesquise por ",
-        "pesquise ",
-        "pesquisar ",
-        "procure por ",
-        "procure ",
-        "busque por ",
-        "busque ",
-        "buscar ",
-        "google ",
-        "google: ",
-        "pesquisa: ",
-        "search for ",
-        "search ",
-        "web search ",
-        "look up ",
-    ];
-
-    prefixes.iter().find_map(|prefix| {
-        lower.strip_prefix(prefix).and_then(|_| {
-            let query = trimmed[prefix.len()..].trim();
-            if query.is_empty() {
-                None
-            } else {
-                Some(sanitize_output(&Action::SearchWeb, query))
-            }
+            .await
         })
-    })
-}
+    }
 
-async fn process_repl_local_command(
-    state: &AppState,
-    request_id: uuid::Uuid,
-    command: ReplCommand,
-) -> JobResult {
-    let mut repl = state.repl.lock().await;
-    process_repl_local_command_locked(&mut repl, request_id, command)
-}
-
-fn process_repl_local_command_locked(
-    repl: &mut ReplRuntimeState,
-    request_id: uuid::Uuid,
-    command: ReplCommand,
-) -> JobResult {
-    match command {
-        ReplCommand::StopSpeaking | ReplCommand::StopActiveRun => JobResult::ActionStatus {
-            request_id,
-            message: "Comando Coddy recebido; cancelamento cooperativo será tratado pelo broker."
-                .to_string(),
-            spoken: false,
-        },
-        ReplCommand::OpenUi { mode } => {
-            repl.record(ReplEvent::OverlayShown { mode }, Some(request_id));
-
-            JobResult::ActionStatus {
-                request_id,
-                message: format!("Modo Coddy atualizado para {mode:?}."),
-                spoken: false,
-            }
-        }
-        ReplCommand::SelectModel { model, role } => {
-            repl.record(
-                ReplEvent::ModelSelected {
-                    model: model.clone(),
-                    role,
+    fn voice_search<'a>(
+        &'a self,
+        state: &'a AppState,
+        request_id: uuid::Uuid,
+        transcript: String,
+        query: String,
+        speak: bool,
+    ) -> coddy_bridge::ReplJobFuture<'a> {
+        Box::pin(async move {
+            process_voice_search(
+                state,
+                VoiceSearchJob {
+                    request_id,
+                    transcript,
+                    query,
+                    speak,
                 },
-                Some(request_id),
-            );
-
-            JobResult::ActionStatus {
-                request_id,
-                message: format!(
-                    "Modelo Coddy atualizado para {} ({role:?}, provider {}).",
-                    model.name, model.provider
-                ),
-                spoken: false,
-            }
-        }
-        ReplCommand::CaptureAndExplain { mode, policy } => {
-            process_repl_capture_and_explain_command(repl, request_id, mode, policy)
-        }
-        ReplCommand::DismissConfirmation => {
-            repl.record(ReplEvent::ConfirmationDismissed, Some(request_id));
-
-            JobResult::ActionStatus {
-                request_id,
-                message: "Confirmação de policy dispensada.".to_string(),
-                spoken: false,
-            }
-        }
-        ReplCommand::Ask { .. } | ReplCommand::VoiceTurn { .. } => JobResult::Error {
-            request_id,
-            code: "unsupported_local_repl_command".to_string(),
-            message: "Comando Coddy não é local e deve passar pelo pipeline completo.".to_string(),
-        },
-    }
-}
-
-fn process_repl_capture_and_explain_command(
-    repl: &mut ReplRuntimeState,
-    request_id: uuid::Uuid,
-    mode: ScreenAssistMode,
-    policy: visionclip_common::AssessmentPolicy,
-) -> JobResult {
-    let requested_help = requested_help_for_screen_assist_mode(mode);
-    let decision = evaluate_assistance(policy, requested_help);
-    repl.record(
-        ReplEvent::PolicyEvaluated {
-            policy,
-            allowed: decision.allowed,
-        },
-        Some(request_id),
-    );
-
-    if decision.requires_confirmation {
-        return JobResult::ActionStatus {
-            request_id,
-            message: format!(
-                "Confirme a política de uso antes de analisar a tela: {}",
-                decision.reason
-            ),
-            spoken: false,
-        };
-    }
-
-    if !decision.allowed {
-        repl.record(
-            ReplEvent::Error {
-                code: "assessment_policy_blocked".to_string(),
-                message: decision.reason.clone(),
-            },
-            Some(request_id),
-        );
-        return JobResult::Error {
-            request_id,
-            code: "assessment_policy_blocked".to_string(),
-            message: decision.reason,
-        };
-    }
-
-    repl.record(
-        ReplEvent::RunStarted { run_id: request_id },
-        Some(request_id),
-    );
-    repl.record(
-        ReplEvent::IntentDetected {
-            intent: intent_for_screen_assist_mode(mode),
-            confidence: 0.86,
-        },
-        Some(request_id),
-    );
-    repl.record(
-        ReplEvent::ToolStarted {
-            name: "capture_and_explain".to_string(),
-        },
-        Some(request_id),
-    );
-    repl.record(
-        ReplEvent::ToolCompleted {
-            name: "capture_and_explain".to_string(),
-            status: ToolStatus::Cancelled,
-        },
-        Some(request_id),
-    );
-    repl.record(
-        ReplEvent::RunCompleted { run_id: request_id },
-        Some(request_id),
-    );
-
-    JobResult::ActionStatus {
-        request_id,
-        message: "CaptureAndExplain foi autorizado; o conector de captura de tela do Coddy ainda será ligado ao backend de visão.".to_string(),
-        spoken: false,
-    }
-}
-
-async fn record_repl_browser_query_response(
-    state: &AppState,
-    request_id: uuid::Uuid,
-    query: &str,
-    summary: &Option<String>,
-) {
-    record_repl_event(
-        state,
-        ReplEvent::MessageAppended {
-            message: ReplMessage {
-                id: uuid::Uuid::new_v4(),
-                role: "assistant".to_string(),
-                text: assistant_message_for_browser_query(query, summary),
-            },
-        },
-        Some(request_id),
-    )
-    .await;
-}
-
-fn assistant_message_for_browser_query(query: &str, summary: &Option<String>) -> String {
-    summary
-        .clone()
-        .unwrap_or_else(|| search_browser_fallback_summary(query, false))
-}
-
-fn requested_help_for_screen_assist_mode(mode: ScreenAssistMode) -> RequestedHelp {
-    match mode {
-        ScreenAssistMode::ExplainVisibleScreen | ScreenAssistMode::SummarizeDocument => {
-            RequestedHelp::ExplainConcept
-        }
-        ScreenAssistMode::ExplainCode | ScreenAssistMode::DebugError => RequestedHelp::DebugCode,
-        ScreenAssistMode::MultipleChoice => RequestedHelp::SolveMultipleChoice,
-    }
-}
-
-fn intent_for_screen_assist_mode(mode: ScreenAssistMode) -> ReplIntent {
-    match mode {
-        ScreenAssistMode::ExplainVisibleScreen | ScreenAssistMode::SummarizeDocument => {
-            ReplIntent::ExplainScreen
-        }
-        ScreenAssistMode::ExplainCode => ReplIntent::ExplainCode,
-        ScreenAssistMode::DebugError => ReplIntent::DebugCode,
-        ScreenAssistMode::MultipleChoice => ReplIntent::MultipleChoiceAssist,
+            )
+            .await
+        })
     }
 }
 
@@ -1123,12 +1702,132 @@ fn validate_browser_url(url: &str) -> Result<()> {
     Ok(())
 }
 
-fn tool_status_for_result(result: &Result<JobResult>) -> ToolStatus {
-    if result.is_ok() {
-        ToolStatus::Succeeded
-    } else {
-        ToolStatus::Failed
+#[derive(Debug, Clone)]
+struct AuthorizedTool {
+    name: String,
+    risk_level: RiskLevel,
+}
+
+async fn ensure_request_session(state: &AppState, request_id: uuid::Uuid) -> SessionId {
+    let session_id = SessionId::from_request_id(request_id);
+    let mut sessions = state.sessions.lock().await;
+    sessions.ensure_session(session_id.clone(), "pt-BR");
+    session_id
+}
+
+fn authorize_tool_call(
+    state: &AppState,
+    session_id: &SessionId,
+    call: ToolCall,
+    context: RiskContext,
+) -> Result<AuthorizedTool> {
+    let definition = match state.tools.validate_call(&call) {
+        Ok(definition) => definition,
+        Err(error) => {
+            state.audit_log.record_tool_event(
+                "security.blocked",
+                Some(session_id.clone()),
+                call.name,
+                RiskLevel::Level5,
+                "schema_rejected",
+                json!({"error": error.to_string()}),
+            );
+            anyhow::bail!("tool call rejected: {error}");
+        }
+    };
+
+    state.audit_log.record_tool_event(
+        "tool.proposed",
+        Some(session_id.clone()),
+        definition.name.clone(),
+        definition.risk_level,
+        "proposed",
+        json!({"arguments": redact_for_audit(&call.arguments)}),
+    );
+
+    let policy_input = PolicyInput {
+        tool_name: definition.name.clone(),
+        risk_level: definition.risk_level,
+        permissions: definition.permissions.clone(),
+        confirmation: definition.confirmation,
+        arguments: call.arguments,
+        context,
+    };
+
+    match state.permission_engine.evaluate(&policy_input) {
+        PolicyDecision::Allow => {
+            state.audit_log.record_tool_event(
+                "tool.confirmed",
+                Some(session_id.clone()),
+                definition.name.clone(),
+                definition.risk_level,
+                "auto_allowed",
+                json!({}),
+            );
+            Ok(AuthorizedTool {
+                name: definition.name.clone(),
+                risk_level: definition.risk_level,
+            })
+        }
+        PolicyDecision::RequireConfirmation(request) => {
+            state.audit_log.record_tool_event(
+                "tool.confirmation_requested",
+                Some(session_id.clone()),
+                definition.name.clone(),
+                definition.risk_level,
+                "require_confirmation",
+                json!({"reason": request.reason}),
+            );
+            anyhow::bail!(
+                "tool `{}` requires confirmation before execution",
+                definition.name
+            );
+        }
+        PolicyDecision::Deny(reason) => {
+            state.audit_log.record_tool_event(
+                "tool.denied",
+                Some(session_id.clone()),
+                definition.name.clone(),
+                definition.risk_level,
+                "deny",
+                json!({"reason": reason.to_string()}),
+            );
+            anyhow::bail!("tool `{}` denied by policy: {reason}", definition.name);
+        }
     }
+}
+
+fn record_tool_executed(
+    state: &AppState,
+    session_id: &SessionId,
+    tool: &AuthorizedTool,
+    data: serde_json::Value,
+) {
+    state.audit_log.record_tool_event(
+        "tool.executed",
+        Some(session_id.clone()),
+        tool.name.clone(),
+        tool.risk_level,
+        "executed",
+        redact_for_audit(&data),
+    );
+}
+
+fn record_tool_failed(
+    state: &AppState,
+    session_id: &SessionId,
+    tool_name: &str,
+    risk_level: RiskLevel,
+    error: &str,
+) {
+    state.audit_log.record_tool_event(
+        "tool.failed",
+        Some(session_id.clone()),
+        tool_name.to_string(),
+        risk_level,
+        "failed",
+        json!({"error": error}),
+    );
 }
 
 async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
@@ -1142,6 +1841,17 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
         speak_requested = job.speak,
         "processing capture job"
     );
+    let session_id = ensure_request_session(state, request_id).await;
+    let capture_tool = authorize_tool_call(
+        state,
+        &session_id,
+        ToolCall::new(
+            format!("{request_id}-capture-screen-context"),
+            "capture_screen_context",
+            json!({"mode": "screenshot_ocr"}),
+        ),
+        RiskContext::user_initiated(),
+    )?;
 
     let ocr_started_at = Instant::now();
     let mut ocr_ms = 0_u64;
@@ -1315,6 +2025,12 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                 total_ms = elapsed_ms(total_started_at),
                 "capture job completed"
             );
+            record_tool_executed(
+                state,
+                &session_id,
+                &capture_tool,
+                json!({"action": action_name, "mode": inference_mode, "output_chars": output_chars}),
+            );
 
             Ok(JobResult::BrowserQuery {
                 request_id,
@@ -1364,6 +2080,12 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                 tts_enqueue_ms,
                 total_ms = elapsed_ms(total_started_at),
                 "capture job completed"
+            );
+            record_tool_executed(
+                state,
+                &session_id,
+                &capture_tool,
+                json!({"action": action_name, "mode": inference_mode, "output_chars": output_chars}),
             );
 
             Ok(JobResult::ClipboardText {
@@ -1444,6 +2166,20 @@ async fn execute_search_query(
     speak_requested: bool,
     total_started_at: Instant,
 ) -> Result<SearchExecution> {
+    let session_id = ensure_request_session(state, request_id).await;
+    let search_tool = authorize_tool_call(
+        state,
+        &session_id,
+        ToolCall::new(
+            format!("{request_id}-search-web"),
+            "search_web",
+            json!({
+                "query": query,
+                "max_results": state.config.search.max_results.clamp(1, 10),
+            }),
+        ),
+        RiskContext::user_initiated(),
+    )?;
     let mut search_fetch_ms = 0_u64;
     let mut search_summary = None;
     let mut search_spoken_text = None;
@@ -1451,15 +2187,8 @@ async fn execute_search_query(
     let mut ai_overview_chars = 0_usize;
     let mut search_blocked = false;
 
-    record_repl_event(
-        state,
-        ReplEvent::SearchStarted {
-            query: query.to_string(),
-            provider: "google".to_string(),
-        },
-        Some(request_id),
-    )
-    .await;
+    #[cfg(feature = "coddy-protocol")]
+    coddy_bridge::record_search_started(state, request_id, query, "google").await;
 
     if let Some(search) = &state.search {
         let search_started_at = Instant::now();
@@ -1501,20 +2230,21 @@ async fn execute_search_query(
         }
     }
 
-    record_repl_event(
-        state,
-        ReplEvent::SearchContextExtracted {
-            provider: if state.search.is_some() {
-                "google".to_string()
+    #[cfg(feature = "coddy-protocol")]
+    {
+        coddy_bridge::record_search_context_extracted(
+            state,
+            request_id,
+            if state.search.is_some() {
+                "google"
             } else {
-                "disabled".to_string()
+                "disabled"
             },
-            organic_results: search_result_count,
-            ai_overview_present: ai_overview_chars > 0,
-        },
-        Some(request_id),
-    )
-    .await;
+            search_result_count,
+            ai_overview_chars > 0,
+        )
+        .await;
+    }
 
     if search_summary.is_none() {
         search_summary = Some(search_browser_fallback_summary(query, search_blocked));
@@ -1569,6 +2299,17 @@ async fn execute_search_query(
         spoken,
         total_ms = elapsed_ms(total_started_at),
         "search query executed"
+    );
+    record_tool_executed(
+        state,
+        &session_id,
+        &search_tool,
+        json!({
+            "query": query,
+            "result_count": search_result_count,
+            "ai_overview_chars": ai_overview_chars,
+            "spoken": spoken,
+        }),
     );
 
     Ok(SearchExecution {
@@ -1917,6 +2658,7 @@ fn elapsed_ms(started_at: Instant) -> u64 {
     started_at.elapsed().as_millis() as u64
 }
 
+#[cfg(feature = "coddy-protocol")]
 fn unix_ms_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1927,7 +2669,6 @@ fn unix_ms_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coddy_ipc::CoddyWireRequest;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -1943,328 +2684,191 @@ mod tests {
     }
 
     #[test]
-    fn coddy_wire_payload_decodes_before_legacy_fallback() {
-        let request_id = uuid::Uuid::new_v4();
-        let wire = CoddyWireRequest::new(CoddyRequest::Events(ReplEventsJob {
-            request_id,
-            after_sequence: 7,
-        }));
-        let payload = coddy_ipc::encode_payload(&wire).expect("encode coddy wire request");
+    fn document_context_selection_prefers_matching_chunks() {
+        let chunks = test_document_chunks(&[
+            "Introdução geral sobre o livro.",
+            "Capítulo de redes com VPN, DNS e configuração de Wi-Fi.",
+            "Apêndice sobre atalhos de teclado.",
+        ]);
 
-        let decoded = decode_coddy_wire_request(&payload)
-            .expect("decode coddy wire request")
-            .expect("coddy request");
+        let selected = select_document_context(&chunks, "Como configurar VPN?", 1, 4_000);
 
-        let CoddyRequest::Events(job) = decoded else {
-            panic!("unexpected coddy request")
-        };
-        assert_eq!(job.request_id, request_id);
-        assert_eq!(job.after_sequence, 7);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].chunk_index, 1);
     }
 
     #[test]
-    fn legacy_payload_is_not_treated_as_coddy_wire_request() {
-        let request_id = uuid::Uuid::new_v4();
-        let legacy = VisionRequest::HealthCheck(HealthCheckJob { request_id });
-        let payload = coddy_ipc::encode_payload(&legacy).expect("encode legacy request");
+    fn document_context_selection_falls_back_to_prefix_without_terms() {
+        let chunks = test_document_chunks(&["Primeiro trecho.", "Segundo trecho."]);
 
-        assert!(decode_coddy_wire_request(&payload)
-            .expect("decode legacy fallback")
-            .is_none());
+        let selected = select_document_context(&chunks, "??", 2, 4_000);
+
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].chunk_index, 0);
+        assert_eq!(selected[1].chunk_index, 1);
     }
 
     #[test]
-    fn coddy_wire_payload_rejects_incompatible_version() {
-        let mut wire =
-            CoddyWireRequest::new(CoddyRequest::SessionSnapshot(ReplSessionSnapshotJob {
-                request_id: uuid::Uuid::new_v4(),
-            }));
-        wire.protocol_version += 1;
-        let payload = coddy_ipc::encode_payload(&wire).expect("encode coddy wire request");
-
-        assert!(decode_coddy_wire_request(&payload).is_err());
-    }
-
-    #[test]
-    fn repl_runtime_snapshot_records_reduced_events() {
-        let config = AppConfig::default();
-        let mut runtime = ReplRuntimeState::new(&config);
-        let run_id = uuid::Uuid::new_v4();
-
-        runtime.record(ReplEvent::RunStarted { run_id }, Some(run_id));
-        runtime.record(
-            ReplEvent::SearchStarted {
-                query: "Quem foi Rousseau?".to_string(),
-                provider: "google".to_string(),
-            },
-            Some(run_id),
+    fn document_context_selection_prefers_embedding_match() {
+        let chunks = test_document_chunks(&[
+            "Introdução geral sobre o livro.",
+            "Capítulo de redes com VPN, DNS e configuração de Wi-Fi.",
+            "Apêndice sobre atalhos de teclado.",
+        ]);
+        let embeddings = test_document_embeddings(
+            &chunks,
+            &[
+                vec![1.0, 0.0, 0.0],
+                vec![0.0, 1.0, 0.0],
+                vec![0.0, 0.0, 1.0],
+            ],
         );
-        runtime.record(ReplEvent::RunCompleted { run_id }, Some(run_id));
 
-        let snapshot = runtime.snapshot();
+        let selected =
+            select_document_context_by_embedding(&chunks, &embeddings, &[0.0, 0.9, 0.1], 1, 4_000)
+                .expect("semantic context");
 
-        assert_eq!(snapshot.last_sequence, 4);
-        assert_eq!(snapshot.session.active_run, None);
-        assert_eq!(
-            snapshot.session.status,
-            visionclip_common::SessionStatus::Idle
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].chunk_index, 1);
+    }
+
+    #[test]
+    fn document_context_selection_rejects_unusable_embeddings() {
+        let chunks = test_document_chunks(&["Primeiro trecho.", "Segundo trecho."]);
+        let embeddings = test_document_embeddings(&chunks, &[vec![0.0, 0.0], vec![1.0, 0.0]]);
+
+        assert!(
+            select_document_context_by_embedding(&chunks, &embeddings, &[0.0, 0.0], 1, 4_000)
+                .is_none()
+        );
+        assert!(
+            select_document_context_by_embedding(&chunks, &embeddings, &[1.0], 1, 4_000).is_none()
         );
     }
 
     #[test]
-    fn repl_runtime_returns_incremental_events_after_sequence() {
-        let config = AppConfig::default();
-        let mut runtime = ReplRuntimeState::new(&config);
-        let run_id = uuid::Uuid::new_v4();
-
-        runtime.record(ReplEvent::RunStarted { run_id }, Some(run_id));
-        runtime.record(ReplEvent::RunCompleted { run_id }, Some(run_id));
-
-        let (events, last_sequence) = runtime.events_after(1);
-
-        assert_eq!(last_sequence, 3);
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].sequence, 2);
-        assert_eq!(events[1].sequence, 3);
-    }
-
-    #[tokio::test]
-    async fn repl_runtime_subscription_receives_live_events_without_polling() {
-        let config = AppConfig::default();
-        let mut runtime = ReplRuntimeState::new(&config);
-        let start_sequence = runtime.snapshot().last_sequence;
-        let run_id = uuid::Uuid::new_v4();
-        let mut subscription = runtime.subscribe_after(start_sequence);
-
-        runtime.record(ReplEvent::RunStarted { run_id }, Some(run_id));
-
-        let event = tokio::time::timeout(Duration::from_millis(100), subscription.next())
-            .await
-            .expect("live event before timeout")
-            .expect("open subscription");
-
-        assert_eq!(event.sequence, start_sequence + 1);
-        assert!(matches!(event.event, ReplEvent::RunStarted { .. }));
+    fn cosine_similarity_handles_normalized_and_zero_vectors() {
+        assert!((cosine_similarity(&[1.0, 0.0], &[1.0, 0.0]) - 1.0).abs() < f32::EPSILON);
+        assert_eq!(cosine_similarity(&[0.0, 0.0], &[1.0, 0.0]), 0.0);
+        assert_eq!(cosine_similarity(&[1.0], &[1.0, 0.0]), 0.0);
     }
 
     #[test]
-    fn repl_select_model_updates_chat_model_in_snapshot() {
-        let mut runtime = ReplRuntimeState::new(&AppConfig::default());
-        let request_id = uuid::Uuid::new_v4();
-        let model = visionclip_common::ModelRef {
-            provider: "ollama".to_string(),
-            name: "qwen2.5:0.5b".to_string(),
-        };
-
-        let result = process_repl_local_command_locked(
-            &mut runtime,
-            request_id,
-            ReplCommand::SelectModel {
-                model: model.clone(),
-                role: visionclip_common::ModelRole::Chat,
-            },
-        );
-
-        assert!(matches!(result, JobResult::ActionStatus { .. }));
-        let snapshot = runtime.snapshot();
-        assert_eq!(snapshot.session.selected_model, model);
-    }
-
-    #[test]
-    fn repl_open_ui_updates_session_mode_in_snapshot() {
-        let mut runtime = ReplRuntimeState::new(&AppConfig::default());
-        let request_id = uuid::Uuid::new_v4();
-
-        let result = process_repl_local_command_locked(
-            &mut runtime,
-            request_id,
-            ReplCommand::OpenUi {
-                mode: visionclip_common::ReplMode::DesktopApp,
-            },
-        );
-
-        assert!(matches!(result, JobResult::ActionStatus { .. }));
-        let snapshot = runtime.snapshot();
-        assert_eq!(
-            snapshot.session.mode,
-            visionclip_common::ReplMode::DesktopApp
-        );
-    }
-
-    #[test]
-    fn repl_capture_and_explain_requires_policy_confirmation_when_unknown() {
-        let mut runtime = ReplRuntimeState::new(&AppConfig::default());
-        let request_id = uuid::Uuid::new_v4();
-
-        let result = process_repl_local_command_locked(
-            &mut runtime,
-            request_id,
-            ReplCommand::CaptureAndExplain {
-                mode: visionclip_common::ScreenAssistMode::ExplainCode,
-                policy: visionclip_common::AssessmentPolicy::UnknownAssessment,
-            },
-        );
-
-        assert!(matches!(result, JobResult::ActionStatus { .. }));
-        let snapshot = runtime.snapshot();
-        assert_eq!(
-            snapshot.session.policy,
-            visionclip_common::AssessmentPolicy::UnknownAssessment
-        );
-        assert_eq!(
-            snapshot.session.status,
-            visionclip_common::SessionStatus::AwaitingConfirmation
-        );
-    }
-
-    #[test]
-    fn repl_dismiss_confirmation_returns_session_to_idle() {
-        let mut runtime = ReplRuntimeState::new(&AppConfig::default());
-        let request_id = uuid::Uuid::new_v4();
-
-        process_repl_local_command_locked(
-            &mut runtime,
-            request_id,
-            ReplCommand::CaptureAndExplain {
-                mode: visionclip_common::ScreenAssistMode::ExplainCode,
-                policy: visionclip_common::AssessmentPolicy::UnknownAssessment,
-            },
-        );
-        let result = process_repl_local_command_locked(
-            &mut runtime,
-            request_id,
-            ReplCommand::DismissConfirmation,
-        );
-
-        assert!(matches!(result, JobResult::ActionStatus { .. }));
-        assert_eq!(
-            runtime.snapshot().session.status,
-            visionclip_common::SessionStatus::Idle
-        );
-    }
-
-    #[test]
-    fn repl_capture_and_explain_blocks_restricted_multiple_choice() {
-        let mut runtime = ReplRuntimeState::new(&AppConfig::default());
-        let request_id = uuid::Uuid::new_v4();
-
-        let result = process_repl_local_command_locked(
-            &mut runtime,
-            request_id,
-            ReplCommand::CaptureAndExplain {
-                mode: visionclip_common::ScreenAssistMode::MultipleChoice,
-                policy: visionclip_common::AssessmentPolicy::RestrictedAssessment,
-            },
-        );
-
-        assert!(matches!(
-            result,
-            JobResult::Error {
-                code,
-                ..
-            } if code == "assessment_policy_blocked"
+    fn document_store_persists_and_reloads_snapshot() {
+        let mut config = AppConfig::default();
+        config.infer.embedding_model = "test-embed".into();
+        let storage_path = std::env::temp_dir().join(format!(
+            "visionclip-document-store-test-{}.json",
+            uuid::Uuid::new_v4()
         ));
-        assert_eq!(
-            runtime.snapshot().session.status,
-            visionclip_common::SessionStatus::Error
-        );
-    }
-
-    #[test]
-    fn repl_ask_keeps_plain_messages_in_agent_mode() {
-        assert_eq!(explicit_repl_web_search_query("olá"), None);
-        assert_eq!(explicit_repl_web_search_query("explique esse código"), None);
-        assert_eq!(explicit_repl_web_search_query("terminal"), None);
-    }
-
-    #[test]
-    fn repl_ask_uses_web_search_only_for_explicit_search_prefixes() {
-        assert_eq!(
-            explicit_repl_web_search_query("pesquise quando foi fundada a NASA").as_deref(),
-            Some("quando foi fundada a NASA")
-        );
-        assert_eq!(
-            explicit_repl_web_search_query("search rust ownership").as_deref(),
-            Some("rust ownership")
-        );
-        assert_eq!(
-            explicit_repl_web_search_query("Google: Quem foi Rousseau?").as_deref(),
-            Some("Quem foi Rousseau?")
-        );
-    }
-
-    #[test]
-    fn repl_capture_and_explain_records_authorized_screen_assist_lifecycle() {
-        let mut runtime = ReplRuntimeState::new(&AppConfig::default());
-        let request_id = uuid::Uuid::new_v4();
-
-        let result = process_repl_local_command_locked(
-            &mut runtime,
-            request_id,
-            ReplCommand::CaptureAndExplain {
-                mode: visionclip_common::ScreenAssistMode::DebugError,
-                policy: visionclip_common::AssessmentPolicy::Practice,
+        let sqlite_path = std::env::temp_dir().join(format!(
+            "visionclip-document-store-test-{}.sqlite3",
+            uuid::Uuid::new_v4()
+        ));
+        let document_id = visionclip_documents::DocumentId::new();
+        let chunks = test_document_chunks_with_id(&document_id, &["Persisted chunk."]);
+        let mut store = DocumentStore::empty(&config, storage_path.clone(), sqlite_path.clone())
+            .expect("document store");
+        store.documents.insert(
+            document_id.as_str().to_string(),
+            IngestedDocument {
+                document: visionclip_documents::LoadedDocument {
+                    id: document_id.clone(),
+                    source_path: PathBuf::from("/tmp/persisted.txt"),
+                    title: "persisted".into(),
+                    format: visionclip_documents::DocumentFormat::Text,
+                    text: "Persisted chunk.".into(),
+                },
+                chunks,
             },
         );
-
-        assert!(matches!(result, JobResult::ActionStatus { .. }));
-        let (events, _) = runtime.events_after(1);
-        assert!(matches!(
-            events[0].event,
-            ReplEvent::PolicyEvaluated { allowed: true, .. }
-        ));
-        assert!(matches!(events[1].event, ReplEvent::RunStarted { .. }));
-        assert!(matches!(
-            events[2].event,
-            ReplEvent::IntentDetected {
-                intent: ReplIntent::DebugCode,
-                ..
-            }
-        ));
-        assert!(matches!(events[3].event, ReplEvent::ToolStarted { .. }));
-        assert!(matches!(
-            events[4].event,
-            ReplEvent::ToolCompleted {
-                status: ToolStatus::Cancelled,
-                ..
-            }
-        ));
-        assert!(matches!(events[5].event, ReplEvent::RunCompleted { .. }));
-        assert_eq!(
-            runtime.snapshot().session.status,
-            visionclip_common::SessionStatus::Idle
+        store.embeddings.insert(
+            document_id.as_str().to_string(),
+            vec![DocumentChunkEmbedding {
+                chunk_id: "chunk_0".into(),
+                chunk_index: 0,
+                vector: vec![0.2, 0.8],
+            }],
         );
-    }
 
-    #[test]
-    fn browser_query_assistant_message_prefers_search_summary() {
-        let summary = Some("Resumo estruturado da pesquisa.".to_string());
+        store.persist().unwrap();
+        let loaded =
+            DocumentStore::load_from_path(&config, storage_path.clone(), sqlite_path.clone())
+                .unwrap();
 
+        assert!(loaded.documents.contains_key(document_id.as_str()));
         assert_eq!(
-            assistant_message_for_browser_query("Quem foi Rousseau?", &summary),
-            "Resumo estruturado da pesquisa."
+            loaded
+                .embeddings
+                .get(document_id.as_str())
+                .and_then(|embeddings| embeddings.first())
+                .map(|embedding| embedding.vector.as_slice()),
+            Some(&[0.2, 0.8][..])
         );
+        let _ = std::fs::remove_file(storage_path);
+        let _ = std::fs::remove_file(sqlite_path);
     }
 
     #[test]
-    fn browser_query_assistant_message_falls_back_when_search_summary_is_missing() {
-        let message = assistant_message_for_browser_query("Quem foi Rousseau?", &None);
+    fn document_store_loads_from_sqlite_when_snapshot_is_missing() {
+        let mut config = AppConfig::default();
+        config.infer.embedding_model = "test-embed".into();
+        let storage_path = std::env::temp_dir().join(format!(
+            "visionclip-document-store-missing-json-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let sqlite_path = std::env::temp_dir().join(format!(
+            "visionclip-document-store-sqlite-{}.sqlite3",
+            uuid::Uuid::new_v4()
+        ));
+        let document_id = visionclip_documents::DocumentId::new();
+        let chunks = test_document_chunks_with_id(&document_id, &["SQLite chunk."]);
+        let mut store = DocumentStore::empty(&config, storage_path.clone(), sqlite_path.clone())
+            .expect("document store");
+        store.documents.insert(
+            document_id.as_str().to_string(),
+            IngestedDocument {
+                document: visionclip_documents::LoadedDocument {
+                    id: document_id.clone(),
+                    source_path: PathBuf::from("/tmp/sqlite.txt"),
+                    title: "sqlite".into(),
+                    format: visionclip_documents::DocumentFormat::Text,
+                    text: "SQLite chunk.".into(),
+                },
+                chunks,
+            },
+        );
+        let mut reading_session = ReadingSession::new(document_id.clone(), "pt-BR");
+        reading_session.start();
+        store
+            .reading_sessions
+            .insert(reading_session.id.clone(), reading_session.clone());
+        store.embeddings.insert(
+            document_id.as_str().to_string(),
+            vec![DocumentChunkEmbedding {
+                chunk_id: "chunk_0".into(),
+                chunk_index: 0,
+                vector: vec![0.7, 0.3],
+            }],
+        );
+        store.persist().unwrap();
+        std::fs::remove_file(&storage_path).unwrap();
 
-        assert!(message.contains("Pesquisa: Quem foi Rousseau?"));
-        assert!(message.contains("Leitura inicial:"));
-    }
+        let loaded =
+            DocumentStore::load_from_path(&config, storage_path.clone(), sqlite_path.clone())
+                .unwrap();
 
-    #[test]
-    fn tool_status_maps_result_state() {
-        let ok: Result<JobResult> = Ok(JobResult::ActionStatus {
-            request_id: uuid::Uuid::new_v4(),
-            message: "ok".to_string(),
-            spoken: false,
-        });
-        let error: Result<JobResult> = Err(anyhow::anyhow!("boom"));
-
-        assert_eq!(tool_status_for_result(&ok), ToolStatus::Succeeded);
-        assert_eq!(tool_status_for_result(&error), ToolStatus::Failed);
+        assert!(loaded.documents.contains_key(document_id.as_str()));
+        assert!(loaded.reading_sessions.contains_key(&reading_session.id));
+        assert_eq!(
+            loaded
+                .embeddings
+                .get(document_id.as_str())
+                .and_then(|embeddings| embeddings.first())
+                .map(|embedding| embedding.vector.as_slice()),
+            Some(&[0.7, 0.3][..])
+        );
+        let _ = std::fs::remove_file(sqlite_path);
     }
 
     #[tokio::test]
@@ -2297,5 +2901,45 @@ mod tests {
             })
             .await;
         })
+    }
+
+    fn test_document_chunks(texts: &[&str]) -> Vec<DocumentChunk> {
+        let document_id = visionclip_documents::DocumentId::new();
+        test_document_chunks_with_id(&document_id, texts)
+    }
+
+    fn test_document_chunks_with_id(
+        document_id: &visionclip_documents::DocumentId,
+        texts: &[&str],
+    ) -> Vec<DocumentChunk> {
+        texts
+            .iter()
+            .enumerate()
+            .map(|(index, text)| DocumentChunk {
+                id: format!("chunk_{index}"),
+                document_id: document_id.clone(),
+                chunk_index: index,
+                page_start: None,
+                page_end: None,
+                section_title: None,
+                text: (*text).to_string(),
+                token_count: text.split_whitespace().count(),
+            })
+            .collect()
+    }
+
+    fn test_document_embeddings(
+        chunks: &[DocumentChunk],
+        vectors: &[Vec<f32>],
+    ) -> Vec<DocumentChunkEmbedding> {
+        chunks
+            .iter()
+            .zip(vectors.iter())
+            .map(|(chunk, vector)| DocumentChunkEmbedding {
+                chunk_id: chunk.id.clone(),
+                chunk_index: chunk.chunk_index,
+                vector: vector.clone(),
+            })
+            .collect()
     }
 }
