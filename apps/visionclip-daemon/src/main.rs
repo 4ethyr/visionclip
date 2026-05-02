@@ -34,11 +34,11 @@ use visionclip_common::{
     ToolRegistry, UrlOpenJob, VisionRequest, VoiceSearchJob,
 };
 use visionclip_documents::{
-    AudioCacheEntry, AudioCacheStore, AudioChunk, AudioSink, ChunkerConfig, DocumentChunk,
-    DocumentRuntime, IngestedDocument, ReadingProgress, ReadingProgressStore, ReadingSession,
-    ReadingStatus, SqliteDocumentStore, StoredAudioChunk, StoredAuditEvent, StoredChunkEmbedding,
-    TranslatedReadingPipeline, TranslatedUnit, TranslationProvider, TranslationRequest,
-    TtsProvider, TtsRequest,
+    AudioCacheEntry, AudioCacheLookup, AudioCacheStore, AudioChunk, AudioSink, ChunkerConfig,
+    DocumentChunk, DocumentRuntime, IngestedDocument, ReadingProgress, ReadingProgressStore,
+    ReadingSession, ReadingStatus, SqliteDocumentStore, StoredAudioChunk, StoredAuditEvent,
+    StoredChunkEmbedding, TranslatedReadingPipeline, TranslatedUnit, TranslationProvider,
+    TranslationRequest, TtsProvider, TtsRequest,
 };
 use visionclip_infer::{
     postprocess::{sanitize_for_speech, sanitize_output},
@@ -398,6 +398,24 @@ impl DocumentStore {
         };
         sqlite.save_audio_chunk(chunk)
     }
+
+    fn load_audio_chunk(
+        &self,
+        document_id: &str,
+        target_language: &str,
+        voice_id: &str,
+        chunk_id: &str,
+        text_hash: &str,
+    ) -> Result<Option<StoredAudioChunk>> {
+        let Some(sqlite) = self.sqlite.as_ref() else {
+            return Ok(None);
+        };
+        let chunk = sqlite
+            .load_audio_chunks(document_id, target_language, voice_id)?
+            .into_iter()
+            .find(|chunk| chunk.chunk_id == chunk_id && chunk.text_hash == text_hash);
+        Ok(chunk)
+    }
 }
 
 #[derive(Clone)]
@@ -489,6 +507,16 @@ struct DaemonAudioCacheStore {
 
 #[async_trait]
 impl AudioCacheStore for DaemonAudioCacheStore {
+    async fn load_audio_chunk(&self, lookup: AudioCacheLookup) -> Result<Option<AudioChunk>> {
+        match self.try_load_audio_chunk(lookup).await {
+            Ok(chunk) => Ok(chunk),
+            Err(error) => {
+                warn!(?error, "failed to load document audio cache entry");
+                Ok(None)
+            }
+        }
+    }
+
     async fn save_audio_chunk(&self, entry: AudioCacheEntry) -> Result<()> {
         if let Err(error) = self.try_save_audio_chunk(entry).await {
             warn!(?error, "failed to save document audio cache entry");
@@ -498,6 +526,47 @@ impl AudioCacheStore for DaemonAudioCacheStore {
 }
 
 impl DaemonAudioCacheStore {
+    async fn try_load_audio_chunk(&self, lookup: AudioCacheLookup) -> Result<Option<AudioChunk>> {
+        let voice_id = normalized_audio_cache_voice_id(lookup.voice_id.as_deref());
+        let text_hash = stable_audio_text_hash(&lookup.target_language, &voice_id, &lookup.text);
+        let stored = {
+            let documents = self.documents.lock().await;
+            documents.load_audio_chunk(
+                lookup.document_id.as_str(),
+                &lookup.target_language,
+                &voice_id,
+                &lookup.chunk_id,
+                &text_hash,
+            )?
+        };
+        let Some(stored) = stored else {
+            return Ok(None);
+        };
+
+        let read_path = stored.audio_path.clone();
+        let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+            fs::read(&read_path).with_context(|| format!("failed to read {}", read_path.display()))
+        })
+        .await
+        .context("document audio cache read task failed")??;
+        let voice_id = if stored.voice_id == "default" {
+            None
+        } else {
+            Some(stored.voice_id)
+        };
+        Ok(Some(AudioChunk {
+            id: format!("audio_cache_{}", uuid::Uuid::new_v4()),
+            chunk_id: stored.chunk_id,
+            chunk_index: stored.chunk_index,
+            target_language: stored.target_language,
+            voice_id,
+            text: lookup.text,
+            bytes,
+            duration_ms: stored.duration_ms,
+            cached: true,
+        }))
+    }
+
     async fn try_save_audio_chunk(&self, entry: AudioCacheEntry) -> Result<()> {
         {
             let documents = self.documents.lock().await;
@@ -3188,6 +3257,23 @@ mod tests {
             .unwrap();
         assert_eq!(audio_files.len(), 1);
         assert_eq!(std::fs::read(audio_files[0].path()).unwrap(), b"wav-data");
+
+        let cached = cache
+            .try_load_audio_chunk(AudioCacheLookup {
+                document_id: document_id.clone(),
+                session_id: "read_test".into(),
+                chunk_id: chunk_id.clone(),
+                chunk_index: 0,
+                target_language: "pt-BR".into(),
+                voice_id: Some("pt_BR-test".into()),
+                text: "Texto narrado.".into(),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(cached.cached);
+        assert_eq!(cached.bytes, b"wav-data");
+        assert_eq!(cached.text, "Texto narrado.");
 
         let documents = documents.lock().await;
         let stored = documents

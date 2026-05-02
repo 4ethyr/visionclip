@@ -45,7 +45,7 @@ Principais módulos atuais:
 - `ask_document` usa embeddings locais via Ollama quando `infer.embedding_model` esta configurado e ha vetores persistidos para o documento; caso contrario volta para recuperação lexical. `summarize_document` ainda usa prefixo local.
 - `visionclip-documents` agora tem `SqliteDocumentStore` com schema versionado para documentos, chunks, sessões, progresso, traduções, embeddings, cache de áudio e eventos de auditoria; o daemon espelha o snapshot JSON para SQLite e consegue recarregar do SQLite quando o JSON nao existe.
 - Eventos de auditoria de tools/security continuam em memória para uso imediato e agora também são persistidos no SQLite com payload redigido.
-- A leitura traduzida grava WAVs gerados no cache local quando `documents.cache_audio` está habilitado e registra os metadados no SQLite.
+- A leitura traduzida grava WAVs gerados no cache local quando `documents.cache_audio` está habilitado, registra os metadados no SQLite e consulta o cache antes de chamar TTS novamente.
 
 ## Próximos passos
 
@@ -53,4 +53,4 @@ Principais módulos atuais:
 2. Migrar `OllamaBackend` para `AiProvider` + `ProviderRouter`.
 3. Extrair DesktopController para apps/URLs, volume, brilho e VPN com command runner mockável.
 4. Conectar voz e CLI ao `AgentOrchestrator` para substituir roteamento local duplicado.
-5. Usar chunks de áudio cacheados para retomar/reproduzir antes de chamar TTS novamente.
+5. Expor controles de cache/progresso para a UI futura de leitura.

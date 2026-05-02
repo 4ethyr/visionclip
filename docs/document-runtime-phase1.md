@@ -55,7 +55,8 @@ work.
   into SQLite with redacted payloads.
 - Daemon audio cache path: translated reading writes generated WAV chunks under
   the local app data directory and stores cache metadata in SQLite when
-  `documents.cache_audio` is enabled.
+  `documents.cache_audio` is enabled; cache hits are loaded before calling TTS
+  again.
 
 ## Safety Decisions
 
@@ -89,4 +90,4 @@ work.
 2. Add PDF text extraction behind a feature or optional system dependency.
 3. Connect translation to ProviderRouter and TTS to a controllable AudioRuntime.
 4. Replace in-process embedding ranking with sqlite-vec vector storage/search.
-5. Use cached audio chunks for resume/replay before calling TTS again.
+5. Add cache eviction and user-facing reading/cache controls.

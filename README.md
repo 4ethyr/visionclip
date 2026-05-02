@@ -112,7 +112,7 @@ Persistência:
 - `documents.sqlite3`: store SQLite local com documentos, chunks, sessões, progresso, traduções, embeddings, cache de áudio e eventos de auditoria.
 - `document-audio-cache/`: arquivos WAV gerados pela leitura/tradução incremental quando `documents.cache_audio = true`.
 
-O SQLite já é espelhado pelo daemon e pode ser usado para recarregar documentos quando o snapshot JSON não existe. O cache de áudio é gravado localmente e referenciado no SQLite para permitir reuso futuro. O próximo passo planejado é tornar SQLite o store único e adicionar `sqlite-vec`.
+O SQLite já é espelhado pelo daemon e pode ser usado para recarregar documentos quando o snapshot JSON não existe. O cache de áudio é gravado localmente, referenciado no SQLite e consultado antes de chamar TTS novamente. O próximo passo planejado é tornar SQLite o store único e adicionar `sqlite-vec`.
 
 ## Scripts locais
 
