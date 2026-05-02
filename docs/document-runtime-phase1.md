@@ -2,7 +2,7 @@
 
 This phase adds the first local-first document runtime foundation for VisionClip.
 It is intentionally small and safe: text and Markdown are supported now, with a
-local JSON snapshot store. PDF extraction, OCR, SQLite, embeddings, and a
+local JSON snapshot store. PDF extraction, OCR, SQLite, vector indexing, and a
 controllable audio runtime remain future integration work.
 
 ## Scope Delivered
@@ -38,6 +38,8 @@ controllable audio runtime remain future integration work.
   with simple keyword retrieval.
 - Initial Ollama/Piper adapters for translated reading:
   `OllamaBackend -> Piper HTTP -> configured audio player`.
+- Optional Ollama embedding API foundation via `infer.embedding_model` and
+  `/api/embed`; it is disabled by default and not wired into retrieval yet.
 
 ## Safety Decisions
 
@@ -59,8 +61,8 @@ controllable audio runtime remain future integration work.
   SQLite remains the target storage layer.
 - Pause/resume/stop update session state, but live cancellation/control of a
   running playback pipeline still needs the AudioRuntime control channel.
-- Retrieval is lexical and in-memory. Embeddings/vector search are not
-  implemented yet.
+- Retrieval is lexical and in-memory. Embedding generation exists behind the
+  Ollama backend, but vector persistence/search is not integrated yet.
 
 ## Next Integration Steps
 
@@ -69,4 +71,5 @@ controllable audio runtime remain future integration work.
 2. Add migrations and store-version handling for SQLite.
 3. Add PDF text extraction behind a feature or optional system dependency.
 4. Connect translation to ProviderRouter and TTS to a controllable AudioRuntime.
-5. Replace lexical document retrieval with embeddings/vector search.
+5. Replace lexical document retrieval with embeddings/vector search using the
+   local Ollama embedding API and SQLite vector storage.
