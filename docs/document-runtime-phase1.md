@@ -2,8 +2,9 @@
 
 This phase adds the first local-first document runtime foundation for VisionClip.
 It is intentionally small and safe: text and Markdown are supported now, with a
-local JSON snapshot store. PDF extraction, OCR, SQLite, vector indexing, and a
-controllable audio runtime remain future integration work.
+local JSON snapshot store plus an isolated SQLite store foundation. PDF
+extraction, OCR, sqlite-vec indexing, and a controllable audio runtime remain
+future integration work.
 
 ## Scope Delivered
 
@@ -43,6 +44,10 @@ controllable audio runtime remain future integration work.
 - Best-effort local embedding generation on document ingest when
   `infer.embedding_model` is configured, with lexical fallback if embedding
   generation fails.
+- `SqliteDocumentStore` foundation in `visionclip-documents` with schema
+  versioning and tables for documents, chunks, reading sessions, progress,
+  translated chunks, and chunk embeddings. It is tested but not yet the daemon
+  default store.
 
 ## Safety Decisions
 
@@ -58,7 +63,8 @@ controllable audio runtime remain future integration work.
 ## Current Limitations
 
 - TXT and Markdown only.
-- No SQLite store yet.
+- SQLite store exists in `visionclip-documents`, but daemon persistence still
+  uses the JSON snapshot until migration is wired.
 - No vector index/RAG retrieval yet.
 - Document state is persisted locally as JSON. This is a transitional backend;
   SQLite remains the target storage layer.
@@ -70,9 +76,9 @@ controllable audio runtime remain future integration work.
 
 ## Next Integration Steps
 
-1. Replace the JSON snapshot with local SQLite tables for documents, chunks,
-   reading sessions, translations, audio cache, and audit events.
-2. Add migrations and store-version handling for SQLite.
+1. Wire `SqliteDocumentStore` into the daemon and migrate the JSON snapshot on
+   first startup.
+2. Add audio cache and audit-event tables to SQLite.
 3. Add PDF text extraction behind a feature or optional system dependency.
 4. Connect translation to ProviderRouter and TTS to a controllable AudioRuntime.
-5. Replace in-process embedding ranking with SQLite vector storage/search.
+5. Replace in-process embedding ranking with sqlite-vec vector storage/search.

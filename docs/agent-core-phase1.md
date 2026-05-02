@@ -43,11 +43,12 @@ Principais módulos atuais:
 - `visionclip-documents` adiciona loader TXT/Markdown, chunker, sessão de leitura e pipeline incremental traduzir -> TTS -> áudio com backpressure.
 - `ingest_document`, `ask_document`, `summarize_document`, `read_document_aloud`, `translate_document` e controles de leitura já passam por IPC/CLI/daemon com validação de tool e store local persistido.
 - `ask_document` usa embeddings locais via Ollama quando `infer.embedding_model` esta configurado e ha vetores persistidos para o documento; caso contrario volta para recuperação lexical. `summarize_document` ainda usa prefixo local.
+- `visionclip-documents` agora tem `SqliteDocumentStore` com schema versionado para documentos, chunks, sessões, progresso, traduções e embeddings; o daemon ainda usa snapshot JSON ate a migração ser conectada.
 
 ## Próximos passos
 
 1. Adicionar confirmação real via IPC/UI para tools que retornam `RequireConfirmation`.
-2. Persistir audit log e sessões em SQLite.
+2. Conectar `SqliteDocumentStore` ao daemon e migrar o snapshot JSON local.
 3. Migrar `OllamaBackend` para `AiProvider` + `ProviderRouter`.
 4. Extrair DesktopController para apps/URLs, volume, brilho e VPN com command runner mockável.
 5. Conectar voz e CLI ao `AgentOrchestrator` para substituir roteamento local duplicado.

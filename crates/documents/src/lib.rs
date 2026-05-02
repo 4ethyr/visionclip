@@ -1,9 +1,12 @@
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
+    convert::TryInto,
     path::{Path, PathBuf},
     sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{sync::mpsc, task::JoinHandle};
 use uuid::Uuid;
@@ -14,6 +17,14 @@ pub struct DocumentId(String);
 impl DocumentId {
     pub fn new() -> Self {
         Self(format!("doc_{}", Uuid::new_v4()))
+    }
+
+    pub fn from_existing(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            bail!("document id cannot be empty");
+        }
+        Ok(Self(value))
     }
 
     pub fn as_str(&self) -> &str {
@@ -329,6 +340,520 @@ pub struct ReadingProgress {
     pub status: ReadingStatus,
 }
 
+#[derive(Debug)]
+pub struct SqliteDocumentStore {
+    conn: Connection,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredChunkEmbedding {
+    pub document_id: DocumentId,
+    pub chunk_id: String,
+    pub chunk_index: usize,
+    pub model: String,
+    pub vector: Vec<f32>,
+}
+
+impl SqliteDocumentStore {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        Self::from_connection(
+            Connection::open(path)
+                .with_context(|| format!("failed to open SQLite store {}", path.display()))?,
+        )
+    }
+
+    pub fn in_memory() -> Result<Self> {
+        Self::from_connection(Connection::open_in_memory()?)
+    }
+
+    fn from_connection(conn: Connection) -> Result<Self> {
+        conn.execute_batch(SQLITE_SCHEMA)?;
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('store_version', '1')",
+            [],
+        )?;
+        Ok(Self { conn })
+    }
+
+    pub fn schema_version(&self) -> Result<u32> {
+        let value: String = self.conn.query_row(
+            "SELECT value FROM schema_meta WHERE key = 'store_version'",
+            [],
+            |row| row.get(0),
+        )?;
+        value
+            .parse::<u32>()
+            .context("failed to parse SQLite document store version")
+    }
+
+    pub fn save_document(&mut self, ingested: &IngestedDocument) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let now = now_ms();
+        tx.execute(
+            "INSERT INTO documents (id, source_path, title, format, text, created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+               source_path = excluded.source_path,
+               title = excluded.title,
+               format = excluded.format,
+               text = excluded.text,
+               updated_at_ms = excluded.updated_at_ms",
+            params![
+                ingested.document.id.as_str(),
+                ingested.document.source_path.display().to_string(),
+                &ingested.document.title,
+                encode_document_format(ingested.document.format),
+                &ingested.document.text,
+                now,
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM document_chunks WHERE document_id = ?1",
+            params![ingested.document.id.as_str()],
+        )?;
+        for chunk in &ingested.chunks {
+            tx.execute(
+                "INSERT INTO document_chunks (
+                   id, document_id, chunk_index, page_start, page_end, section_title, text, token_count
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    &chunk.id,
+                    chunk.document_id.as_str(),
+                    usize_to_i64(chunk.chunk_index, "chunk_index")?,
+                    chunk.page_start.map(i64::from),
+                    chunk.page_end.map(i64::from),
+                    &chunk.section_title,
+                    &chunk.text,
+                    usize_to_i64(chunk.token_count, "token_count")?,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn load_document(&self, document_id: &str) -> Result<Option<IngestedDocument>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, source_path, title, format, text FROM documents WHERE id = ?1",
+                params![document_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let Some((id, source_path, title, format, text)) = row else {
+            return Ok(None);
+        };
+
+        let document_id = DocumentId::from_existing(id)?;
+        let document = LoadedDocument {
+            id: document_id.clone(),
+            source_path: PathBuf::from(source_path),
+            title,
+            format: decode_document_format(&format)?,
+            text,
+        };
+        let chunks = self.load_chunks(document_id.as_str())?;
+        Ok(Some(IngestedDocument { document, chunks }))
+    }
+
+    pub fn save_reading_session(&mut self, session: &ReadingSession) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO reading_sessions (
+               id, document_id, target_language, current_chunk_index, status, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+               document_id = excluded.document_id,
+               target_language = excluded.target_language,
+               current_chunk_index = excluded.current_chunk_index,
+               status = excluded.status,
+               updated_at_ms = excluded.updated_at_ms",
+            params![
+                &session.id,
+                session.document_id.as_str(),
+                &session.target_language,
+                usize_to_i64(session.current_chunk_index, "current_chunk_index")?,
+                encode_reading_status(session.status),
+                now_ms(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_reading_session(&self, session_id: &str) -> Result<Option<ReadingSession>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, document_id, target_language, current_chunk_index, status
+                 FROM reading_sessions WHERE id = ?1",
+                params![session_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let Some((id, document_id, target_language, current_chunk_index, status)) = row else {
+            return Ok(None);
+        };
+        Ok(Some(ReadingSession {
+            id,
+            document_id: DocumentId::from_existing(document_id)?,
+            target_language,
+            current_chunk_index: i64_to_usize(current_chunk_index, "current_chunk_index")?,
+            status: decode_reading_status(&status)?,
+        }))
+    }
+
+    pub fn save_progress(&mut self, progress: &ReadingProgress) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO reading_progress (
+               session_id, document_id, current_chunk_index, status, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(session_id) DO UPDATE SET
+               document_id = excluded.document_id,
+               current_chunk_index = excluded.current_chunk_index,
+               status = excluded.status,
+               updated_at_ms = excluded.updated_at_ms",
+            params![
+                &progress.session_id,
+                progress.document_id.as_str(),
+                usize_to_i64(progress.current_chunk_index, "current_chunk_index")?,
+                encode_reading_status(progress.status),
+                now_ms(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_progress(&self, session_id: &str) -> Result<Option<ReadingProgress>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT session_id, document_id, current_chunk_index, status
+                 FROM reading_progress WHERE session_id = ?1",
+                params![session_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let Some((session_id, document_id, current_chunk_index, status)) = row else {
+            return Ok(None);
+        };
+        Ok(Some(ReadingProgress {
+            session_id,
+            document_id: DocumentId::from_existing(document_id)?,
+            current_chunk_index: i64_to_usize(current_chunk_index, "current_chunk_index")?,
+            status: decode_reading_status(&status)?,
+        }))
+    }
+
+    pub fn save_translations(&mut self, units: &[TranslatedUnit]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let now = now_ms();
+        for unit in units {
+            tx.execute(
+                "INSERT INTO translated_chunks (
+                   session_id, chunk_id, chunk_index, source_text, translated_text,
+                   target_language, created_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(session_id, chunk_id) DO UPDATE SET
+                   source_text = excluded.source_text,
+                   translated_text = excluded.translated_text,
+                   target_language = excluded.target_language",
+                params![
+                    &unit.session_id,
+                    &unit.chunk_id,
+                    usize_to_i64(unit.chunk_index, "chunk_index")?,
+                    &unit.source_text,
+                    &unit.translated_text,
+                    &unit.target_language,
+                    now,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn load_translations(&self, session_id: &str) -> Result<Vec<TranslatedUnit>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, chunk_id, chunk_index, source_text, translated_text, target_language
+             FROM translated_chunks
+             WHERE session_id = ?1
+             ORDER BY chunk_index ASC",
+        )?;
+        let mut rows = stmt.query(params![session_id])?;
+        let mut units = Vec::new();
+        while let Some(row) = rows.next()? {
+            units.push(TranslatedUnit {
+                session_id: row.get(0)?,
+                chunk_id: row.get(1)?,
+                chunk_index: i64_to_usize(row.get(2)?, "chunk_index")?,
+                source_text: row.get(3)?,
+                translated_text: row.get(4)?,
+                target_language: row.get(5)?,
+            });
+        }
+        Ok(units)
+    }
+
+    pub fn save_embeddings(&mut self, embeddings: &[StoredChunkEmbedding]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let now = now_ms();
+        for embedding in embeddings {
+            tx.execute(
+                "INSERT INTO chunk_embeddings (
+                   document_id, chunk_id, chunk_index, model, vector, updated_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(document_id, chunk_id, model) DO UPDATE SET
+                   chunk_index = excluded.chunk_index,
+                   vector = excluded.vector,
+                   updated_at_ms = excluded.updated_at_ms",
+                params![
+                    embedding.document_id.as_str(),
+                    &embedding.chunk_id,
+                    usize_to_i64(embedding.chunk_index, "chunk_index")?,
+                    &embedding.model,
+                    encode_vector(&embedding.vector),
+                    now,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn load_embeddings(
+        &self,
+        document_id: &str,
+        model: &str,
+    ) -> Result<Vec<StoredChunkEmbedding>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT document_id, chunk_id, chunk_index, model, vector
+             FROM chunk_embeddings
+             WHERE document_id = ?1 AND model = ?2
+             ORDER BY chunk_index ASC",
+        )?;
+        let mut rows = stmt.query(params![document_id, model])?;
+        let mut embeddings = Vec::new();
+        while let Some(row) = rows.next()? {
+            embeddings.push(StoredChunkEmbedding {
+                document_id: DocumentId::from_existing(row.get::<_, String>(0)?)?,
+                chunk_id: row.get(1)?,
+                chunk_index: i64_to_usize(row.get(2)?, "chunk_index")?,
+                model: row.get(3)?,
+                vector: decode_vector(&row.get::<_, Vec<u8>>(4)?)?,
+            });
+        }
+        Ok(embeddings)
+    }
+
+    fn load_chunks(&self, document_id: &str) -> Result<Vec<DocumentChunk>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, document_id, chunk_index, page_start, page_end, section_title, text, token_count
+             FROM document_chunks
+             WHERE document_id = ?1
+             ORDER BY chunk_index ASC",
+        )?;
+        let mut rows = stmt.query(params![document_id])?;
+        let mut chunks = Vec::new();
+        while let Some(row) = rows.next()? {
+            chunks.push(DocumentChunk {
+                id: row.get(0)?,
+                document_id: DocumentId::from_existing(row.get::<_, String>(1)?)?,
+                chunk_index: i64_to_usize(row.get(2)?, "chunk_index")?,
+                page_start: row
+                    .get::<_, Option<i64>>(3)?
+                    .map(|value| i64_to_u32(value, "page_start"))
+                    .transpose()?,
+                page_end: row
+                    .get::<_, Option<i64>>(4)?
+                    .map(|value| i64_to_u32(value, "page_end"))
+                    .transpose()?,
+                section_title: row.get(5)?,
+                text: row.get(6)?,
+                token_count: i64_to_usize(row.get(7)?, "token_count")?,
+            });
+        }
+        Ok(chunks)
+    }
+}
+
+const SQLITE_SCHEMA: &str = r#"
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS schema_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS documents (
+  id TEXT PRIMARY KEY,
+  source_path TEXT NOT NULL,
+  title TEXT NOT NULL,
+  format TEXT NOT NULL,
+  text TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS document_chunks (
+  id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  chunk_index INTEGER NOT NULL,
+  page_start INTEGER,
+  page_end INTEGER,
+  section_title TEXT,
+  text TEXT NOT NULL,
+  token_count INTEGER NOT NULL,
+  UNIQUE(document_id, chunk_index)
+);
+
+CREATE TABLE IF NOT EXISTS reading_sessions (
+  id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  target_language TEXT NOT NULL,
+  current_chunk_index INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS reading_progress (
+  session_id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  current_chunk_index INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS translated_chunks (
+  session_id TEXT NOT NULL,
+  chunk_id TEXT NOT NULL,
+  chunk_index INTEGER NOT NULL,
+  source_text TEXT NOT NULL,
+  translated_text TEXT NOT NULL,
+  target_language TEXT NOT NULL,
+  created_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(session_id, chunk_id)
+);
+
+CREATE TABLE IF NOT EXISTS chunk_embeddings (
+  document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  chunk_id TEXT NOT NULL,
+  chunk_index INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  vector BLOB NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(document_id, chunk_id, model)
+);
+"#;
+
+fn encode_document_format(format: DocumentFormat) -> &'static str {
+    match format {
+        DocumentFormat::Text => "text",
+        DocumentFormat::Markdown => "markdown",
+    }
+}
+
+fn decode_document_format(value: &str) -> Result<DocumentFormat> {
+    match value {
+        "text" => Ok(DocumentFormat::Text),
+        "markdown" => Ok(DocumentFormat::Markdown),
+        other => bail!("unknown document format `{other}`"),
+    }
+}
+
+fn encode_reading_status(status: ReadingStatus) -> &'static str {
+    match status {
+        ReadingStatus::Idle => "idle",
+        ReadingStatus::Reading => "reading",
+        ReadingStatus::Paused => "paused",
+        ReadingStatus::Stopped => "stopped",
+        ReadingStatus::Completed => "completed",
+    }
+}
+
+fn decode_reading_status(value: &str) -> Result<ReadingStatus> {
+    match value {
+        "idle" => Ok(ReadingStatus::Idle),
+        "reading" => Ok(ReadingStatus::Reading),
+        "paused" => Ok(ReadingStatus::Paused),
+        "stopped" => Ok(ReadingStatus::Stopped),
+        "completed" => Ok(ReadingStatus::Completed),
+        other => bail!("unknown reading status `{other}`"),
+    }
+}
+
+fn encode_vector(vector: &[f32]) -> Vec<u8> {
+    vector
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
+}
+
+fn decode_vector(bytes: &[u8]) -> Result<Vec<f32>> {
+    let chunks = bytes.chunks_exact(4);
+    if !chunks.remainder().is_empty() {
+        bail!("invalid embedding vector byte length {}", bytes.len());
+    }
+
+    chunks
+        .map(|chunk| {
+            let bytes: [u8; 4] = chunk
+                .try_into()
+                .context("failed to decode embedding vector bytes")?;
+            Ok(f32::from_le_bytes(bytes))
+        })
+        .collect()
+}
+
+fn usize_to_i64(value: usize, field: &str) -> Result<i64> {
+    i64::try_from(value).with_context(|| format!("{field} is too large for SQLite integer"))
+}
+
+fn i64_to_usize(value: i64, field: &str) -> Result<usize> {
+    usize::try_from(value).with_context(|| format!("{field} is negative or too large"))
+}
+
+fn i64_to_u32(value: i64, field: &str) -> Result<u32> {
+    u32::try_from(value).with_context(|| format!("{field} is negative or too large"))
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TranslatedReadingConfig {
     pub chunk_buffer: usize,
@@ -612,6 +1137,95 @@ mod tests {
             .contains("PDF extraction is not implemented"));
     }
 
+    #[test]
+    fn sqlite_store_persists_document_chunks_and_progress() {
+        let mut store = SqliteDocumentStore::in_memory().unwrap();
+        let ingested = test_ingested_document(&["Intro text.", "Second chunk about VPN."]);
+        let document_id = ingested.document.id.clone();
+        store.save_document(&ingested).unwrap();
+
+        let loaded = store
+            .load_document(document_id.as_str())
+            .unwrap()
+            .expect("stored document");
+        assert_eq!(loaded.document.title, "book");
+        assert_eq!(loaded.chunks.len(), 2);
+        assert_eq!(loaded.chunks[1].text, "Second chunk about VPN.");
+        assert_eq!(store.schema_version().unwrap(), 1);
+
+        let mut session = ReadingSession::new(document_id.clone(), "pt-BR");
+        session.start();
+        session.current_chunk_index = 1;
+        store.save_reading_session(&session).unwrap();
+        let loaded_session = store
+            .load_reading_session(&session.id)
+            .unwrap()
+            .expect("stored reading session");
+        assert_eq!(loaded_session.status, ReadingStatus::Reading);
+        assert_eq!(loaded_session.current_chunk_index, 1);
+
+        let progress = ReadingProgress {
+            session_id: session.id.clone(),
+            document_id,
+            current_chunk_index: 2,
+            status: ReadingStatus::Completed,
+        };
+        store.save_progress(&progress).unwrap();
+        let loaded_progress = store
+            .load_progress(&session.id)
+            .unwrap()
+            .expect("stored progress");
+        assert_eq!(loaded_progress.current_chunk_index, 2);
+        assert_eq!(loaded_progress.status, ReadingStatus::Completed);
+    }
+
+    #[test]
+    fn sqlite_store_persists_translations_and_embeddings() {
+        let mut store = SqliteDocumentStore::in_memory().unwrap();
+        let ingested = test_ingested_document(&["Source one.", "Source two."]);
+        let document_id = ingested.document.id.clone();
+        let chunks = ingested.chunks.clone();
+        store.save_document(&ingested).unwrap();
+
+        let translations = chunks
+            .iter()
+            .map(|chunk| TranslatedUnit {
+                session_id: "read_test".into(),
+                chunk_id: chunk.id.clone(),
+                chunk_index: chunk.chunk_index,
+                source_text: chunk.text.clone(),
+                translated_text: format!("Traduzido {}", chunk.chunk_index),
+                target_language: "pt-BR".into(),
+            })
+            .collect::<Vec<_>>();
+        store.save_translations(&translations).unwrap();
+        let loaded_translations = store.load_translations("read_test").unwrap();
+        assert_eq!(loaded_translations, translations);
+
+        let embeddings = chunks
+            .iter()
+            .map(|chunk| StoredChunkEmbedding {
+                document_id: document_id.clone(),
+                chunk_id: chunk.id.clone(),
+                chunk_index: chunk.chunk_index,
+                model: "nomic-embed-text".into(),
+                vector: vec![chunk.chunk_index as f32, 0.5, 1.0],
+            })
+            .collect::<Vec<_>>();
+        store.save_embeddings(&embeddings).unwrap();
+        let loaded_embeddings = store
+            .load_embeddings(document_id.as_str(), "nomic-embed-text")
+            .unwrap();
+
+        assert_eq!(loaded_embeddings, embeddings);
+    }
+
+    #[test]
+    fn sqlite_store_rejects_invalid_existing_document_id() {
+        let error = DocumentId::from_existing(" ").unwrap_err();
+        assert!(error.to_string().contains("cannot be empty"));
+    }
+
     #[tokio::test]
     async fn translated_reading_pipeline_processes_chunks_incrementally() {
         let document_id = DocumentId::new();
@@ -703,5 +1317,33 @@ mod tests {
             self.saved.lock().unwrap().push(progress);
             Ok(())
         }
+    }
+
+    fn test_ingested_document(texts: &[&str]) -> IngestedDocument {
+        let document_id = DocumentId::new();
+        let text = texts.join("\n\n");
+        let document = LoadedDocument {
+            id: document_id.clone(),
+            source_path: PathBuf::from("/tmp/book.md"),
+            title: "book".into(),
+            format: DocumentFormat::Markdown,
+            text,
+        };
+        let chunks = texts
+            .iter()
+            .enumerate()
+            .map(|(index, text)| DocumentChunk {
+                id: format!("{}_chunk_{index}", document_id.as_str()),
+                document_id: document_id.clone(),
+                chunk_index: index,
+                page_start: None,
+                page_end: None,
+                section_title: None,
+                text: (*text).to_string(),
+                token_count: text.split_whitespace().count(),
+            })
+            .collect();
+
+        IngestedDocument { document, chunks }
     }
 }
