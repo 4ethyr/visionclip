@@ -51,6 +51,8 @@ work.
 - Daemon migration path: when JSON exists it is loaded and mirrored into
   SQLite; when JSON is absent the daemon can load documents, sessions, progress,
   translations, and embeddings from SQLite.
+- Daemon audit path: tool/security events are recorded in memory and persisted
+  into SQLite with redacted payloads.
 
 ## Safety Decisions
 
@@ -81,7 +83,7 @@ work.
 
 1. Make SQLite the single default document store and remove JSON writes after a
    migration window.
-2. Wire TTS audio cache writes and persistent audit log writes into the daemon.
+2. Wire TTS audio cache writes into the translated reading pipeline.
 3. Add PDF text extraction behind a feature or optional system dependency.
 4. Connect translation to ProviderRouter and TTS to a controllable AudioRuntime.
 5. Replace in-process embedding ranking with sqlite-vec vector storage/search.

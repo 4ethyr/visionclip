@@ -19,7 +19,7 @@ use std::{
     fs,
     future::Future,
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
     time::Instant,
 };
 use tokio::net::{UnixListener, UnixStream};
@@ -27,17 +27,17 @@ use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use visionclip_common::{
     decode_message_payload, read_message_payload, redact_for_audit, write_message, Action,
-    AppConfig, ApplicationLaunchJob, AuditLog, CaptureJob, DocumentAskJob, DocumentControlJob,
-    DocumentControlKind, DocumentIngestJob, DocumentReadJob, DocumentSummarizeJob,
-    DocumentTranslateJob, HealthCheckJob, JobResult, PermissionEngine, PolicyDecision, PolicyInput,
-    RiskContext, RiskLevel, SessionId, SessionManager, ToolCall, ToolRegistry, UrlOpenJob,
-    VisionRequest, VoiceSearchJob,
+    AppConfig, ApplicationLaunchJob, AuditEvent, AuditLog, CaptureJob, DocumentAskJob,
+    DocumentControlJob, DocumentControlKind, DocumentIngestJob, DocumentReadJob,
+    DocumentSummarizeJob, DocumentTranslateJob, HealthCheckJob, JobResult, PermissionEngine,
+    PolicyDecision, PolicyInput, RiskContext, RiskLevel, SessionId, SessionManager, ToolCall,
+    ToolRegistry, UrlOpenJob, VisionRequest, VoiceSearchJob,
 };
 use visionclip_documents::{
     AudioChunk, AudioSink, ChunkerConfig, DocumentChunk, DocumentRuntime, IngestedDocument,
     ReadingProgress, ReadingProgressStore, ReadingSession, ReadingStatus, SqliteDocumentStore,
-    StoredChunkEmbedding, TranslatedReadingPipeline, TranslatedUnit, TranslationProvider,
-    TranslationRequest, TtsProvider, TtsRequest,
+    StoredAuditEvent, StoredChunkEmbedding, TranslatedReadingPipeline, TranslatedUnit,
+    TranslationProvider, TranslationRequest, TtsProvider, TtsRequest,
 };
 use visionclip_infer::{
     postprocess::{sanitize_for_speech, sanitize_output},
@@ -72,6 +72,16 @@ async fn main() -> Result<()> {
             DocumentStore::new(&config)?
         }
     };
+    let audit_store = match SqliteDocumentStore::open(config.documents_sqlite_path()?) {
+        Ok(store) => Some(store),
+        Err(error) => {
+            warn!(
+                ?error,
+                "failed to open persistent audit store; in-memory audit log remains available"
+            );
+            None
+        }
+    };
 
     let state = Arc::new(AppState {
         config: config.clone(),
@@ -91,6 +101,7 @@ async fn main() -> Result<()> {
         tools: ToolRegistry::builtin(),
         permission_engine: PermissionEngine::default(),
         audit_log: AuditLog::default(),
+        audit_store: Arc::new(StdMutex::new(audit_store)),
         sessions: Mutex::new(SessionManager::default()),
         documents: Arc::new(Mutex::new(document_store)),
         #[cfg(feature = "coddy-protocol")]
@@ -118,6 +129,7 @@ struct AppState {
     tools: ToolRegistry,
     permission_engine: PermissionEngine,
     audit_log: AuditLog,
+    audit_store: Arc<StdMutex<Option<SqliteDocumentStore>>>,
     sessions: Mutex<SessionManager>,
     documents: Arc<Mutex<DocumentStore>>,
     #[cfg(feature = "coddy-protocol")]
@@ -745,7 +757,8 @@ async fn process_document_ingest(state: &AppState, job: DocumentIngestJob) -> Re
             "embeddings": embeddings_status,
         }),
     );
-    state.audit_log.record_tool_event(
+    record_audit_tool_event(
+        state,
         "document.ingested",
         Some(session_id),
         "ingest_document",
@@ -906,7 +919,8 @@ async fn process_document_read(state: &AppState, job: DocumentReadJob) -> Result
         (document_id, title, chunks, reading_session)
     };
 
-    state.audit_log.record_tool_event(
+    record_audit_tool_event(
+        state,
         "document.reading_started",
         Some(session_id.clone()),
         "read_document_aloud",
@@ -1106,7 +1120,8 @@ async fn process_document_ask(state: &AppState, job: DocumentAskJob) -> Result<J
             "tts_enqueue_ms": tts_enqueue_ms,
         }),
     );
-    state.audit_log.record_tool_event(
+    record_audit_tool_event(
+        state,
         "document.question_answered",
         Some(session_id),
         "ask_document",
@@ -1197,7 +1212,8 @@ async fn process_document_summarize(
             "tts_enqueue_ms": tts_enqueue_ms,
         }),
     );
-    state.audit_log.record_tool_event(
+    record_audit_tool_event(
+        state,
         "document.summarized",
         Some(session_id),
         "summarize_document",
@@ -1715,6 +1731,60 @@ async fn ensure_request_session(state: &AppState, request_id: uuid::Uuid) -> Ses
     session_id
 }
 
+fn record_audit_tool_event(
+    state: &AppState,
+    event_type: impl Into<String>,
+    session_id: Option<SessionId>,
+    tool_name: impl Into<String>,
+    risk_level: RiskLevel,
+    decision: impl Into<String>,
+    data: serde_json::Value,
+) {
+    let mut event = AuditEvent::tool_event(event_type, session_id, tool_name, risk_level, decision);
+    event.data = redact_for_audit(&data);
+    state.audit_log.record(event.clone());
+    persist_audit_event(state, &event);
+}
+
+fn persist_audit_event(state: &AppState, event: &AuditEvent) {
+    let stored = match stored_audit_event_from_event(event) {
+        Ok(value) => value,
+        Err(error) => {
+            warn!(?error, event_id = %event.id, "failed to encode audit event data");
+            return;
+        }
+    };
+
+    let Ok(mut audit_store) = state.audit_store.lock() else {
+        warn!(event_id = %event.id, "failed to lock persistent audit store");
+        return;
+    };
+    let Some(store) = audit_store.as_mut() else {
+        return;
+    };
+    if let Err(error) = store.save_audit_event(&stored) {
+        warn!(
+            ?error,
+            event_id = %event.id,
+            "failed to persist audit event to SQLite"
+        );
+    }
+}
+
+fn stored_audit_event_from_event(event: &AuditEvent) -> Result<StoredAuditEvent> {
+    Ok(StoredAuditEvent {
+        id: event.id.clone(),
+        captured_at_unix_ms: event.captured_at_unix_ms,
+        session_id: event.session_id.as_ref().map(ToString::to_string),
+        event_type: event.event_type.clone(),
+        risk_level: event.risk_level.map(RiskLevel::as_u8),
+        tool_name: event.tool_name.clone(),
+        provider: event.provider.clone(),
+        decision: event.decision.clone(),
+        data_json: serde_json::to_string(&event.data)?,
+    })
+}
+
 fn authorize_tool_call(
     state: &AppState,
     session_id: &SessionId,
@@ -1724,7 +1794,8 @@ fn authorize_tool_call(
     let definition = match state.tools.validate_call(&call) {
         Ok(definition) => definition,
         Err(error) => {
-            state.audit_log.record_tool_event(
+            record_audit_tool_event(
+                state,
                 "security.blocked",
                 Some(session_id.clone()),
                 call.name,
@@ -1736,7 +1807,8 @@ fn authorize_tool_call(
         }
     };
 
-    state.audit_log.record_tool_event(
+    record_audit_tool_event(
+        state,
         "tool.proposed",
         Some(session_id.clone()),
         definition.name.clone(),
@@ -1756,7 +1828,8 @@ fn authorize_tool_call(
 
     match state.permission_engine.evaluate(&policy_input) {
         PolicyDecision::Allow => {
-            state.audit_log.record_tool_event(
+            record_audit_tool_event(
+                state,
                 "tool.confirmed",
                 Some(session_id.clone()),
                 definition.name.clone(),
@@ -1770,7 +1843,8 @@ fn authorize_tool_call(
             })
         }
         PolicyDecision::RequireConfirmation(request) => {
-            state.audit_log.record_tool_event(
+            record_audit_tool_event(
+                state,
                 "tool.confirmation_requested",
                 Some(session_id.clone()),
                 definition.name.clone(),
@@ -1784,7 +1858,8 @@ fn authorize_tool_call(
             );
         }
         PolicyDecision::Deny(reason) => {
-            state.audit_log.record_tool_event(
+            record_audit_tool_event(
+                state,
                 "tool.denied",
                 Some(session_id.clone()),
                 definition.name.clone(),
@@ -1803,7 +1878,8 @@ fn record_tool_executed(
     tool: &AuthorizedTool,
     data: serde_json::Value,
 ) {
-    state.audit_log.record_tool_event(
+    record_audit_tool_event(
+        state,
         "tool.executed",
         Some(session_id.clone()),
         tool.name.clone(),
@@ -1820,7 +1896,8 @@ fn record_tool_failed(
     risk_level: RiskLevel,
     error: &str,
 ) {
-    state.audit_log.record_tool_event(
+    record_audit_tool_event(
+        state,
         "tool.failed",
         Some(session_id.clone()),
         tool_name.to_string(),
@@ -2681,6 +2758,31 @@ mod tests {
         assert!(validate_browser_url("http://example.com").is_ok());
         assert!(validate_browser_url("file:///etc/passwd").is_err());
         assert!(validate_browser_url("https://example.com/a b").is_err());
+    }
+
+    #[test]
+    fn audit_event_conversion_preserves_redacted_tool_metadata() {
+        let session_id = SessionId::new();
+        let mut event = AuditEvent::tool_event(
+            "tool.executed",
+            Some(session_id.clone()),
+            "ingest_document",
+            RiskLevel::Level2,
+            "executed",
+        );
+        event.data = redact_for_audit(&json!({
+            "document_id": "doc_1",
+            "api_key": "sk-secret"
+        }));
+
+        let stored = stored_audit_event_from_event(&event).unwrap();
+
+        assert_eq!(stored.id, event.id);
+        assert_eq!(stored.session_id, Some(session_id.to_string()));
+        assert_eq!(stored.event_type, "tool.executed");
+        assert_eq!(stored.risk_level, Some(2));
+        assert_eq!(stored.tool_name.as_deref(), Some("ingest_document"));
+        assert!(stored.data_json.contains("\"api_key\":\"<redacted>\""));
     }
 
     #[test]

@@ -26,7 +26,7 @@ VisionClip é um serviço local para Linux que transforma seus modelos locais em
 3. O daemon valida a ferramenta no registry e aplica política de risco/permissão antes de executar efeitos colaterais.
 4. Para screenshots, o daemon extrai texto com `infer.ocr_model` e envia esse texto para o modelo principal configurado no Ollama. No default atual, `gemma4:e2b` faz as duas etapas.
 5. Para documentos, o daemon usa chunks locais, embeddings opcionais e prompts locais para responder, resumir, traduzir ou narrar.
-6. A saída é enviada para clipboard, navegador ou TTS, e eventos relevantes são auditados.
+6. A saída é enviada para clipboard, navegador ou TTS, e eventos relevantes são auditados em memória e no SQLite local.
 
 ## Projeto Coddy
 
