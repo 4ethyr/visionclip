@@ -471,6 +471,22 @@ impl SqliteDocumentStore {
         Ok(Some(IngestedDocument { document, chunks }))
     }
 
+    pub fn load_documents(&self) -> Result<Vec<IngestedDocument>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM documents ORDER BY created_at_ms ASC, id ASC")?;
+        let ids = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        ids.into_iter()
+            .map(|id| {
+                self.load_document(&id)?
+                    .with_context(|| format!("document `{id}` disappeared while loading SQLite"))
+            })
+            .collect()
+    }
+
     pub fn save_reading_session(&mut self, session: &ReadingSession) -> Result<()> {
         self.conn.execute(
             "INSERT INTO reading_sessions (
@@ -525,6 +541,26 @@ impl SqliteDocumentStore {
         }))
     }
 
+    pub fn load_reading_sessions(&self) -> Result<Vec<ReadingSession>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, document_id, target_language, current_chunk_index, status
+             FROM reading_sessions
+             ORDER BY updated_at_ms ASC, id ASC",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut sessions = Vec::new();
+        while let Some(row) = rows.next()? {
+            sessions.push(ReadingSession {
+                id: row.get(0)?,
+                document_id: DocumentId::from_existing(row.get::<_, String>(1)?)?,
+                target_language: row.get(2)?,
+                current_chunk_index: i64_to_usize(row.get(3)?, "current_chunk_index")?,
+                status: decode_reading_status(&row.get::<_, String>(4)?)?,
+            });
+        }
+        Ok(sessions)
+    }
+
     pub fn save_progress(&mut self, progress: &ReadingProgress) -> Result<()> {
         self.conn.execute(
             "INSERT INTO reading_progress (
@@ -575,6 +611,25 @@ impl SqliteDocumentStore {
         }))
     }
 
+    pub fn load_all_progress(&self) -> Result<Vec<ReadingProgress>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, document_id, current_chunk_index, status
+             FROM reading_progress
+             ORDER BY updated_at_ms ASC, session_id ASC",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut progress = Vec::new();
+        while let Some(row) = rows.next()? {
+            progress.push(ReadingProgress {
+                session_id: row.get(0)?,
+                document_id: DocumentId::from_existing(row.get::<_, String>(1)?)?,
+                current_chunk_index: i64_to_usize(row.get(2)?, "current_chunk_index")?,
+                status: decode_reading_status(&row.get::<_, String>(3)?)?,
+            });
+        }
+        Ok(progress)
+    }
+
     pub fn save_translations(&mut self, units: &[TranslatedUnit]) -> Result<()> {
         let tx = self.conn.transaction()?;
         let now = now_ms();
@@ -611,6 +666,29 @@ impl SqliteDocumentStore {
              ORDER BY chunk_index ASC",
         )?;
         let mut rows = stmt.query(params![session_id])?;
+        let mut units = Vec::new();
+        while let Some(row) = rows.next()? {
+            units.push(TranslatedUnit {
+                session_id: row.get(0)?,
+                chunk_id: row.get(1)?,
+                chunk_index: i64_to_usize(row.get(2)?, "chunk_index")?,
+                source_text: row.get(3)?,
+                translated_text: row.get(4)?,
+                target_language: row.get(5)?,
+            });
+        }
+        Ok(units)
+    }
+
+    pub fn load_translations_for_document(&self, document_id: &str) -> Result<Vec<TranslatedUnit>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.session_id, t.chunk_id, t.chunk_index, t.source_text, t.translated_text, t.target_language
+             FROM translated_chunks t
+             INNER JOIN document_chunks c ON c.id = t.chunk_id
+             WHERE c.document_id = ?1
+             ORDER BY t.chunk_index ASC",
+        )?;
+        let mut rows = stmt.query(params![document_id])?;
         let mut units = Vec::new();
         while let Some(row) = rows.next()? {
             units.push(TranslatedUnit {
@@ -1148,9 +1226,11 @@ mod tests {
             .load_document(document_id.as_str())
             .unwrap()
             .expect("stored document");
+        let all_documents = store.load_documents().unwrap();
         assert_eq!(loaded.document.title, "book");
         assert_eq!(loaded.chunks.len(), 2);
         assert_eq!(loaded.chunks[1].text, "Second chunk about VPN.");
+        assert_eq!(all_documents.len(), 1);
         assert_eq!(store.schema_version().unwrap(), 1);
 
         let mut session = ReadingSession::new(document_id.clone(), "pt-BR");
@@ -1161,8 +1241,10 @@ mod tests {
             .load_reading_session(&session.id)
             .unwrap()
             .expect("stored reading session");
+        let all_sessions = store.load_reading_sessions().unwrap();
         assert_eq!(loaded_session.status, ReadingStatus::Reading);
         assert_eq!(loaded_session.current_chunk_index, 1);
+        assert_eq!(all_sessions.len(), 1);
 
         let progress = ReadingProgress {
             session_id: session.id.clone(),
@@ -1175,8 +1257,10 @@ mod tests {
             .load_progress(&session.id)
             .unwrap()
             .expect("stored progress");
+        let all_progress = store.load_all_progress().unwrap();
         assert_eq!(loaded_progress.current_chunk_index, 2);
         assert_eq!(loaded_progress.status, ReadingStatus::Completed);
+        assert_eq!(all_progress.len(), 1);
     }
 
     #[test]
@@ -1200,7 +1284,11 @@ mod tests {
             .collect::<Vec<_>>();
         store.save_translations(&translations).unwrap();
         let loaded_translations = store.load_translations("read_test").unwrap();
+        let loaded_document_translations = store
+            .load_translations_for_document(document_id.as_str())
+            .unwrap();
         assert_eq!(loaded_translations, translations);
+        assert_eq!(loaded_document_translations, translations);
 
         let embeddings = chunks
             .iter()

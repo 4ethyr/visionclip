@@ -35,9 +35,9 @@ use visionclip_common::{
 };
 use visionclip_documents::{
     AudioChunk, AudioSink, ChunkerConfig, DocumentChunk, DocumentRuntime, IngestedDocument,
-    ReadingProgress, ReadingProgressStore, ReadingSession, ReadingStatus,
-    TranslatedReadingPipeline, TranslatedUnit, TranslationProvider, TranslationRequest,
-    TtsProvider, TtsRequest,
+    ReadingProgress, ReadingProgressStore, ReadingSession, ReadingStatus, SqliteDocumentStore,
+    StoredChunkEmbedding, TranslatedReadingPipeline, TranslatedUnit, TranslationProvider,
+    TranslationRequest, TtsProvider, TtsRequest,
 };
 use visionclip_infer::{
     postprocess::{sanitize_for_speech, sanitize_output},
@@ -127,6 +127,9 @@ struct AppState {
 struct DocumentStore {
     runtime: DocumentRuntime,
     storage_path: PathBuf,
+    sqlite_path: PathBuf,
+    sqlite: Option<SqliteDocumentStore>,
+    embedding_model: String,
     documents: HashMap<String, IngestedDocument>,
     reading_sessions: HashMap<String, ReadingSession>,
     progress: HashMap<String, ReadingProgress>,
@@ -160,22 +163,36 @@ struct DocumentContextLimits {
 
 impl DocumentStore {
     fn new(config: &AppConfig) -> Result<Self> {
-        Ok(Self::empty(config, config.documents_store_path()?))
+        Self::empty(
+            config,
+            config.documents_store_path()?,
+            config.documents_sqlite_path()?,
+        )
     }
 
     fn load(config: &AppConfig) -> Result<Self> {
-        Self::load_from_path(config, config.documents_store_path()?)
+        Self::load_from_path(
+            config,
+            config.documents_store_path()?,
+            config.documents_sqlite_path()?,
+        )
     }
 
-    fn load_from_path(config: &AppConfig, storage_path: PathBuf) -> Result<Self> {
-        let mut store = Self::empty(config, storage_path.clone());
+    fn load_from_path(
+        config: &AppConfig,
+        storage_path: PathBuf,
+        sqlite_path: PathBuf,
+    ) -> Result<Self> {
+        let mut store = Self::empty(config, storage_path.clone(), sqlite_path)?;
         if !storage_path.exists() {
+            store.load_from_sqlite()?;
             return Ok(store);
         }
 
         let raw = fs::read_to_string(&storage_path)
             .with_context(|| format!("failed to read {}", storage_path.display()))?;
         if raw.trim().is_empty() {
+            store.load_from_sqlite()?;
             return Ok(store);
         }
 
@@ -194,25 +211,40 @@ impl DocumentStore {
         store.progress = snapshot.progress;
         store.translations = snapshot.translations;
         store.embeddings = snapshot.embeddings;
+        store.persist_sqlite()?;
         Ok(store)
     }
 
-    fn empty(config: &AppConfig, storage_path: PathBuf) -> Self {
-        Self {
+    fn empty(config: &AppConfig, storage_path: PathBuf, sqlite_path: PathBuf) -> Result<Self> {
+        let sqlite = match SqliteDocumentStore::open(&sqlite_path) {
+            Ok(store) => Some(store),
+            Err(error) => {
+                warn!(
+                    ?error,
+                    path = %sqlite_path.display(),
+                    "failed to open SQLite document store; JSON snapshot remains available"
+                );
+                None
+            }
+        };
+        Ok(Self {
             runtime: DocumentRuntime::new(ChunkerConfig {
                 target_chars: config.documents.chunk_chars,
                 overlap_chars: config.documents.chunk_overlap_chars,
             }),
             storage_path,
+            sqlite_path,
+            sqlite,
+            embedding_model: config.infer.embedding_model.trim().to_string(),
             documents: HashMap::new(),
             reading_sessions: HashMap::new(),
             progress: HashMap::new(),
             translations: HashMap::new(),
             embeddings: HashMap::new(),
-        }
+        })
     }
 
-    fn persist(&self) -> Result<()> {
+    fn persist(&mut self) -> Result<()> {
         if let Some(parent) = self.storage_path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -237,6 +269,109 @@ impl DocumentStore {
                 tmp_path.display()
             )
         })?;
+        self.persist_sqlite()?;
+        Ok(())
+    }
+
+    fn load_from_sqlite(&mut self) -> Result<()> {
+        let Some(sqlite) = self.sqlite.as_ref() else {
+            return Ok(());
+        };
+
+        let documents = sqlite.load_documents()?;
+        if documents.is_empty() {
+            return Ok(());
+        }
+
+        self.documents = documents
+            .into_iter()
+            .map(|document| (document.document.id.as_str().to_string(), document))
+            .collect();
+        self.reading_sessions = sqlite
+            .load_reading_sessions()?
+            .into_iter()
+            .map(|session| (session.id.clone(), session))
+            .collect();
+        self.progress = sqlite
+            .load_all_progress()?
+            .into_iter()
+            .map(|progress| (progress.session_id.clone(), progress))
+            .collect();
+
+        let mut translations = HashMap::new();
+        let mut embeddings = HashMap::new();
+        for document_id in self.documents.keys() {
+            let units = sqlite.load_translations_for_document(document_id)?;
+            if !units.is_empty() {
+                translations.insert(document_id.clone(), units);
+            }
+
+            if !self.embedding_model.is_empty() {
+                let stored = sqlite.load_embeddings(document_id, &self.embedding_model)?;
+                if !stored.is_empty() {
+                    embeddings.insert(
+                        document_id.clone(),
+                        stored
+                            .into_iter()
+                            .map(|embedding| DocumentChunkEmbedding {
+                                chunk_id: embedding.chunk_id,
+                                chunk_index: embedding.chunk_index,
+                                vector: embedding.vector,
+                            })
+                            .collect(),
+                    );
+                }
+            }
+        }
+        self.translations = translations;
+        self.embeddings = embeddings;
+
+        info!(
+            path = %self.sqlite_path.display(),
+            documents = self.documents.len(),
+            sessions = self.reading_sessions.len(),
+            "loaded document store from SQLite"
+        );
+        Ok(())
+    }
+
+    fn persist_sqlite(&mut self) -> Result<()> {
+        let Some(sqlite) = self.sqlite.as_mut() else {
+            return Ok(());
+        };
+
+        for document in self.documents.values() {
+            sqlite.save_document(document)?;
+        }
+        for session in self.reading_sessions.values() {
+            sqlite.save_reading_session(session)?;
+        }
+        for progress in self.progress.values() {
+            sqlite.save_progress(progress)?;
+        }
+        for units in self.translations.values() {
+            sqlite.save_translations(units)?;
+        }
+
+        if !self.embedding_model.is_empty() {
+            for (document_id, embeddings) in &self.embeddings {
+                let Some(document) = self.documents.get(document_id) else {
+                    continue;
+                };
+                let stored = embeddings
+                    .iter()
+                    .map(|embedding| StoredChunkEmbedding {
+                        document_id: document.document.id.clone(),
+                        chunk_id: embedding.chunk_id.clone(),
+                        chunk_index: embedding.chunk_index,
+                        model: self.embedding_model.clone(),
+                        vector: embedding.vector.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                sqlite.save_embeddings(&stored)?;
+            }
+        }
+
         Ok(())
     }
 }
@@ -2620,14 +2755,20 @@ mod tests {
 
     #[test]
     fn document_store_persists_and_reloads_snapshot() {
-        let config = AppConfig::default();
+        let mut config = AppConfig::default();
+        config.infer.embedding_model = "test-embed".into();
         let storage_path = std::env::temp_dir().join(format!(
             "visionclip-document-store-test-{}.json",
             uuid::Uuid::new_v4()
         ));
+        let sqlite_path = std::env::temp_dir().join(format!(
+            "visionclip-document-store-test-{}.sqlite3",
+            uuid::Uuid::new_v4()
+        ));
         let document_id = visionclip_documents::DocumentId::new();
         let chunks = test_document_chunks_with_id(&document_id, &["Persisted chunk."]);
-        let mut store = DocumentStore::empty(&config, storage_path.clone());
+        let mut store = DocumentStore::empty(&config, storage_path.clone(), sqlite_path.clone())
+            .expect("document store");
         store.documents.insert(
             document_id.as_str().to_string(),
             IngestedDocument {
@@ -2651,7 +2792,9 @@ mod tests {
         );
 
         store.persist().unwrap();
-        let loaded = DocumentStore::load_from_path(&config, storage_path.clone()).unwrap();
+        let loaded =
+            DocumentStore::load_from_path(&config, storage_path.clone(), sqlite_path.clone())
+                .unwrap();
 
         assert!(loaded.documents.contains_key(document_id.as_str()));
         assert_eq!(
@@ -2663,6 +2806,69 @@ mod tests {
             Some(&[0.2, 0.8][..])
         );
         let _ = std::fs::remove_file(storage_path);
+        let _ = std::fs::remove_file(sqlite_path);
+    }
+
+    #[test]
+    fn document_store_loads_from_sqlite_when_snapshot_is_missing() {
+        let mut config = AppConfig::default();
+        config.infer.embedding_model = "test-embed".into();
+        let storage_path = std::env::temp_dir().join(format!(
+            "visionclip-document-store-missing-json-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let sqlite_path = std::env::temp_dir().join(format!(
+            "visionclip-document-store-sqlite-{}.sqlite3",
+            uuid::Uuid::new_v4()
+        ));
+        let document_id = visionclip_documents::DocumentId::new();
+        let chunks = test_document_chunks_with_id(&document_id, &["SQLite chunk."]);
+        let mut store = DocumentStore::empty(&config, storage_path.clone(), sqlite_path.clone())
+            .expect("document store");
+        store.documents.insert(
+            document_id.as_str().to_string(),
+            IngestedDocument {
+                document: visionclip_documents::LoadedDocument {
+                    id: document_id.clone(),
+                    source_path: PathBuf::from("/tmp/sqlite.txt"),
+                    title: "sqlite".into(),
+                    format: visionclip_documents::DocumentFormat::Text,
+                    text: "SQLite chunk.".into(),
+                },
+                chunks,
+            },
+        );
+        let mut reading_session = ReadingSession::new(document_id.clone(), "pt-BR");
+        reading_session.start();
+        store
+            .reading_sessions
+            .insert(reading_session.id.clone(), reading_session.clone());
+        store.embeddings.insert(
+            document_id.as_str().to_string(),
+            vec![DocumentChunkEmbedding {
+                chunk_id: "chunk_0".into(),
+                chunk_index: 0,
+                vector: vec![0.7, 0.3],
+            }],
+        );
+        store.persist().unwrap();
+        std::fs::remove_file(&storage_path).unwrap();
+
+        let loaded =
+            DocumentStore::load_from_path(&config, storage_path.clone(), sqlite_path.clone())
+                .unwrap();
+
+        assert!(loaded.documents.contains_key(document_id.as_str()));
+        assert!(loaded.reading_sessions.contains_key(&reading_session.id));
+        assert_eq!(
+            loaded
+                .embeddings
+                .get(document_id.as_str())
+                .and_then(|embeddings| embeddings.first())
+                .map(|embedding| embedding.vector.as_slice()),
+            Some(&[0.7, 0.3][..])
+        );
+        let _ = std::fs::remove_file(sqlite_path);
     }
 
     #[tokio::test]

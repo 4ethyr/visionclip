@@ -1,10 +1,10 @@
 # Document Runtime Phase 1
 
 This phase adds the first local-first document runtime foundation for VisionClip.
-It is intentionally small and safe: text and Markdown are supported now, with a
-local JSON snapshot store plus an isolated SQLite store foundation. PDF
-extraction, OCR, sqlite-vec indexing, and a controllable audio runtime remain
-future integration work.
+It is intentionally small and safe: text and Markdown are supported now, with
+local JSON snapshot compatibility plus SQLite persistence. PDF extraction, OCR,
+sqlite-vec indexing, and a controllable audio runtime remain future integration
+work.
 
 ## Scope Delivered
 
@@ -33,8 +33,9 @@ future integration work.
   - `visionclip document translate <document_id> --target-lang pt-BR`
   - `visionclip document read <document_id> --target-lang pt-BR`
   - `visionclip document pause|resume|stop <reading_session_id>`
-- Daemon integration with a local snapshot store at the app data directory
-  (`documents-store.json`).
+- Daemon integration with local document persistence at the app data directory:
+  JSON compatibility snapshot (`documents-store.json`) plus SQLite
+  (`documents.sqlite3`).
 - `ask_document` and `summarize_document` executors over local in-memory chunks
   with simple keyword retrieval.
 - Initial Ollama/Piper adapters for translated reading:
@@ -46,8 +47,10 @@ future integration work.
   generation fails.
 - `SqliteDocumentStore` foundation in `visionclip-documents` with schema
   versioning and tables for documents, chunks, reading sessions, progress,
-  translated chunks, and chunk embeddings. It is tested but not yet the daemon
-  default store.
+  translated chunks, and chunk embeddings.
+- Daemon migration path: when JSON exists it is loaded and mirrored into
+  SQLite; when JSON is absent the daemon can load documents, sessions, progress,
+  translations, and embeddings from SQLite.
 
 ## Safety Decisions
 
@@ -63,8 +66,8 @@ future integration work.
 ## Current Limitations
 
 - TXT and Markdown only.
-- SQLite store exists in `visionclip-documents`, but daemon persistence still
-  uses the JSON snapshot until migration is wired.
+- SQLite is wired into the daemon as a compatibility mirror and fallback load
+  source. JSON remains written during the migration window.
 - No vector index/RAG retrieval yet.
 - Document state is persisted locally as JSON. This is a transitional backend;
   SQLite remains the target storage layer.
@@ -76,8 +79,8 @@ future integration work.
 
 ## Next Integration Steps
 
-1. Wire `SqliteDocumentStore` into the daemon and migrate the JSON snapshot on
-   first startup.
+1. Make SQLite the single default document store and remove JSON writes after a
+   migration window.
 2. Add audio cache and audit-event tables to SQLite.
 3. Add PDF text extraction behind a feature or optional system dependency.
 4. Connect translation to ProviderRouter and TTS to a controllable AudioRuntime.

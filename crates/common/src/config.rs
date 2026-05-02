@@ -225,6 +225,10 @@ impl AppConfig {
         Ok(Self::data_dir()?.join("documents-store.json"))
     }
 
+    pub fn documents_sqlite_path(&self) -> AppResult<PathBuf> {
+        Ok(Self::data_dir()?.join("documents.sqlite3"))
+    }
+
     pub fn action_should_speak(&self, action: &str, requested: bool) -> bool {
         if !self.audio.enabled || !requested {
             return false;
@@ -594,6 +598,16 @@ mod tests {
         assert_eq!(
             path.file_name().and_then(|value| value.to_str()),
             Some("documents-store.json")
+        );
+    }
+
+    #[test]
+    fn documents_sqlite_path_uses_data_directory() {
+        let path = AppConfig::default().documents_sqlite_path().unwrap();
+
+        assert_eq!(
+            path.file_name().and_then(|value| value.to_str()),
+            Some("documents.sqlite3")
         );
     }
 }
