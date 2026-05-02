@@ -326,7 +326,23 @@ pub struct TtsRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AudioChunk {
     pub id: String,
+    pub chunk_id: String,
     pub chunk_index: usize,
+    pub target_language: String,
+    pub voice_id: Option<String>,
+    pub text: String,
+    pub bytes: Vec<u8>,
+    pub duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AudioCacheEntry {
+    pub document_id: DocumentId,
+    pub session_id: String,
+    pub chunk_id: String,
+    pub chunk_index: usize,
+    pub target_language: String,
+    pub voice_id: Option<String>,
     pub text: String,
     pub bytes: Vec<u8>,
     pub duration_ms: Option<u64>,
@@ -1156,6 +1172,11 @@ pub trait AudioSink: Send + Sync {
 }
 
 #[async_trait]
+pub trait AudioCacheStore: Send + Sync {
+    async fn save_audio_chunk(&self, entry: AudioCacheEntry) -> Result<()>;
+}
+
+#[async_trait]
 pub trait ReadingProgressStore: Send + Sync {
     async fn save_progress(&self, progress: ReadingProgress) -> Result<()>;
 }
@@ -1166,6 +1187,8 @@ pub struct TranslatedReadingPipeline<T, S, A, P> {
     tts: Arc<S>,
     audio: Arc<A>,
     progress: Arc<P>,
+    audio_cache: Option<Arc<dyn AudioCacheStore>>,
+    voice_id: Option<String>,
     config: TranslatedReadingConfig,
 }
 
@@ -1182,8 +1205,23 @@ where
             tts,
             audio,
             progress,
+            audio_cache: None,
+            voice_id: None,
             config: TranslatedReadingConfig::default(),
         }
+    }
+
+    pub fn with_audio_cache<C>(mut self, audio_cache: Arc<C>) -> Self
+    where
+        C: AudioCacheStore + 'static,
+    {
+        self.audio_cache = Some(audio_cache);
+        self
+    }
+
+    pub fn with_voice_id(mut self, voice_id: Option<String>) -> Self {
+        self.voice_id = voice_id.filter(|value| !value.trim().is_empty());
+        self
     }
 
     pub fn with_config(mut self, config: TranslatedReadingConfig) -> Self {
@@ -1215,12 +1253,32 @@ where
             translation_tx,
             session.target_language.clone(),
         );
-        let tts = spawn_tts_worker(Arc::clone(&self.tts), translation_rx, audio_tx);
+        let tts = spawn_tts_worker(
+            Arc::clone(&self.tts),
+            translation_rx,
+            audio_tx,
+            self.voice_id.clone(),
+        );
 
         let mut chunks_played = 0;
         let mut last_chunk_index = None;
         while let Some(audio_chunk) = audio_rx.recv().await {
             self.audio.play(audio_chunk.clone()).await?;
+            if let Some(audio_cache) = &self.audio_cache {
+                audio_cache
+                    .save_audio_chunk(AudioCacheEntry {
+                        document_id: document_id.clone(),
+                        session_id: session.id.clone(),
+                        chunk_id: audio_chunk.chunk_id.clone(),
+                        chunk_index: audio_chunk.chunk_index,
+                        target_language: audio_chunk.target_language.clone(),
+                        voice_id: audio_chunk.voice_id.clone(),
+                        text: audio_chunk.text.clone(),
+                        bytes: audio_chunk.bytes.clone(),
+                        duration_ms: audio_chunk.duration_ms,
+                    })
+                    .await?;
+            }
             chunks_played += 1;
             last_chunk_index = Some(audio_chunk.chunk_index);
             self.progress
@@ -1317,22 +1375,27 @@ fn spawn_tts_worker<S>(
     tts: Arc<S>,
     mut rx: mpsc::Receiver<TranslatedUnit>,
     tx: mpsc::Sender<AudioChunk>,
+    voice_id: Option<String>,
 ) -> JoinHandle<Result<()>>
 where
     S: TtsProvider + 'static,
 {
     tokio::spawn(async move {
         while let Some(unit) = rx.recv().await {
+            let request_voice_id = voice_id.clone();
             let bytes = tts
                 .synthesize(TtsRequest {
                     chunk_index: unit.chunk_index,
                     text: unit.translated_text.clone(),
-                    voice_id: None,
+                    voice_id: request_voice_id.clone(),
                 })
                 .await?;
             tx.send(AudioChunk {
                 id: format!("audio_{}", Uuid::new_v4()),
+                chunk_id: unit.chunk_id,
                 chunk_index: unit.chunk_index,
+                target_language: unit.target_language,
+                voice_id: request_voice_id,
                 text: unit.translated_text,
                 bytes,
                 duration_ms: None,
@@ -1601,6 +1664,51 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn translated_reading_pipeline_writes_audio_cache_entries() {
+        let document_id = DocumentId::new();
+        let chunks = (0..2)
+            .map(|index| DocumentChunk {
+                id: format!("chunk_{index}"),
+                document_id: document_id.clone(),
+                chunk_index: index,
+                page_start: None,
+                page_end: None,
+                section_title: None,
+                text: format!("source {index}"),
+                token_count: 2,
+            })
+            .collect::<Vec<_>>();
+        let session = ReadingSession::new(document_id.clone(), "pt-BR");
+        let audio = Arc::new(RecordingAudioSink::default());
+        let progress = Arc::new(RecordingProgressStore::default());
+        let cache = Arc::new(RecordingAudioCacheStore::default());
+        let pipeline = TranslatedReadingPipeline::new(
+            Arc::new(EchoTranslator),
+            Arc::new(TextBytesTts),
+            audio,
+            progress,
+        )
+        .with_voice_id(Some("pt_BR-test".into()))
+        .with_audio_cache(Arc::clone(&cache));
+
+        let summary = pipeline
+            .run(document_id.clone(), session, chunks)
+            .await
+            .unwrap();
+
+        assert_eq!(summary.chunks_played, 2);
+        let saved = cache.saved.lock().unwrap();
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[0].document_id, document_id);
+        assert_eq!(saved[0].chunk_id, "chunk_0");
+        assert_eq!(saved[0].chunk_index, 0);
+        assert_eq!(saved[0].target_language, "pt-BR");
+        assert_eq!(saved[0].voice_id.as_deref(), Some("pt_BR-test"));
+        assert_eq!(saved[0].text, "[pt-BR] source 0");
+        assert_eq!(saved[0].bytes, b"[pt-BR] source 0");
+    }
+
     struct EchoTranslator;
 
     #[async_trait]
@@ -1634,6 +1742,19 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((chunk.chunk_index, chunk.text));
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingAudioCacheStore {
+        saved: Mutex<Vec<AudioCacheEntry>>,
+    }
+
+    #[async_trait]
+    impl AudioCacheStore for RecordingAudioCacheStore {
+        async fn save_audio_chunk(&self, entry: AudioCacheEntry) -> Result<()> {
+            self.saved.lock().unwrap().push(entry);
             Ok(())
         }
     }

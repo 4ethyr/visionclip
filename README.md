@@ -16,7 +16,7 @@ VisionClip é um serviço local para Linux que transforma seus modelos locais em
 - Integração com Piper HTTP, com fallback de playback entre `paplay`, `pw-play` e `aplay`.
 - Captura automática com resolução de backend via config: portal com `gdbus`, GNOME Shell Screenshot via D-Bus, `gnome-screenshot`, `grim` e `maim`.
 - Runtime inicial de documentos com ingestão TXT/Markdown, perguntas, resumo, tradução, leitura em voz alta e controles de pausa/retomada/parada.
-- Persistência local de documentos em snapshot JSON de compatibilidade e SQLite (`documents.sqlite3`) com documentos, chunks, sessões, progresso, traduções, embeddings, cache de áudio e eventos de auditoria.
+- Persistência local de documentos em snapshot JSON de compatibilidade e SQLite (`documents.sqlite3`) com documentos, chunks, sessões, progresso, traduções, embeddings, metadados de cache de áudio e eventos de auditoria.
 - Configuração local em `~/.config/visionclip/config.toml`.
 
 ## Arquitetura resumida
@@ -110,8 +110,9 @@ Persistência:
 
 - `documents-store.json`: snapshot de compatibilidade durante a janela de migração.
 - `documents.sqlite3`: store SQLite local com documentos, chunks, sessões, progresso, traduções, embeddings, cache de áudio e eventos de auditoria.
+- `document-audio-cache/`: arquivos WAV gerados pela leitura/tradução incremental quando `documents.cache_audio = true`.
 
-O SQLite já é espelhado pelo daemon e pode ser usado para recarregar documentos quando o snapshot JSON não existe. O próximo passo planejado é tornar SQLite o store único e adicionar `sqlite-vec`.
+O SQLite já é espelhado pelo daemon e pode ser usado para recarregar documentos quando o snapshot JSON não existe. O cache de áudio é gravado localmente e referenciado no SQLite para permitir reuso futuro. O próximo passo planejado é tornar SQLite o store único e adicionar `sqlite-vec`.
 
 ## Scripts locais
 

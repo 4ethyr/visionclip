@@ -53,6 +53,9 @@ work.
   translations, and embeddings from SQLite.
 - Daemon audit path: tool/security events are recorded in memory and persisted
   into SQLite with redacted payloads.
+- Daemon audio cache path: translated reading writes generated WAV chunks under
+  the local app data directory and stores cache metadata in SQLite when
+  `documents.cache_audio` is enabled.
 
 ## Safety Decisions
 
@@ -76,14 +79,14 @@ work.
 - Pause/resume/stop update session state, but live cancellation/control of a
   running playback pipeline still needs the AudioRuntime control channel.
 - Retrieval uses local embeddings when available for the document and falls
-  back to lexical matching otherwise. Vector storage is still the JSON snapshot;
-  SQLite vector search is not integrated yet.
+  back to lexical matching otherwise. Embeddings are mirrored to SQLite, but
+  vector similarity search is still in-process; sqlite-vec is not integrated yet.
 
 ## Next Integration Steps
 
 1. Make SQLite the single default document store and remove JSON writes after a
    migration window.
-2. Wire TTS audio cache writes into the translated reading pipeline.
-3. Add PDF text extraction behind a feature or optional system dependency.
-4. Connect translation to ProviderRouter and TTS to a controllable AudioRuntime.
-5. Replace in-process embedding ranking with sqlite-vec vector storage/search.
+2. Add PDF text extraction behind a feature or optional system dependency.
+3. Connect translation to ProviderRouter and TTS to a controllable AudioRuntime.
+4. Replace in-process embedding ranking with sqlite-vec vector storage/search.
+5. Use cached audio chunks for resume/replay before calling TTS again.

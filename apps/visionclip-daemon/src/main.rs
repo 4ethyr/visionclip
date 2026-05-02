@@ -34,10 +34,11 @@ use visionclip_common::{
     ToolRegistry, UrlOpenJob, VisionRequest, VoiceSearchJob,
 };
 use visionclip_documents::{
-    AudioChunk, AudioSink, ChunkerConfig, DocumentChunk, DocumentRuntime, IngestedDocument,
-    ReadingProgress, ReadingProgressStore, ReadingSession, ReadingStatus, SqliteDocumentStore,
-    StoredAuditEvent, StoredChunkEmbedding, TranslatedReadingPipeline, TranslatedUnit,
-    TranslationProvider, TranslationRequest, TtsProvider, TtsRequest,
+    AudioCacheEntry, AudioCacheStore, AudioChunk, AudioSink, ChunkerConfig, DocumentChunk,
+    DocumentRuntime, IngestedDocument, ReadingProgress, ReadingProgressStore, ReadingSession,
+    ReadingStatus, SqliteDocumentStore, StoredAudioChunk, StoredAuditEvent, StoredChunkEmbedding,
+    TranslatedReadingPipeline, TranslatedUnit, TranslationProvider, TranslationRequest,
+    TtsProvider, TtsRequest,
 };
 use visionclip_infer::{
     postprocess::{sanitize_for_speech, sanitize_output},
@@ -386,6 +387,17 @@ impl DocumentStore {
 
         Ok(())
     }
+
+    fn has_sqlite_store(&self) -> bool {
+        self.sqlite.is_some()
+    }
+
+    fn save_audio_chunk(&mut self, chunk: &StoredAudioChunk) -> Result<()> {
+        let Some(sqlite) = self.sqlite.as_mut() else {
+            return Ok(());
+        };
+        sqlite.save_audio_chunk(chunk)
+    }
 }
 
 #[derive(Clone)]
@@ -465,6 +477,82 @@ impl ReadingProgressStore for DaemonReadingProgressStore {
             .progress
             .insert(progress.session_id.clone(), progress);
         documents.persist()?;
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct DaemonAudioCacheStore {
+    documents: Arc<Mutex<DocumentStore>>,
+    cache_dir: PathBuf,
+}
+
+#[async_trait]
+impl AudioCacheStore for DaemonAudioCacheStore {
+    async fn save_audio_chunk(&self, entry: AudioCacheEntry) -> Result<()> {
+        if let Err(error) = self.try_save_audio_chunk(entry).await {
+            warn!(?error, "failed to save document audio cache entry");
+        }
+        Ok(())
+    }
+}
+
+impl DaemonAudioCacheStore {
+    async fn try_save_audio_chunk(&self, entry: AudioCacheEntry) -> Result<()> {
+        {
+            let documents = self.documents.lock().await;
+            if !documents.has_sqlite_store() {
+                return Ok(());
+            }
+        }
+
+        let voice_id = normalized_audio_cache_voice_id(entry.voice_id.as_deref());
+        let text_hash = stable_audio_text_hash(&entry.target_language, &voice_id, &entry.text);
+        let file_name = format!(
+            "{:06}_{}_{}.wav",
+            entry.chunk_index,
+            safe_cache_component(&voice_id),
+            safe_cache_component(&text_hash)
+        );
+        let audio_path = self
+            .cache_dir
+            .join(safe_cache_component(entry.document_id.as_str()))
+            .join(file_name);
+        let audio_bytes = entry.bytes.clone();
+        let write_path = audio_path.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            if let Some(parent) = write_path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            let tmp_path = write_path.with_extension("wav.tmp");
+            fs::write(&tmp_path, audio_bytes)
+                .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+            fs::rename(&tmp_path, &write_path).with_context(|| {
+                format!(
+                    "failed to replace {} with {}",
+                    write_path.display(),
+                    tmp_path.display()
+                )
+            })?;
+            Ok(())
+        })
+        .await
+        .context("document audio cache write task failed")??;
+
+        let stored = StoredAudioChunk {
+            document_id: entry.document_id,
+            chunk_id: entry.chunk_id,
+            chunk_index: entry.chunk_index,
+            target_language: entry.target_language,
+            voice_id,
+            text_hash,
+            audio_path,
+            duration_ms: entry.duration_ms,
+        };
+        let mut documents = self.documents.lock().await;
+        documents.save_audio_chunk(&stored)?;
         Ok(())
     }
 }
@@ -934,7 +1022,7 @@ async fn process_document_read(state: &AppState, job: DocumentReadJob) -> Result
         }),
     );
 
-    let pipeline = TranslatedReadingPipeline::new(
+    let mut pipeline = TranslatedReadingPipeline::new(
         Arc::new(OllamaDocumentTranslator {
             infer: state.infer.clone(),
             request_id,
@@ -949,7 +1037,15 @@ async fn process_document_read(state: &AppState, job: DocumentReadJob) -> Result
         Arc::new(DaemonReadingProgressStore {
             documents: Arc::clone(&state.documents),
         }),
-    );
+    )
+    .with_voice_id(default_document_voice_id(&state.config));
+
+    if state.config.documents.cache_audio {
+        pipeline = pipeline.with_audio_cache(Arc::new(DaemonAudioCacheStore {
+            documents: Arc::clone(&state.documents),
+            cache_dir: document_audio_cache_dir()?,
+        }));
+    }
 
     let summary = pipeline
         .run(document_id.clone(), reading_session.clone(), chunks)
@@ -1258,6 +1354,63 @@ fn ensure_supported_document_target_language(target_language: &str) -> Result<()
         "document translation currently supports only pt-BR; requested `{}`",
         target_language
     );
+}
+
+fn document_audio_cache_dir() -> Result<PathBuf> {
+    Ok(AppConfig::data_dir()?.join("document-audio-cache"))
+}
+
+fn default_document_voice_id(config: &AppConfig) -> Option<String> {
+    let voice = config.audio.default_voice.trim();
+    if voice.is_empty() {
+        None
+    } else {
+        Some(voice.to_string())
+    }
+}
+
+fn normalized_audio_cache_voice_id(voice_id: Option<&str>) -> String {
+    let voice = voice_id.unwrap_or("default").trim();
+    if voice.is_empty() {
+        "default".to_string()
+    } else {
+        voice.to_string()
+    }
+}
+
+fn stable_audio_text_hash(target_language: &str, voice_id: &str, text: &str) -> String {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut hash = FNV_OFFSET;
+    for section in ["visionclip-audio-v1", target_language, voice_id, text] {
+        for byte in section.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash ^= 0;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("fnv1a64_{hash:016x}")
+}
+
+fn safe_cache_component(input: &str) -> String {
+    let value = input
+        .chars()
+        .take(96)
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if value.trim_matches('_').is_empty() || matches!(value.as_str(), "." | "..") {
+        "default".to_string()
+    } else {
+        value
+    }
 }
 
 async fn generate_document_embeddings(
@@ -2971,6 +3124,104 @@ mod tests {
             Some(&[0.7, 0.3][..])
         );
         let _ = std::fs::remove_file(sqlite_path);
+    }
+
+    #[tokio::test]
+    async fn daemon_audio_cache_store_writes_wav_and_sqlite_metadata() {
+        let config = AppConfig::default();
+        let storage_path = std::env::temp_dir().join(format!(
+            "visionclip-document-audio-cache-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let sqlite_path = std::env::temp_dir().join(format!(
+            "visionclip-document-audio-cache-{}.sqlite3",
+            uuid::Uuid::new_v4()
+        ));
+        let cache_dir = std::env::temp_dir().join(format!(
+            "visionclip-document-audio-cache-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let document_id = visionclip_documents::DocumentId::new();
+        let chunks = test_document_chunks_with_id(&document_id, &["Audio chunk."]);
+        let chunk_id = chunks[0].id.clone();
+        let mut store =
+            DocumentStore::empty(&config, storage_path.clone(), sqlite_path.clone()).unwrap();
+        store.documents.insert(
+            document_id.as_str().to_string(),
+            IngestedDocument {
+                document: visionclip_documents::LoadedDocument {
+                    id: document_id.clone(),
+                    source_path: PathBuf::from("/tmp/audio.txt"),
+                    title: "audio".into(),
+                    format: visionclip_documents::DocumentFormat::Text,
+                    text: "Audio chunk.".into(),
+                },
+                chunks,
+            },
+        );
+        store.persist().unwrap();
+
+        let documents = Arc::new(Mutex::new(store));
+        let cache = DaemonAudioCacheStore {
+            documents: Arc::clone(&documents),
+            cache_dir: cache_dir.clone(),
+        };
+        cache
+            .try_save_audio_chunk(AudioCacheEntry {
+                document_id: document_id.clone(),
+                session_id: "read_test".into(),
+                chunk_id: chunk_id.clone(),
+                chunk_index: 0,
+                target_language: "pt-BR".into(),
+                voice_id: Some("pt_BR-test".into()),
+                text: "Texto narrado.".into(),
+                bytes: b"wav-data".to_vec(),
+                duration_ms: Some(42),
+            })
+            .await
+            .unwrap();
+
+        let doc_cache_dir = cache_dir.join(safe_cache_component(document_id.as_str()));
+        let audio_files = std::fs::read_dir(&doc_cache_dir)
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(audio_files.len(), 1);
+        assert_eq!(std::fs::read(audio_files[0].path()).unwrap(), b"wav-data");
+
+        let documents = documents.lock().await;
+        let stored = documents
+            .sqlite
+            .as_ref()
+            .unwrap()
+            .load_audio_chunks(document_id.as_str(), "pt-BR", "pt_BR-test")
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].chunk_id, chunk_id);
+        assert_eq!(
+            stored[0].text_hash,
+            stable_audio_text_hash("pt-BR", "pt_BR-test", "Texto narrado.")
+        );
+        assert_eq!(stored[0].duration_ms, Some(42));
+
+        let _ = std::fs::remove_file(storage_path);
+        let _ = std::fs::remove_file(sqlite_path);
+        let _ = std::fs::remove_dir_all(cache_dir);
+    }
+
+    #[test]
+    fn audio_cache_helpers_are_stable_and_path_safe() {
+        assert_eq!(normalized_audio_cache_voice_id(None), "default");
+        assert_eq!(safe_cache_component("../pt BR/test"), ".._pt_BR_test");
+        assert_eq!(safe_cache_component(".."), "default");
+        assert_eq!(
+            stable_audio_text_hash("pt-BR", "voice-a", "texto"),
+            stable_audio_text_hash("pt-BR", "voice-a", "texto")
+        );
+        assert_ne!(
+            stable_audio_text_hash("pt-BR", "voice-a", "texto"),
+            stable_audio_text_hash("pt-BR", "voice-b", "texto")
+        );
     }
 
     #[tokio::test]
