@@ -131,6 +131,7 @@ struct DocumentStore {
     reading_sessions: HashMap<String, ReadingSession>,
     progress: HashMap<String, ReadingProgress>,
     translations: HashMap<String, Vec<TranslatedUnit>>,
+    embeddings: HashMap<String, Vec<DocumentChunkEmbedding>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -140,6 +141,21 @@ struct DocumentStoreSnapshot {
     reading_sessions: HashMap<String, ReadingSession>,
     progress: HashMap<String, ReadingProgress>,
     translations: HashMap<String, Vec<TranslatedUnit>>,
+    #[serde(default)]
+    embeddings: HashMap<String, Vec<DocumentChunkEmbedding>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DocumentChunkEmbedding {
+    chunk_id: String,
+    chunk_index: usize,
+    vector: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DocumentContextLimits {
+    max_chunks: usize,
+    max_chars: usize,
 }
 
 impl DocumentStore {
@@ -177,6 +193,7 @@ impl DocumentStore {
         store.reading_sessions = snapshot.reading_sessions;
         store.progress = snapshot.progress;
         store.translations = snapshot.translations;
+        store.embeddings = snapshot.embeddings;
         Ok(store)
     }
 
@@ -191,6 +208,7 @@ impl DocumentStore {
             reading_sessions: HashMap::new(),
             progress: HashMap::new(),
             translations: HashMap::new(),
+            embeddings: HashMap::new(),
         }
     }
 
@@ -206,6 +224,7 @@ impl DocumentStore {
             reading_sessions: self.reading_sessions.clone(),
             progress: self.progress.clone(),
             translations: self.translations.clone(),
+            embeddings: self.embeddings.clone(),
         };
         let encoded = serde_json::to_vec_pretty(&snapshot)?;
         let tmp_path = self.storage_path.with_extension("json.tmp");
@@ -563,10 +582,20 @@ async fn process_document_ingest(state: &AppState, job: DocumentIngestJob) -> Re
     let document_id = ingested.document.id.as_str().to_string();
     let title = ingested.document.title.clone();
     let chunks = ingested.chunks.len();
+    let generated_embeddings =
+        generate_document_embeddings(state, request_id, &document_id, &ingested.chunks).await;
+    let embeddings_status = if generated_embeddings.is_some() {
+        "stored"
+    } else {
+        "not_stored"
+    };
 
     {
         let mut documents = state.documents.lock().await;
         documents.documents.insert(document_id.clone(), ingested);
+        if let Some(embeddings) = generated_embeddings {
+            documents.embeddings.insert(document_id.clone(), embeddings);
+        }
         documents.persist()?;
     }
 
@@ -574,7 +603,12 @@ async fn process_document_ingest(state: &AppState, job: DocumentIngestJob) -> Re
         state,
         &session_id,
         &authorized_tool,
-        json!({"document_id": document_id, "title": title, "chunks": chunks}),
+        json!({
+            "document_id": document_id,
+            "title": title,
+            "chunks": chunks,
+            "embeddings": embeddings_status,
+        }),
     );
     state.audit_log.record_tool_event(
         "document.ingested",
@@ -582,7 +616,12 @@ async fn process_document_ingest(state: &AppState, job: DocumentIngestJob) -> Re
         "ingest_document",
         RiskLevel::Level2,
         "ingested",
-        json!({"document_id": document_id, "title": title, "chunks": chunks}),
+        json!({
+            "document_id": document_id,
+            "title": title,
+            "chunks": chunks,
+            "embeddings": embeddings_status,
+        }),
     );
 
     Ok(JobResult::DocumentStatus {
@@ -862,7 +901,7 @@ async fn process_document_ask(state: &AppState, job: DocumentAskJob) -> Result<J
         RiskContext::user_initiated(),
     )?;
 
-    let (document_id, title, selected_chunks) = {
+    let (document_id, title, chunks, stored_embeddings) = {
         let documents = state.documents.lock().await;
         let ingested = documents.documents.get(&job.document_id).with_context(|| {
             format!(
@@ -873,9 +912,23 @@ async fn process_document_ask(state: &AppState, job: DocumentAskJob) -> Result<J
         (
             ingested.document.id.as_str().to_string(),
             ingested.document.title.clone(),
-            select_document_context(&ingested.chunks, question, 4, 12_000),
+            ingested.chunks.clone(),
+            documents.embeddings.get(&job.document_id).cloned(),
         )
     };
+    let selected_chunks = select_document_context_with_optional_embeddings(
+        state,
+        request_id,
+        &document_id,
+        &chunks,
+        stored_embeddings.as_deref(),
+        question,
+        DocumentContextLimits {
+            max_chunks: 4,
+            max_chars: 12_000,
+        },
+    )
+    .await;
     let context = document_context_text(&selected_chunks);
     let prompt = document_question_prompt(&title, question, &context);
     let output = state
@@ -1054,6 +1107,186 @@ fn ensure_supported_document_target_language(target_language: &str) -> Result<()
         "document translation currently supports only pt-BR; requested `{}`",
         target_language
     );
+}
+
+async fn generate_document_embeddings(
+    state: &AppState,
+    request_id: uuid::Uuid,
+    document_id: &str,
+    chunks: &[DocumentChunk],
+) -> Option<Vec<DocumentChunkEmbedding>> {
+    if !state.infer.has_embedding_model() || chunks.is_empty() {
+        return None;
+    }
+
+    let mut embeddings = Vec::with_capacity(chunks.len());
+    for (batch_index, batch) in chunks.chunks(16).enumerate() {
+        let texts = batch
+            .iter()
+            .map(|chunk| chunk.text.clone())
+            .collect::<Vec<_>>();
+        let output = match state
+            .infer
+            .embed_texts(format!("{request_id}-document-embed-{batch_index}"), texts)
+            .await
+        {
+            Ok(output) => output,
+            Err(error) => {
+                warn!(
+                    ?error,
+                    document_id,
+                    batch_index,
+                    "document embeddings failed; lexical retrieval remains available"
+                );
+                return None;
+            }
+        };
+
+        for (chunk, vector) in batch.iter().zip(output.vectors) {
+            embeddings.push(DocumentChunkEmbedding {
+                chunk_id: chunk.id.clone(),
+                chunk_index: chunk.chunk_index,
+                vector,
+            });
+        }
+    }
+
+    if embeddings.len() == chunks.len() {
+        info!(
+            request_id = %request_id,
+            document_id,
+            chunks = chunks.len(),
+            "document embeddings generated"
+        );
+        Some(embeddings)
+    } else {
+        warn!(
+            request_id = %request_id,
+            document_id,
+            expected_chunks = chunks.len(),
+            actual_embeddings = embeddings.len(),
+            "document embeddings count mismatch; lexical retrieval remains available"
+        );
+        None
+    }
+}
+
+async fn select_document_context_with_optional_embeddings(
+    state: &AppState,
+    request_id: uuid::Uuid,
+    document_id: &str,
+    chunks: &[DocumentChunk],
+    embeddings: Option<&[DocumentChunkEmbedding]>,
+    query: &str,
+    limits: DocumentContextLimits,
+) -> Vec<DocumentChunk> {
+    if state.infer.has_embedding_model() {
+        if let Some(embeddings) = embeddings {
+            match state
+                .infer
+                .embed_texts(
+                    format!("{request_id}-document-query-embed"),
+                    vec![query.to_string()],
+                )
+                .await
+            {
+                Ok(output) => {
+                    if let Some(query_vector) = output.vectors.first() {
+                        if let Some(selected) = select_document_context_by_embedding(
+                            chunks,
+                            embeddings,
+                            query_vector,
+                            limits.max_chunks,
+                            limits.max_chars,
+                        ) {
+                            info!(
+                                request_id = %request_id,
+                                document_id,
+                                context_chunks = selected.len(),
+                                "selected document context with embeddings"
+                            );
+                            return selected;
+                        }
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        ?error,
+                        document_id,
+                        "document query embedding failed; lexical retrieval remains available"
+                    );
+                }
+            }
+        }
+    }
+
+    select_document_context(chunks, query, limits.max_chunks, limits.max_chars)
+}
+
+fn select_document_context_by_embedding(
+    chunks: &[DocumentChunk],
+    embeddings: &[DocumentChunkEmbedding],
+    query_vector: &[f32],
+    max_chunks: usize,
+    max_chars: usize,
+) -> Option<Vec<DocumentChunk>> {
+    if chunks.is_empty() || embeddings.is_empty() || query_vector.is_empty() {
+        return None;
+    }
+
+    let chunks_by_id = chunks
+        .iter()
+        .map(|chunk| (chunk.id.as_str(), chunk))
+        .collect::<HashMap<_, _>>();
+    let mut scored = embeddings
+        .iter()
+        .filter_map(|embedding| {
+            let chunk = chunks_by_id.get(embedding.chunk_id.as_str())?;
+            let score = cosine_similarity(query_vector, &embedding.vector);
+            (score > 0.0 && score.is_finite()).then_some((score, *chunk))
+        })
+        .collect::<Vec<_>>();
+
+    if scored.is_empty() {
+        return None;
+    }
+
+    scored.sort_by(|(left_score, left), (right_score, right)| {
+        right_score
+            .total_cmp(left_score)
+            .then_with(|| left.chunk_index.cmp(&right.chunk_index))
+    });
+
+    let selected = collect_context_chunks(
+        scored
+            .into_iter()
+            .map(|(_, chunk)| chunk)
+            .collect::<Vec<_>>(),
+        max_chunks,
+        max_chars,
+    );
+    (!selected.is_empty()).then_some(selected)
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
+    if left.len() != right.len() || left.is_empty() {
+        return 0.0;
+    }
+
+    let mut dot = 0.0_f32;
+    let mut left_norm = 0.0_f32;
+    let mut right_norm = 0.0_f32;
+    for (left_value, right_value) in left.iter().zip(right.iter()) {
+        dot += left_value * right_value;
+        left_norm += left_value * left_value;
+        right_norm += right_value * right_value;
+    }
+
+    if left_norm <= f32::EPSILON || right_norm <= f32::EPSILON {
+        return 0.0;
+    }
+
+    dot / (left_norm.sqrt() * right_norm.sqrt())
 }
 
 fn select_document_context(
@@ -2341,6 +2574,51 @@ mod tests {
     }
 
     #[test]
+    fn document_context_selection_prefers_embedding_match() {
+        let chunks = test_document_chunks(&[
+            "Introdução geral sobre o livro.",
+            "Capítulo de redes com VPN, DNS e configuração de Wi-Fi.",
+            "Apêndice sobre atalhos de teclado.",
+        ]);
+        let embeddings = test_document_embeddings(
+            &chunks,
+            &[
+                vec![1.0, 0.0, 0.0],
+                vec![0.0, 1.0, 0.0],
+                vec![0.0, 0.0, 1.0],
+            ],
+        );
+
+        let selected =
+            select_document_context_by_embedding(&chunks, &embeddings, &[0.0, 0.9, 0.1], 1, 4_000)
+                .expect("semantic context");
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].chunk_index, 1);
+    }
+
+    #[test]
+    fn document_context_selection_rejects_unusable_embeddings() {
+        let chunks = test_document_chunks(&["Primeiro trecho.", "Segundo trecho."]);
+        let embeddings = test_document_embeddings(&chunks, &[vec![0.0, 0.0], vec![1.0, 0.0]]);
+
+        assert!(
+            select_document_context_by_embedding(&chunks, &embeddings, &[0.0, 0.0], 1, 4_000)
+                .is_none()
+        );
+        assert!(
+            select_document_context_by_embedding(&chunks, &embeddings, &[1.0], 1, 4_000).is_none()
+        );
+    }
+
+    #[test]
+    fn cosine_similarity_handles_normalized_and_zero_vectors() {
+        assert!((cosine_similarity(&[1.0, 0.0], &[1.0, 0.0]) - 1.0).abs() < f32::EPSILON);
+        assert_eq!(cosine_similarity(&[0.0, 0.0], &[1.0, 0.0]), 0.0);
+        assert_eq!(cosine_similarity(&[1.0], &[1.0, 0.0]), 0.0);
+    }
+
+    #[test]
     fn document_store_persists_and_reloads_snapshot() {
         let config = AppConfig::default();
         let storage_path = std::env::temp_dir().join(format!(
@@ -2363,11 +2641,27 @@ mod tests {
                 chunks,
             },
         );
+        store.embeddings.insert(
+            document_id.as_str().to_string(),
+            vec![DocumentChunkEmbedding {
+                chunk_id: "chunk_0".into(),
+                chunk_index: 0,
+                vector: vec![0.2, 0.8],
+            }],
+        );
 
         store.persist().unwrap();
         let loaded = DocumentStore::load_from_path(&config, storage_path.clone()).unwrap();
 
         assert!(loaded.documents.contains_key(document_id.as_str()));
+        assert_eq!(
+            loaded
+                .embeddings
+                .get(document_id.as_str())
+                .and_then(|embeddings| embeddings.first())
+                .map(|embedding| embedding.vector.as_slice()),
+            Some(&[0.2, 0.8][..])
+        );
         let _ = std::fs::remove_file(storage_path);
     }
 
@@ -2424,6 +2718,21 @@ mod tests {
                 section_title: None,
                 text: (*text).to_string(),
                 token_count: text.split_whitespace().count(),
+            })
+            .collect()
+    }
+
+    fn test_document_embeddings(
+        chunks: &[DocumentChunk],
+        vectors: &[Vec<f32>],
+    ) -> Vec<DocumentChunkEmbedding> {
+        chunks
+            .iter()
+            .zip(vectors.iter())
+            .map(|(chunk, vector)| DocumentChunkEmbedding {
+                chunk_id: chunk.id.clone(),
+                chunk_index: chunk.chunk_index,
+                vector: vector.clone(),
             })
             .collect()
     }

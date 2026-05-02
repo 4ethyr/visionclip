@@ -42,7 +42,7 @@ Principais módulos atuais:
 - Alterações de rede/VPN sempre exigem confirmação, mesmo quando o contexto é iniciado pelo usuário.
 - `visionclip-documents` adiciona loader TXT/Markdown, chunker, sessão de leitura e pipeline incremental traduzir -> TTS -> áudio com backpressure.
 - `ingest_document`, `ask_document`, `summarize_document`, `read_document_aloud`, `translate_document` e controles de leitura já passam por IPC/CLI/daemon com validação de tool e store local persistido.
-- `ask_document` e `summarize_document` usam recuperação lexical local nesta fase; a API opcional de embeddings via Ollama ja existe, mas vector store e ranking semantico continuam pendentes.
+- `ask_document` usa embeddings locais via Ollama quando `infer.embedding_model` esta configurado e ha vetores persistidos para o documento; caso contrario volta para recuperação lexical. `summarize_document` ainda usa prefixo local.
 
 ## Próximos passos
 
