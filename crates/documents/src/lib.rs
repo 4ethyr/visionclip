@@ -354,6 +354,31 @@ pub struct StoredChunkEmbedding {
     pub vector: Vec<f32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredAudioChunk {
+    pub document_id: DocumentId,
+    pub chunk_id: String,
+    pub chunk_index: usize,
+    pub target_language: String,
+    pub voice_id: String,
+    pub text_hash: String,
+    pub audio_path: PathBuf,
+    pub duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredAuditEvent {
+    pub id: String,
+    pub captured_at_unix_ms: u64,
+    pub session_id: Option<String>,
+    pub event_type: String,
+    pub risk_level: Option<u8>,
+    pub tool_name: Option<String>,
+    pub provider: Option<String>,
+    pub decision: Option<String>,
+    pub data_json: String,
+}
+
 impl SqliteDocumentStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -754,6 +779,128 @@ impl SqliteDocumentStore {
         Ok(embeddings)
     }
 
+    pub fn save_audio_chunk(&mut self, chunk: &StoredAudioChunk) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO audio_chunks (
+               document_id, chunk_id, chunk_index, target_language, voice_id,
+               text_hash, audio_path, duration_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(document_id, chunk_id, target_language, voice_id, text_hash) DO UPDATE SET
+               chunk_index = excluded.chunk_index,
+               audio_path = excluded.audio_path,
+               duration_ms = excluded.duration_ms,
+               updated_at_ms = excluded.updated_at_ms",
+            params![
+                chunk.document_id.as_str(),
+                &chunk.chunk_id,
+                usize_to_i64(chunk.chunk_index, "chunk_index")?,
+                &chunk.target_language,
+                &chunk.voice_id,
+                &chunk.text_hash,
+                chunk.audio_path.display().to_string(),
+                chunk
+                    .duration_ms
+                    .map(|value| u64_to_i64(value, "duration_ms"))
+                    .transpose()?,
+                now_ms(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_audio_chunks(
+        &self,
+        document_id: &str,
+        target_language: &str,
+        voice_id: &str,
+    ) -> Result<Vec<StoredAudioChunk>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT document_id, chunk_id, chunk_index, target_language, voice_id,
+                    text_hash, audio_path, duration_ms
+             FROM audio_chunks
+             WHERE document_id = ?1 AND target_language = ?2 AND voice_id = ?3
+             ORDER BY chunk_index ASC",
+        )?;
+        let mut rows = stmt.query(params![document_id, target_language, voice_id])?;
+        let mut chunks = Vec::new();
+        while let Some(row) = rows.next()? {
+            chunks.push(StoredAudioChunk {
+                document_id: DocumentId::from_existing(row.get::<_, String>(0)?)?,
+                chunk_id: row.get(1)?,
+                chunk_index: i64_to_usize(row.get(2)?, "chunk_index")?,
+                target_language: row.get(3)?,
+                voice_id: row.get(4)?,
+                text_hash: row.get(5)?,
+                audio_path: PathBuf::from(row.get::<_, String>(6)?),
+                duration_ms: row
+                    .get::<_, Option<i64>>(7)?
+                    .map(|value| i64_to_u64(value, "duration_ms"))
+                    .transpose()?,
+            });
+        }
+        Ok(chunks)
+    }
+
+    pub fn save_audit_event(&mut self, event: &StoredAuditEvent) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO audit_events (
+               id, captured_at_unix_ms, session_id, event_type, risk_level,
+               tool_name, provider, decision, data_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+               captured_at_unix_ms = excluded.captured_at_unix_ms,
+               session_id = excluded.session_id,
+               event_type = excluded.event_type,
+               risk_level = excluded.risk_level,
+               tool_name = excluded.tool_name,
+               provider = excluded.provider,
+               decision = excluded.decision,
+               data_json = excluded.data_json",
+            params![
+                &event.id,
+                u64_to_i64(event.captured_at_unix_ms, "captured_at_unix_ms")?,
+                &event.session_id,
+                &event.event_type,
+                event.risk_level.map(i64::from),
+                &event.tool_name,
+                &event.provider,
+                &event.decision,
+                &event.data_json,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_audit_events(&self, limit: usize) -> Result<Vec<StoredAuditEvent>> {
+        let limit = usize_to_i64(limit.max(1), "limit")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, captured_at_unix_ms, session_id, event_type, risk_level,
+                    tool_name, provider, decision, data_json
+             FROM audit_events
+             ORDER BY captured_at_unix_ms ASC, id ASC
+             LIMIT ?1",
+        )?;
+        let mut rows = stmt.query(params![limit])?;
+        let mut events = Vec::new();
+        while let Some(row) = rows.next()? {
+            events.push(StoredAuditEvent {
+                id: row.get(0)?,
+                captured_at_unix_ms: i64_to_u64(row.get(1)?, "captured_at_unix_ms")?,
+                session_id: row.get(2)?,
+                event_type: row.get(3)?,
+                risk_level: row
+                    .get::<_, Option<i64>>(4)?
+                    .map(|value| i64_to_u8(value, "risk_level"))
+                    .transpose()?,
+                tool_name: row.get(5)?,
+                provider: row.get(6)?,
+                decision: row.get(7)?,
+                data_json: row.get(8)?,
+            });
+        }
+        Ok(events)
+    }
+
     fn load_chunks(&self, document_id: &str) -> Result<Vec<DocumentChunk>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, document_id, chunk_index, page_start, page_end, section_title, text, token_count
@@ -852,6 +999,31 @@ CREATE TABLE IF NOT EXISTS chunk_embeddings (
   updated_at_ms INTEGER NOT NULL,
   PRIMARY KEY(document_id, chunk_id, model)
 );
+
+CREATE TABLE IF NOT EXISTS audio_chunks (
+  document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+  chunk_id TEXT NOT NULL,
+  chunk_index INTEGER NOT NULL,
+  target_language TEXT NOT NULL,
+  voice_id TEXT NOT NULL,
+  text_hash TEXT NOT NULL,
+  audio_path TEXT NOT NULL,
+  duration_ms INTEGER,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(document_id, chunk_id, target_language, voice_id, text_hash)
+);
+
+CREATE TABLE IF NOT EXISTS audit_events (
+  id TEXT PRIMARY KEY,
+  captured_at_unix_ms INTEGER NOT NULL,
+  session_id TEXT,
+  event_type TEXT NOT NULL,
+  risk_level INTEGER,
+  tool_name TEXT,
+  provider TEXT,
+  decision TEXT,
+  data_json TEXT NOT NULL
+);
 "#;
 
 fn encode_document_format(format: DocumentFormat) -> &'static str {
@@ -923,6 +1095,18 @@ fn i64_to_usize(value: i64, field: &str) -> Result<usize> {
 
 fn i64_to_u32(value: i64, field: &str) -> Result<u32> {
     u32::try_from(value).with_context(|| format!("{field} is negative or too large"))
+}
+
+fn u64_to_i64(value: u64, field: &str) -> Result<i64> {
+    i64::try_from(value).with_context(|| format!("{field} is too large for SQLite integer"))
+}
+
+fn i64_to_u64(value: i64, field: &str) -> Result<u64> {
+    u64::try_from(value).with_context(|| format!("{field} is negative or too large"))
+}
+
+fn i64_to_u8(value: i64, field: &str) -> Result<u8> {
+    u8::try_from(value).with_context(|| format!("{field} is negative or too large"))
 }
 
 fn now_ms() -> i64 {
@@ -1306,6 +1490,66 @@ mod tests {
             .unwrap();
 
         assert_eq!(loaded_embeddings, embeddings);
+    }
+
+    #[test]
+    fn sqlite_store_persists_audio_cache_entries() {
+        let mut store = SqliteDocumentStore::in_memory().unwrap();
+        let ingested = test_ingested_document(&["Source one.", "Source two."]);
+        let document_id = ingested.document.id.clone();
+        let chunk = ingested.chunks[0].clone();
+        store.save_document(&ingested).unwrap();
+
+        let audio = StoredAudioChunk {
+            document_id: document_id.clone(),
+            chunk_id: chunk.id,
+            chunk_index: chunk.chunk_index,
+            target_language: "pt-BR".into(),
+            voice_id: "pt_BR-faber-medium".into(),
+            text_hash: "sha256:abc".into(),
+            audio_path: PathBuf::from("/tmp/visionclip-audio.wav"),
+            duration_ms: Some(1234),
+        };
+        store.save_audio_chunk(&audio).unwrap();
+
+        let loaded = store
+            .load_audio_chunks(document_id.as_str(), "pt-BR", "pt_BR-faber-medium")
+            .unwrap();
+
+        assert_eq!(loaded, vec![audio]);
+    }
+
+    #[test]
+    fn sqlite_store_persists_audit_events() {
+        let mut store = SqliteDocumentStore::in_memory().unwrap();
+        let first = StoredAuditEvent {
+            id: "evt_1".into(),
+            captured_at_unix_ms: 10,
+            session_id: Some("sess_1".into()),
+            event_type: "tool.executed".into(),
+            risk_level: Some(2),
+            tool_name: Some("ingest_document".into()),
+            provider: Some("ollama/local".into()),
+            decision: Some("allow".into()),
+            data_json: "{\"document_id\":\"doc_1\"}".into(),
+        };
+        let second = StoredAuditEvent {
+            id: "evt_2".into(),
+            captured_at_unix_ms: 20,
+            session_id: None,
+            event_type: "security.blocked".into(),
+            risk_level: Some(5),
+            tool_name: Some("run_safe_command".into()),
+            provider: None,
+            decision: Some("deny".into()),
+            data_json: "{}".into(),
+        };
+
+        store.save_audit_event(&second).unwrap();
+        store.save_audit_event(&first).unwrap();
+
+        assert_eq!(store.load_audit_events(1).unwrap(), vec![first.clone()]);
+        assert_eq!(store.load_audit_events(10).unwrap(), vec![first, second]);
     }
 
     #[test]

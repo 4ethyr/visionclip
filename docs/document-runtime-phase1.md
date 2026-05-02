@@ -47,7 +47,7 @@ work.
   generation fails.
 - `SqliteDocumentStore` foundation in `visionclip-documents` with schema
   versioning and tables for documents, chunks, reading sessions, progress,
-  translated chunks, and chunk embeddings.
+  translated chunks, chunk embeddings, audio cache entries, and audit events.
 - Daemon migration path: when JSON exists it is loaded and mirrored into
   SQLite; when JSON is absent the daemon can load documents, sessions, progress,
   translations, and embeddings from SQLite.
@@ -81,7 +81,7 @@ work.
 
 1. Make SQLite the single default document store and remove JSON writes after a
    migration window.
-2. Add audio cache and audit-event tables to SQLite.
+2. Wire TTS audio cache writes and persistent audit log writes into the daemon.
 3. Add PDF text extraction behind a feature or optional system dependency.
 4. Connect translation to ProviderRouter and TTS to a controllable AudioRuntime.
 5. Replace in-process embedding ranking with sqlite-vec vector storage/search.
