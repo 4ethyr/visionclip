@@ -19,6 +19,12 @@ temperature = 0.1
 thinking_default = ""
 context_window_tokens = 8192
 
+[providers]
+route_mode = "local_first"
+sensitive_data_mode = "local_only"
+ollama_enabled = true
+cloud_enabled = false
+
 [search]
 enabled = true
 base_url = "https://www.google.com/search"

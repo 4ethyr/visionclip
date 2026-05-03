@@ -86,6 +86,22 @@ async fn run_doctor() -> Result<()> {
         }
     );
     println!("Configured model: {}", config.infer.model);
+    println!(
+        "Provider route mode: {}",
+        config.providers.route_mode_normalized()
+    );
+    println!(
+        "Sensitive data provider mode: {}",
+        config.providers.sensitive_data_mode_normalized()
+    );
+    println!(
+        "Ollama provider enabled: {}",
+        yes_no(config.providers.ollama_enabled)
+    );
+    println!(
+        "Cloud providers enabled: {}",
+        yes_no(config.providers.cloud_enabled)
+    );
     if config.infer.ocr_model.trim().is_empty() {
         println!("Configured OCR model: disabled");
     } else {

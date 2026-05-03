@@ -87,9 +87,7 @@ async fn main() -> Result<()> {
     };
 
     let infer = OllamaBackend::new(config.infer.clone());
-    let ollama_provider: Arc<dyn AiProvider> = Arc::new(infer.clone());
-    let provider_router =
-        Arc::new(ProviderRouter::new().with_provider("ollama", Arc::clone(&ollama_provider)));
+    let provider_router = Arc::new(build_provider_router(&config, infer.clone())?);
 
     let state = Arc::new(AppState {
         config: config.clone(),
@@ -144,6 +142,27 @@ struct AppState {
     documents: Arc<Mutex<DocumentStore>>,
     #[cfg(feature = "coddy-protocol")]
     repl: Mutex<coddy_bridge::ReplRuntimeState>,
+}
+
+fn build_provider_router(config: &AppConfig, infer: OllamaBackend) -> Result<ProviderRouter> {
+    let mut router = ProviderRouter::new();
+
+    if config.providers.ollama_enabled {
+        let ollama_provider: Arc<dyn AiProvider> = Arc::new(infer);
+        router.register("ollama", ollama_provider);
+    }
+
+    if config.providers.cloud_enabled {
+        warn!(
+            "cloud providers are enabled in config but no cloud provider implementation is registered yet"
+        );
+    }
+
+    if router.is_empty() {
+        anyhow::bail!("no AI providers are enabled; enable providers.ollama_enabled");
+    }
+
+    Ok(router)
 }
 
 struct DocumentStore {

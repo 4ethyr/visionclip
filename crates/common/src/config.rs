@@ -12,6 +12,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub infer: InferConfig,
     #[serde(default)]
+    pub providers: ProvidersConfig,
+    #[serde(default)]
     pub search: SearchConfig,
     #[serde(default)]
     pub audio: AudioConfig,
@@ -61,6 +63,47 @@ pub struct InferConfig {
     pub thinking_default: String,
     #[serde(default = "default_context_window_tokens")]
     pub context_window_tokens: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvidersConfig {
+    #[serde(default = "default_provider_route_mode")]
+    pub route_mode: String,
+    #[serde(default = "default_sensitive_provider_mode")]
+    pub sensitive_data_mode: String,
+    #[serde(default = "default_true")]
+    pub ollama_enabled: bool,
+    #[serde(default)]
+    pub cloud_enabled: bool,
+}
+
+impl ProvidersConfig {
+    pub fn validate(&self) -> AppResult<()> {
+        validate_provider_mode("providers.route_mode", &self.route_mode)?;
+        validate_provider_mode("providers.sensitive_data_mode", &self.sensitive_data_mode)?;
+
+        if !self.ollama_enabled && !self.cloud_enabled {
+            return Err(AppError::Config(
+                "at least one provider family must be enabled".into(),
+            ));
+        }
+
+        if self.cloud_enabled && self.sensitive_data_mode_normalized() == "cloud_allowed" {
+            return Err(AppError::Config(
+                "providers.sensitive_data_mode cannot be cloud_allowed".into(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub fn route_mode_normalized(&self) -> String {
+        normalize_provider_mode(&self.route_mode)
+    }
+
+    pub fn sensitive_data_mode_normalized(&self) -> String {
+        normalize_provider_mode(&self.sensitive_data_mode)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,6 +207,7 @@ impl AppConfig {
 
         let raw = fs::read_to_string(path)?;
         let parsed: AppConfig = toml::from_str(&raw)?;
+        parsed.validate()?;
         Ok(parsed)
     }
 
@@ -238,6 +282,10 @@ impl AppConfig {
             .iter()
             .any(|entry| entry.eq_ignore_ascii_case(action))
     }
+
+    pub fn validate(&self) -> AppResult<()> {
+        self.providers.validate()
+    }
 }
 
 impl Default for GeneralConfig {
@@ -271,6 +319,17 @@ impl Default for InferConfig {
             temperature: default_temperature(),
             thinking_default: default_thinking(),
             context_window_tokens: default_context_window_tokens(),
+        }
+    }
+}
+
+impl Default for ProvidersConfig {
+    fn default() -> Self {
+        Self {
+            route_mode: default_provider_route_mode(),
+            sensitive_data_mode: default_sensitive_provider_mode(),
+            ollama_enabled: default_true(),
+            cloud_enabled: false,
         }
     }
 }
@@ -396,6 +455,27 @@ fn default_thinking() -> String {
 
 fn default_context_window_tokens() -> u32 {
     8192
+}
+
+fn default_provider_route_mode() -> String {
+    "local_first".to_string()
+}
+
+fn default_sensitive_provider_mode() -> String {
+    "local_only".to_string()
+}
+
+fn normalize_provider_mode(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace('-', "_")
+}
+
+fn validate_provider_mode(field: &str, value: &str) -> AppResult<()> {
+    match normalize_provider_mode(value).as_str() {
+        "local_only" | "local_first" | "cloud_allowed" => Ok(()),
+        _ => Err(AppError::Config(format!(
+            "{field} must be one of local_only, local_first, cloud_allowed"
+        ))),
+    }
 }
 
 fn default_search_base_url() -> String {
@@ -549,6 +629,10 @@ mod tests {
         assert!(cfg.infer.embedding_model.is_empty());
         assert!(cfg.infer.thinking_default.is_empty());
         assert_eq!(cfg.infer.context_window_tokens, 8192);
+        assert_eq!(cfg.providers.route_mode_normalized(), "local_first");
+        assert_eq!(cfg.providers.sensitive_data_mode_normalized(), "local_only");
+        assert!(cfg.providers.ollama_enabled);
+        assert!(!cfg.providers.cloud_enabled);
         assert!(cfg.audio.enabled);
         assert_eq!(cfg.audio.request_timeout_ms, 60_000);
         assert_eq!(cfg.audio.playback_timeout_ms, 120_000);
@@ -570,6 +654,29 @@ mod tests {
         assert!(cfg.action_should_speak("OpenUrl", true));
         assert!(!cfg.action_should_speak("CopyText", true));
         assert!(!cfg.action_should_speak("Explain", false));
+    }
+
+    #[test]
+    fn provider_config_rejects_invalid_route_mode() {
+        let mut cfg = AppConfig::default();
+        cfg.providers.route_mode = "wide_open".into();
+
+        let error = cfg.validate().unwrap_err();
+
+        assert!(error.to_string().contains("providers.route_mode"));
+    }
+
+    #[test]
+    fn provider_config_rejects_cloud_for_sensitive_data() {
+        let mut cfg = AppConfig::default();
+        cfg.providers.cloud_enabled = true;
+        cfg.providers.sensitive_data_mode = "cloud-allowed".into();
+
+        let error = cfg.validate().unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("sensitive_data_mode cannot be cloud_allowed"));
     }
 
     #[test]
