@@ -4,6 +4,7 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Stdio,
+    sync::Arc,
 };
 use tokio::{
     process::Command,
@@ -15,18 +16,21 @@ use visionclip_common::{
     config::SearchConfig, discover_rendered_capture_backends,
     likely_gnome_shell_screenshot_available, Action, CaptureBackendKind, SessionType,
 };
-use visionclip_infer::{postprocess::sanitize_output, OllamaBackend};
+use visionclip_infer::{
+    postprocess::sanitize_output, AiTask, ProviderRouteRequest, ProviderRouter,
+    VisionRequest as ProviderVisionRequest,
+};
 use which::which;
 
 const RENDERED_CAPTURE_TIMEOUT_MS: u64 = 5_000;
 const MIN_RENDERED_POLL_INTERVAL_MS: u64 = 750;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RenderedSearchJob {
     pub request_id: Uuid,
     pub query: String,
     pub search: SearchConfig,
-    pub infer: OllamaBackend,
+    pub provider_router: Arc<ProviderRouter>,
 }
 
 #[derive(Debug, Clone)]
@@ -125,14 +129,32 @@ pub async fn wait_for_rendered_ai_overview(
             }
         };
 
-        let inference = match job
-            .infer
-            .infer_with_ocr_model(
-                format!("{}-rendered-ai-overview-{attempts}", job.request_id),
-                Action::CopyText,
-                capture.bytes,
-                "image/png".to_string(),
-            )
+        let provider = match job
+            .provider_router
+            .route(ProviderRouteRequest::sensitive(AiTask::Ocr))
+            .await
+        {
+            Ok(provider) => provider,
+            Err(error) => {
+                warn!(
+                    ?error,
+                    request_id = %job.request_id,
+                    attempt = attempts,
+                    "rendered AI overview OCR provider routing failed"
+                );
+                continue;
+            }
+        };
+
+        let inference = match provider
+            .provider
+            .ocr(ProviderVisionRequest {
+                request_id: format!("{}-rendered-ai-overview-{attempts}", job.request_id),
+                action: Action::CopyText,
+                source_app: Some("rendered_search".to_string()),
+                image_bytes: capture.bytes,
+                mime_type: "image/png".to_string(),
+            })
             .await
         {
             Ok(output) => output,

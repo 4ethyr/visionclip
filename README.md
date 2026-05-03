@@ -9,7 +9,7 @@ VisionClip é um serviço local para Linux que transforma seus modelos locais em
 - `visionclip-config`: utilitário de bootstrap, diagnóstico do host e listagem de modelos locais.
 - Suporte a ações de `CopyText`, `ExtractCode`, `TranslatePtBr`, `Explain` e `SearchWeb`.
 - Núcleo agentic inicial com `ToolRegistry`, `PermissionEngine`, `SessionManager` e `AuditLog` básicos para validar ferramentas antes da execução.
-- Base inicial de `AiProvider`/`ProviderRouter` no crate de inferência, com roteamento local-first/local-only; fluxos de documentos e captura/OCR principal usam o router.
+- Base inicial de `AiProvider`/`ProviderRouter` no crate de inferência, com roteamento local-first/local-only para documentos, captura/OCR, busca enriquecida e REPL.
 - Pipeline padrão com `gemma4:e2b` para OCR e raciocínio textual no mesmo stack local.
 - `SearchWeb` agora gera a query, tenta enriquecer a resposta com scrape best-effort do Google e pode copiar um resumo inicial para o clipboard antes de abrir o navegador.
 - Integração com Ollama via `/api/chat`, com retry automático quando o modelo não suporta `think`.
@@ -26,7 +26,7 @@ VisionClip é um serviço local para Linux que transforma seus modelos locais em
 2. A requisição é enviada por socket Unix ao `visionclip-daemon`.
 3. O daemon valida a ferramenta no registry e aplica política de risco/permissão antes de executar efeitos colaterais.
 4. Para screenshots, o daemon extrai texto com `infer.ocr_model` e envia esse texto para o modelo principal configurado no Ollama. No default atual, `gemma4:e2b` faz as duas etapas.
-5. A inferência local está preparada atrás de `AiProvider`/`ProviderRouter`; documentos e captura/OCR principal já usam esse caminho e cloud providers continuam desabilitados por padrão.
+5. A inferência local está preparada atrás de `AiProvider`/`ProviderRouter`; documentos, captura/OCR, busca enriquecida e REPL já usam esse caminho e cloud providers continuam desabilitados por padrão.
 6. Para documentos, o daemon usa chunks locais, embeddings opcionais e prompts locais para responder, resumir, traduzir ou narrar.
 7. A saída é enviada para clipboard, navegador ou TTS, e eventos relevantes são auditados em memória e no SQLite local.
 
@@ -305,7 +305,7 @@ systemctl --user enable --now visionclip-daemon.service
 - A qualidade do OCR ainda depende da captura e do modelo configurado; se a captura vier ruidosa, erros pequenos como `170 -> 17` ainda podem acontecer
 - O fluxo de áudio real depende de um Piper HTTP ativo no host
 - Documentos já suportam TXT/Markdown/PDF textual; EPUB e OCR de documento escaneado continuam pendentes
-- O `ProviderRouter` já cobre documentos e captura/OCR principal, mas busca enriquecida, OCR de busca renderizada e REPL ainda usam chamadas diretas ao Ollama até a próxima etapa incremental de Fase 3
+- O `ProviderRouter` já cobre documentos, captura/OCR, busca enriquecida, OCR de busca renderizada e REPL, mas ainda há somente o provider local Ollama registrado no daemon
 - SQLite já está integrado como persistência local/migração, mas busca vetorial com `sqlite-vec` ainda não foi ligada
 - Pause/resume/stop de leitura persistem estado, mas o pipeline de áudio ainda precisa de um `AudioRuntime` controlável para interrupção em tempo real
 

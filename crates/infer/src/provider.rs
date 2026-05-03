@@ -177,6 +177,43 @@ impl From<InferenceOutput> for Translation {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct SearchAnswerRequest {
+    pub request_id: String,
+    pub query: String,
+    pub source_label: String,
+    pub ai_overview_text: String,
+    pub supporting_sources: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchAnswerResponse {
+    pub text: String,
+}
+
+impl From<InferenceOutput> for SearchAnswerResponse {
+    fn from(output: InferenceOutput) -> Self {
+        Self { text: output.text }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ReplRequest {
+    pub request_id: String,
+    pub user_message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplResponse {
+    pub text: String,
+}
+
+impl From<InferenceOutput> for ReplResponse {
+    fn from(output: InferenceOutput) -> Self {
+        Self { text: output.text }
+    }
+}
+
 #[async_trait]
 pub trait AiProvider: Send + Sync {
     async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse> {
@@ -197,6 +234,14 @@ pub trait AiProvider: Send + Sync {
 
     async fn translate(&self, _req: TranslateRequest) -> Result<Translation> {
         Err(anyhow!("provider does not support translation"))
+    }
+
+    async fn answer_search(&self, _req: SearchAnswerRequest) -> Result<SearchAnswerResponse> {
+        Err(anyhow!("provider does not support grounded search answers"))
+    }
+
+    async fn answer_repl(&self, _req: ReplRequest) -> Result<ReplResponse> {
+        Err(anyhow!("provider does not support REPL answers"))
     }
 
     async fn health(&self) -> ProviderHealth;

@@ -43,8 +43,8 @@ use visionclip_documents::{
 use visionclip_infer::{
     postprocess::{sanitize_for_speech, sanitize_output},
     AiProvider, AiTask, ChatRequest, ChatResponse, EmbedRequest, OllamaBackend, ProviderMode,
-    ProviderRouteRequest, ProviderRouter, ProviderSelection, TranslateRequest,
-    VisionRequest as ProviderVisionRequest, VisionResponse,
+    ProviderRouteRequest, ProviderRouter, ProviderSelection, SearchAnswerRequest,
+    SearchAnswerResponse, TranslateRequest, VisionRequest as ProviderVisionRequest, VisionResponse,
 };
 use visionclip_output::{notify, open_search_query, open_url, ClipboardOwner};
 use visionclip_tts::PiperHttpClient;
@@ -1863,9 +1863,20 @@ impl coddy_bridge::ReplNativeServices for DaemonReplNativeServices {
         speak: bool,
     ) -> coddy_bridge::ReplJobFuture<'a> {
         Box::pin(async move {
-            let output = state
-                .infer
-                .answer_repl_turn(format!("{request_id}-repl-agent"), &command_text)
+            let session_id = ensure_request_session(state, request_id).await;
+            let provider = route_sensitive_local_provider(
+                state,
+                Some(&session_id),
+                AiTask::Chat,
+                "repl.answer",
+            )
+            .await?;
+            let output = provider
+                .provider
+                .answer_repl(visionclip_infer::ReplRequest {
+                    request_id: format!("{request_id}-repl-agent"),
+                    user_message: command_text,
+                })
                 .await?;
             let answer = sanitize_output(&Action::Explain, &output.text);
             let speak_requested = state
@@ -2139,6 +2150,72 @@ async fn run_provider_vision(
         AiTask::Vision => provider.provider.vision(request).await,
         _ => anyhow::bail!("unsupported vision provider task {task:?}"),
     }
+}
+
+async fn run_provider_search_answer(
+    state: &AppState,
+    session_id: &SessionId,
+    request_id: String,
+    query: &str,
+    enrichment: &SearchEnrichment,
+    source_label: &str,
+    operation: &str,
+) -> Result<SearchAnswerResponse> {
+    let provider =
+        route_sensitive_local_provider(state, Some(session_id), AiTask::Chat, operation).await?;
+    provider
+        .provider
+        .answer_search(search_answer_request(
+            request_id,
+            query,
+            enrichment,
+            source_label,
+        )?)
+        .await
+}
+
+async fn run_provider_search_answer_with_router(
+    provider_router: &ProviderRouter,
+    request_id: String,
+    query: &str,
+    enrichment: &SearchEnrichment,
+    source_label: &str,
+) -> Result<SearchAnswerResponse> {
+    let provider = provider_router
+        .route(ProviderRouteRequest::sensitive(AiTask::Chat))
+        .await
+        .context("failed to route local search answer provider")?;
+    provider
+        .provider
+        .answer_search(search_answer_request(
+            request_id,
+            query,
+            enrichment,
+            source_label,
+        )?)
+        .await
+}
+
+fn search_answer_request(
+    request_id: String,
+    query: &str,
+    enrichment: &SearchEnrichment,
+    source_label: &str,
+) -> Result<SearchAnswerRequest> {
+    let overview = enrichment
+        .ai_overview
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("search enrichment does not include AI overview text")?;
+
+    Ok(SearchAnswerRequest {
+        request_id,
+        query: query.to_string(),
+        source_label: source_label.to_string(),
+        ai_overview_text: overview.to_string(),
+        supporting_sources: supporting_sources_text(enrichment),
+    })
 }
 
 fn stored_audit_event_from_event(event: &AuditEvent) -> Result<StoredAuditEvent> {
@@ -2677,7 +2754,8 @@ async fn execute_search_query(
                     .map(|value| value.chars().count())
                     .unwrap_or_default();
                 if let Some(answer) = generate_google_ai_overview_answer(
-                    &state.infer,
+                    state,
+                    &session_id,
                     request_id,
                     query,
                     &enrichment,
@@ -2812,7 +2890,7 @@ fn spawn_rendered_ai_overview_listener(
         request_id,
         query: query.to_string(),
         search: state.config.search.clone(),
-        infer: state.infer.clone(),
+        provider_router: Arc::clone(&state.provider_router),
     };
     let piper = state.piper.clone();
     let tts_gate = state.tts_gate.clone();
@@ -2821,8 +2899,8 @@ fn spawn_rendered_ai_overview_listener(
         let started_at = Instant::now();
         match rendered_search::wait_for_rendered_ai_overview(&job).await {
             Ok(Some(result)) => {
-                let grounded_answer = generate_google_ai_overview_answer(
-                    &job.infer,
+                let grounded_answer = generate_google_ai_overview_answer_with_router(
+                    &job.provider_router,
                     job.request_id,
                     &job.query,
                     &result.enrichment,
@@ -2906,42 +2984,25 @@ fn spawn_rendered_ai_overview_listener(
 }
 
 async fn generate_google_ai_overview_answer(
-    infer: &OllamaBackend,
+    state: &AppState,
+    session_id: &SessionId,
     request_id: uuid::Uuid,
     query: &str,
     enrichment: &SearchEnrichment,
     source_label: &str,
 ) -> Option<String> {
-    let overview = enrichment
-        .ai_overview
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?;
-    let supporting_sources = supporting_sources_text(enrichment);
-
-    match infer
-        .answer_search_from_context(
-            format!("{request_id}-google-ai-overview-answer"),
-            query,
-            source_label,
-            overview,
-            &supporting_sources,
-        )
-        .await
+    match run_provider_search_answer(
+        state,
+        session_id,
+        format!("{request_id}-google-ai-overview-answer"),
+        query,
+        enrichment,
+        source_label,
+        "search.ai_overview_answer",
+    )
+    .await
     {
-        Ok(output) => {
-            let answer = sanitize_output(&Action::Explain, &output.text);
-            if answer.trim().is_empty() {
-                warn!(
-                    request_id = %request_id,
-                    query = %query,
-                    "grounded Google AI overview answer was empty"
-                );
-                None
-            } else {
-                Some(answer)
-            }
-        }
+        Ok(output) => sanitized_search_answer(request_id, query, &output.text),
         Err(error) => {
             warn!(
                 ?error,
@@ -2951,6 +3012,53 @@ async fn generate_google_ai_overview_answer(
             );
             None
         }
+    }
+}
+
+async fn generate_google_ai_overview_answer_with_router(
+    provider_router: &ProviderRouter,
+    request_id: uuid::Uuid,
+    query: &str,
+    enrichment: &SearchEnrichment,
+    source_label: &str,
+) -> Option<String> {
+    match run_provider_search_answer_with_router(
+        provider_router,
+        format!("{request_id}-google-ai-overview-answer"),
+        query,
+        enrichment,
+        source_label,
+    )
+    .await
+    {
+        Ok(output) => sanitized_search_answer(request_id, query, &output.text),
+        Err(error) => {
+            warn!(
+                ?error,
+                request_id = %request_id,
+                query = %query,
+                "failed to generate grounded Google AI overview answer"
+            );
+            None
+        }
+    }
+}
+
+fn sanitized_search_answer(
+    request_id: uuid::Uuid,
+    query: &str,
+    raw_answer: &str,
+) -> Option<String> {
+    let answer = sanitize_output(&Action::Explain, raw_answer);
+    if answer.trim().is_empty() {
+        warn!(
+            request_id = %request_id,
+            query = %query,
+            "grounded Google AI overview answer was empty"
+        );
+        None
+    } else {
+        Some(answer)
     }
 }
 

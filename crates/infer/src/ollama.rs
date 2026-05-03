@@ -9,7 +9,8 @@ use crate::prompts::{
 };
 use crate::provider::{
     AiProvider, ChatRequest, ChatResponse, EmbedRequest, EmbedResponse, ProviderCapability,
-    ProviderHealth, TranslateRequest, Translation, VisionRequest, VisionResponse,
+    ProviderHealth, ReplRequest, ReplResponse, SearchAnswerRequest, SearchAnswerResponse,
+    TranslateRequest, Translation, VisionRequest, VisionResponse,
 };
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -582,6 +583,24 @@ impl AiProvider for OllamaBackend {
             .map(Translation::from)
     }
 
+    async fn answer_search(&self, req: SearchAnswerRequest) -> Result<SearchAnswerResponse> {
+        self.answer_search_from_context(
+            req.request_id,
+            &req.query,
+            &req.source_label,
+            &req.ai_overview_text,
+            &req.supporting_sources,
+        )
+        .await
+        .map(SearchAnswerResponse::from)
+    }
+
+    async fn answer_repl(&self, req: ReplRequest) -> Result<ReplResponse> {
+        self.answer_repl_turn(req.request_id, &req.user_message)
+            .await
+            .map(ReplResponse::from)
+    }
+
     async fn health(&self) -> ProviderHealth {
         let mut capabilities = Vec::new();
         let has_model = !self.config.model.trim().is_empty();
@@ -1094,6 +1113,81 @@ mod tests {
         assert_eq!(output.text, "texto extraido");
         assert_eq!(json["model"], "ocr-only:test");
         assert_eq!(json["messages"][1]["images"][0], "UE5H");
+    }
+
+    #[tokio::test]
+    async fn ai_provider_search_answer_uses_grounded_search_prompt() {
+        let server = TestServer::spawn(r#"{"message":{"content":"Resposta fundamentada"}}"#);
+        let backend = OllamaBackend::new(InferConfig {
+            base_url: server.base_url.clone(),
+            model: "gemma4:test".into(),
+            keep_alive: "5m".into(),
+            temperature: 0.1,
+            thinking_default: String::new(),
+            ..InferConfig::default()
+        });
+
+        let output = <OllamaBackend as AiProvider>::answer_search(
+            &backend,
+            SearchAnswerRequest {
+                request_id: "req-provider-search-answer".into(),
+                query: "O que é Rust?".into(),
+                source_label: "AI Overview".into(),
+                ai_overview_text: "Rust é uma linguagem de sistemas.".into(),
+                supporting_sources: "Fonte: rust-lang.org".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let requests = server.finish();
+        let json: serde_json::Value = serde_json::from_str(&requests[0].1).unwrap();
+        assert_eq!(output.text, "Resposta fundamentada");
+        assert_eq!(json["model"], "gemma4:test");
+        assert!(json["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("somente o contexto de busca fornecido"));
+        assert!(json["messages"][1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("GOOGLE_AI_OVERVIEW"));
+    }
+
+    #[tokio::test]
+    async fn ai_provider_repl_answer_uses_repl_prompt() {
+        let server = TestServer::spawn(r#"{"message":{"content":"Resposta do REPL"}}"#);
+        let backend = OllamaBackend::new(InferConfig {
+            base_url: server.base_url.clone(),
+            model: "gemma4:test".into(),
+            keep_alive: "5m".into(),
+            temperature: 0.1,
+            thinking_default: String::new(),
+            ..InferConfig::default()
+        });
+
+        let output = <OllamaBackend as AiProvider>::answer_repl(
+            &backend,
+            ReplRequest {
+                request_id: "req-provider-repl".into(),
+                user_message: "explique isso".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let requests = server.finish();
+        let json: serde_json::Value = serde_json::from_str(&requests[0].1).unwrap();
+        assert_eq!(output.text, "Resposta do REPL");
+        assert_eq!(json["model"], "gemma4:test");
+        assert!(json["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Nao trate toda mensagem como pesquisa web"));
+        assert!(json["messages"][1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Mensagem do usuario no REPL"));
     }
 
     #[tokio::test]
