@@ -146,6 +146,8 @@ struct AppState {
 
 fn build_provider_router(config: &AppConfig, infer: OllamaBackend) -> Result<ProviderRouter> {
     let mut router = ProviderRouter::new();
+    let route_mode = provider_route_mode(config);
+    let sensitive_mode = sensitive_provider_mode(config);
 
     if config.providers.ollama_enabled {
         let ollama_provider: Arc<dyn AiProvider> = Arc::new(infer);
@@ -162,7 +164,47 @@ fn build_provider_router(config: &AppConfig, infer: OllamaBackend) -> Result<Pro
         anyhow::bail!("no AI providers are enabled; enable providers.ollama_enabled");
     }
 
+    info!(
+        ?route_mode,
+        ?sensitive_mode,
+        ollama_enabled = config.providers.ollama_enabled,
+        cloud_enabled = config.providers.cloud_enabled,
+        "provider routing policy loaded"
+    );
+
     Ok(router)
+}
+
+fn provider_route_mode(config: &AppConfig) -> ProviderMode {
+    provider_mode_from_policy_value(&config.providers.route_mode)
+}
+
+fn sensitive_provider_mode(config: &AppConfig) -> ProviderMode {
+    provider_mode_from_policy_value(&config.providers.sensitive_data_mode)
+}
+
+fn provider_mode_from_policy_value(value: &str) -> ProviderMode {
+    match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "cloud_allowed" => ProviderMode::CloudAllowed,
+        "local_first" => ProviderMode::LocalFirst,
+        _ => ProviderMode::LocalOnly,
+    }
+}
+
+fn provider_route_request(
+    task: AiTask,
+    mode: ProviderMode,
+    sensitive: bool,
+) -> ProviderRouteRequest {
+    ProviderRouteRequest {
+        task,
+        mode,
+        sensitive,
+    }
+}
+
+fn sensitive_provider_route_request(config: &AppConfig, task: AiTask) -> ProviderRouteRequest {
+    provider_route_request(task, sensitive_provider_mode(config), true)
 }
 
 struct DocumentStore {
@@ -449,6 +491,7 @@ impl DocumentStore {
 #[derive(Clone)]
 struct RoutedDocumentTranslator {
     provider_router: Arc<ProviderRouter>,
+    sensitive_provider_mode: ProviderMode,
     request_id: uuid::Uuid,
 }
 
@@ -459,7 +502,11 @@ impl TranslationProvider for RoutedDocumentTranslator {
         let target_language_label = document_target_language_label(&request.target_language);
         let selection = self
             .provider_router
-            .route(ProviderRouteRequest::sensitive(AiTask::DocumentTranslation))
+            .route(provider_route_request(
+                AiTask::DocumentTranslation,
+                self.sensitive_provider_mode,
+                true,
+            ))
             .await
             .context("failed to route local document translation provider")?;
         let output = selection
@@ -1007,6 +1054,7 @@ async fn process_document_translate(
 
     let translator = RoutedDocumentTranslator {
         provider_router: Arc::clone(&state.provider_router),
+        sensitive_provider_mode: sensitive_provider_mode(&state.config),
         request_id,
     };
     let translation_session_id = format!("{request_id}-translate");
@@ -1127,6 +1175,7 @@ async fn process_document_read(state: &AppState, job: DocumentReadJob) -> Result
     let mut pipeline = TranslatedReadingPipeline::new(
         Arc::new(RoutedDocumentTranslator {
             provider_router: Arc::clone(&state.provider_router),
+            sensitive_provider_mode: sensitive_provider_mode(&state.config),
             request_id,
         }),
         Arc::new(PiperDocumentTts {
@@ -1554,7 +1603,10 @@ async fn generate_document_embeddings(
     }
     let provider = state
         .provider_router
-        .route(ProviderRouteRequest::sensitive(AiTask::Embeddings))
+        .route(sensitive_provider_route_request(
+            &state.config,
+            AiTask::Embeddings,
+        ))
         .await
         .ok()?;
 
@@ -1625,7 +1677,10 @@ async fn select_document_context_with_optional_embeddings(
     if let Some(embeddings) = embeddings {
         if let Ok(provider) = state
             .provider_router
-            .route(ProviderRouteRequest::sensitive(AiTask::Embeddings))
+            .route(sensitive_provider_route_request(
+                &state.config,
+                AiTask::Embeddings,
+            ))
             .await
         {
             match provider
@@ -2085,11 +2140,7 @@ async fn route_sensitive_local_provider(
 ) -> Result<ProviderSelection> {
     let selection = state
         .provider_router
-        .route(ProviderRouteRequest {
-            task,
-            mode: ProviderMode::LocalFirst,
-            sensitive: true,
-        })
+        .route(sensitive_provider_route_request(&state.config, task))
         .await
         .with_context(|| format!("failed to route local AI provider for {operation}"))?;
 
@@ -2195,13 +2246,18 @@ async fn run_provider_search_answer(
 
 async fn run_provider_search_answer_with_router(
     provider_router: &ProviderRouter,
+    sensitive_provider_mode: ProviderMode,
     request_id: String,
     query: &str,
     enrichment: &SearchEnrichment,
     source_label: &str,
 ) -> Result<SearchAnswerResponse> {
     let provider = provider_router
-        .route(ProviderRouteRequest::sensitive(AiTask::Chat))
+        .route(provider_route_request(
+            AiTask::Chat,
+            sensitive_provider_mode,
+            true,
+        ))
         .await
         .context("failed to route local search answer provider")?;
     provider
@@ -2910,6 +2966,7 @@ fn spawn_rendered_ai_overview_listener(
         query: query.to_string(),
         search: state.config.search.clone(),
         provider_router: Arc::clone(&state.provider_router),
+        sensitive_provider_mode: sensitive_provider_mode(&state.config),
     };
     let piper = state.piper.clone();
     let tts_gate = state.tts_gate.clone();
@@ -2920,6 +2977,7 @@ fn spawn_rendered_ai_overview_listener(
             Ok(Some(result)) => {
                 let grounded_answer = generate_google_ai_overview_answer_with_router(
                     &job.provider_router,
+                    job.sensitive_provider_mode,
                     job.request_id,
                     &job.query,
                     &result.enrichment,
@@ -3036,6 +3094,7 @@ async fn generate_google_ai_overview_answer(
 
 async fn generate_google_ai_overview_answer_with_router(
     provider_router: &ProviderRouter,
+    sensitive_provider_mode: ProviderMode,
     request_id: uuid::Uuid,
     query: &str,
     enrichment: &SearchEnrichment,
@@ -3043,6 +3102,7 @@ async fn generate_google_ai_overview_answer_with_router(
 ) -> Option<String> {
     match run_provider_search_answer_with_router(
         provider_router,
+        sensitive_provider_mode,
         format!("{request_id}-google-ai-overview-answer"),
         query,
         enrichment,
@@ -3283,6 +3343,38 @@ mod tests {
         assert!(validate_browser_url("http://example.com").is_ok());
         assert!(validate_browser_url("file:///etc/passwd").is_err());
         assert!(validate_browser_url("https://example.com/a b").is_err());
+    }
+
+    #[test]
+    fn provider_policy_modes_parse_config_values() {
+        assert_eq!(
+            provider_mode_from_policy_value("local-only"),
+            ProviderMode::LocalOnly
+        );
+        assert_eq!(
+            provider_mode_from_policy_value("LOCAL_FIRST"),
+            ProviderMode::LocalFirst
+        );
+        assert_eq!(
+            provider_mode_from_policy_value("cloud_allowed"),
+            ProviderMode::CloudAllowed
+        );
+        assert_eq!(
+            provider_mode_from_policy_value("unexpected"),
+            ProviderMode::LocalOnly
+        );
+    }
+
+    #[test]
+    fn sensitive_provider_request_uses_configured_mode() {
+        let mut config = AppConfig::default();
+        config.providers.sensitive_data_mode = "local-first".into();
+
+        let request = sensitive_provider_route_request(&config, AiTask::Chat);
+
+        assert_eq!(request.task, AiTask::Chat);
+        assert_eq!(request.mode, ProviderMode::LocalFirst);
+        assert!(request.sensitive);
     }
 
     #[test]
