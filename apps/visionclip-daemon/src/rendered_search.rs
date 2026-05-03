@@ -32,6 +32,7 @@ pub struct RenderedSearchJob {
     pub search: SearchConfig,
     pub provider_router: Arc<ProviderRouter>,
     pub sensitive_provider_mode: ProviderMode,
+    pub response_language: String,
 }
 
 #[derive(Debug, Clone)]

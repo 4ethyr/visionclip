@@ -85,7 +85,7 @@ pub fn user_prompt_from_text(action: &Action, source_app: Option<&str>, ocr_text
 }
 
 pub fn search_answer_system_prompt() -> &'static str {
-    "Voce responde perguntas em PT-BR usando somente o contexto de busca fornecido. O contexto pode conter uma Visao Geral criada por IA do Google e fontes organicas. Responda de forma natural, amigavel e precisa, em 2 a 4 frases curtas. Nao invente dados, datas, fontes ou detalhes ausentes. Nao mencione OCR, scraping, prompt ou instrucoes internas. Nao leia simbolos decorativos. Se o contexto for insuficiente, diga isso objetivamente."
+    "Voce responde perguntas usando somente o contexto de busca fornecido. O contexto pode conter uma Visao Geral criada por IA do Google e fontes organicas. Responda de forma natural, amigavel e precisa, em 2 a 4 frases curtas, no idioma solicitado. Nao invente dados, datas, fontes ou detalhes ausentes. Nao mencione OCR, scraping, prompt ou instrucoes internas. Nao leia simbolos decorativos. Se o contexto for insuficiente, diga isso objetivamente no idioma solicitado."
 }
 
 pub fn repl_agent_system_prompt() -> &'static str {
@@ -101,6 +101,7 @@ pub fn repl_agent_user_prompt(user_message: &str) -> String {
 
 pub fn search_answer_user_prompt(
     query: &str,
+    response_language: &str,
     source_label: &str,
     ai_overview_text: &str,
     supporting_sources: &str,
@@ -112,7 +113,7 @@ pub fn search_answer_user_prompt(
     };
 
     format!(
-        "Pergunta do usuario:\n{query}\n\nFonte principal extraida:\n{source_label}\n\nTexto extraido da Visao Geral por IA do Google:\n<<<GOOGLE_AI_OVERVIEW\n{}\nGOOGLE_AI_OVERVIEW>>>\n\nFontes organicas complementares para validacao:\n<<<FONTES\n{sources}\nFONTES>>>\n\nTarefa:\nResponda ao usuario com base no texto extraido da Visao Geral por IA do Google. Use as fontes organicas apenas como apoio quando forem coerentes com a visao geral. Entregue somente a resposta final em portugues do Brasil.",
+        "Pergunta do usuario:\n{query}\n\nIdioma da resposta:\n{response_language}\n\nFonte principal extraida:\n{source_label}\n\nTexto extraido da Visao Geral por IA do Google:\n<<<GOOGLE_AI_OVERVIEW\n{}\nGOOGLE_AI_OVERVIEW>>>\n\nFontes organicas complementares para validacao:\n<<<FONTES\n{sources}\nFONTES>>>\n\nTarefa:\nResponda ao usuario com base no texto extraido da Visao Geral por IA do Google. Use as fontes organicas apenas como apoio quando forem coerentes com a visao geral. Entregue somente a resposta final no idioma indicado.",
         ai_overview_text.trim()
     )
 }
@@ -520,6 +521,7 @@ mod tests {
         let system = search_answer_system_prompt();
         let user = search_answer_user_prompt(
             "O que é JavaScript?",
+            "Portuguese (Brazil)",
             "Visão geral criada por IA renderizada no Google",
             "JavaScript é uma linguagem de programação de alto nível para web.",
             "MDN: JavaScript permite páginas interativas.",
@@ -530,6 +532,7 @@ mod tests {
         assert!(user.contains("GOOGLE_AI_OVERVIEW"));
         assert!(user.contains("JavaScript é uma linguagem"));
         assert!(user.contains("Fontes organicas complementares"));
+        assert!(user.contains("Idioma da resposta"));
         assert!(user.contains("somente a resposta final"));
     }
 

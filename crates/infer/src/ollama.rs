@@ -135,6 +135,7 @@ impl OllamaBackend {
         &self,
         request_id: String,
         query: &str,
+        response_language: &str,
         source_label: &str,
         ai_overview_text: &str,
         supporting_sources: &str,
@@ -144,6 +145,7 @@ impl OllamaBackend {
         let payload = self.search_answer_chat_payload(
             model,
             query,
+            response_language,
             source_label,
             ai_overview_text,
             supporting_sources,
@@ -223,6 +225,7 @@ impl OllamaBackend {
         &self,
         model: &str,
         query: &str,
+        response_language: &str,
         source_label: &str,
         ai_overview_text: &str,
         supporting_sources: &str,
@@ -241,6 +244,7 @@ impl OllamaBackend {
                     "role": "user",
                     "content": search_answer_user_prompt(
                         query,
+                        response_language,
                         source_label,
                         ai_overview_text,
                         supporting_sources
@@ -587,6 +591,7 @@ impl AiProvider for OllamaBackend {
         self.answer_search_from_context(
             req.request_id,
             &req.query,
+            &req.response_language,
             &req.source_label,
             &req.ai_overview_text,
             &req.supporting_sources,
@@ -1132,6 +1137,7 @@ mod tests {
             SearchAnswerRequest {
                 request_id: "req-provider-search-answer".into(),
                 query: "O que é Rust?".into(),
+                response_language: "Portuguese (Brazil)".into(),
                 source_label: "AI Overview".into(),
                 ai_overview_text: "Rust é uma linguagem de sistemas.".into(),
                 supporting_sources: "Fonte: rust-lang.org".into(),
@@ -1284,6 +1290,7 @@ mod tests {
             .answer_search_from_context(
                 "req-search-answer".into(),
                 "O que é JavaScript?",
+                "Portuguese (Brazil)",
                 "Visão geral criada por IA renderizada no Google",
                 "JavaScript é uma linguagem de programação de alto nível para web.",
                 "MDN: JavaScript permite páginas interativas.",

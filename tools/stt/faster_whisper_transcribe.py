@@ -12,7 +12,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Transcribe a WAV file with faster-whisper.")
     parser.add_argument("wav_path")
     parser.add_argument("--model", default=os.environ.get("VISIONCLIP_STT_MODEL", "base"))
-    parser.add_argument("--language", default=os.environ.get("VISIONCLIP_STT_LANGUAGE", "pt"))
+    parser.add_argument("--language", default=os.environ.get("VISIONCLIP_STT_LANGUAGE", "auto"))
     parser.add_argument(
         "--cache-dir",
         default=os.environ.get(
@@ -25,7 +25,30 @@ def parse_args() -> argparse.Namespace:
         "--compute-type",
         default=os.environ.get("VISIONCLIP_STT_COMPUTE_TYPE", "int8"),
     )
+    parser.add_argument(
+        "--beam-size",
+        type=int,
+        default=int(os.environ.get("VISIONCLIP_STT_BEAM_SIZE", "5")),
+    )
+    parser.add_argument(
+        "--vad-filter",
+        default=os.environ.get("VISIONCLIP_STT_VAD_FILTER", "true"),
+        help="Use true/false. VAD helps remove silence/noise around short commands.",
+    )
     return parser.parse_args()
+
+
+def optional_language(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"", "auto", "detect", "none", "multilingual"}:
+        return None
+    return normalized
+
+
+def parse_bool(value: str) -> bool:
+    return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
 def main() -> int:
@@ -57,12 +80,17 @@ def main() -> int:
         compute_type=args.compute_type,
         download_root=str(cache_dir),
     )
-    segments, _ = model.transcribe(
+    language = optional_language(args.language)
+    vad_filter = parse_bool(args.vad_filter)
+    segments, info = model.transcribe(
         args.wav_path,
-        language=args.language or None,
-        beam_size=1,
-        vad_filter=False,
+        language=language,
+        beam_size=max(args.beam_size, 1),
+        vad_filter=vad_filter,
     )
+    detected_language = getattr(info, "language", None)
+    if detected_language:
+        print(f"detected_language={detected_language}", file=sys.stderr)
     transcript = " ".join(segment.text.strip() for segment in segments).strip()
     if transcript:
         print(transcript)
