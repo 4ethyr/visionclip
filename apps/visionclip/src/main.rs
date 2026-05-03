@@ -12,9 +12,9 @@ use tracing::{info, warn};
 use uuid::Uuid;
 use visionclip_common::{
     read_message, write_message, AppConfig, ApplicationLaunchJob, AssistantLanguage, CaptureJob,
-    DocumentAskJob, DocumentControlJob, DocumentControlKind, DocumentIngestJob, DocumentReadJob,
-    DocumentSummarizeJob, DocumentTranslateJob, JobResult, SessionType, UrlOpenJob, VisionRequest,
-    VoiceSearchJob,
+    DocumentAskJob, DocumentControlJob, DocumentControlKind, DocumentIngestJob, DocumentOpenJob,
+    DocumentReadJob, DocumentSummarizeJob, DocumentTranslateJob, JobResult, SessionType,
+    UrlOpenJob, VisionRequest, VoiceSearchJob,
 };
 
 #[derive(Debug, Parser)]
@@ -187,6 +187,20 @@ async fn main() -> Result<()> {
                     cli.speak,
                     label,
                     url,
+                    Some(transcript),
+                    Some(*language),
+                )
+                .await;
+            }
+            voice::VoiceAgentCommand::OpenDocument {
+                transcript,
+                language,
+                query,
+            } => {
+                return run_open_document(
+                    &config,
+                    cli.speak,
+                    query,
                     Some(transcript),
                     Some(*language),
                 )
@@ -648,6 +662,81 @@ async fn run_open_url(
         | JobResult::BrowserQuery { .. }
         | JobResult::DocumentStatus { .. } => {
             anyhow::bail!("daemon returned unexpected response for open url");
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_open_document(
+    config: &AppConfig,
+    speak: bool,
+    query: &str,
+    transcript: Option<&str>,
+    input_language: Option<AssistantLanguage>,
+) -> Result<()> {
+    let request_id = Uuid::new_v4();
+    let total_started_at = Instant::now();
+    let socket_path = config.socket_path()?;
+
+    info!(
+        request_id = %request_id,
+        query,
+        transcript = ?transcript,
+        input_language = input_language.map(|language| language.tts_language_code()),
+        speak,
+        "open document request started"
+    );
+
+    let connect_started_at = Instant::now();
+    let mut stream = UnixStream::connect(&socket_path).await.with_context(|| {
+        format!(
+            "failed to connect to daemon socket {}",
+            socket_path.display()
+        )
+    })?;
+    let connect_ms = elapsed_ms(connect_started_at);
+
+    info!(
+        request_id = %request_id,
+        connect_ms,
+        socket = %socket_path.display(),
+        "daemon socket connected"
+    );
+
+    let request = VisionRequest::OpenDocument(DocumentOpenJob {
+        request_id,
+        transcript: transcript.map(str::to_string),
+        input_language: input_language.or_else(|| transcript.map(AssistantLanguage::detect)),
+        query: query.to_string(),
+        speak,
+    });
+
+    let daemon_roundtrip_started_at = Instant::now();
+    write_message(&mut stream, &request).await?;
+    let response: JobResult = read_message(&mut stream).await?;
+    let daemon_roundtrip_ms = elapsed_ms(daemon_roundtrip_started_at);
+
+    match response {
+        JobResult::ActionStatus {
+            message, spoken, ..
+        } => {
+            info!(
+                request_id = %request_id,
+                spoken,
+                daemon_roundtrip_ms,
+                total_ms = elapsed_ms(total_started_at),
+                "open document response received"
+            );
+            println!("{}", message);
+        }
+        JobResult::Error { code, message, .. } => {
+            anyhow::bail!("daemon returned error {code}: {message}");
+        }
+        JobResult::ClipboardText { .. }
+        | JobResult::BrowserQuery { .. }
+        | JobResult::DocumentStatus { .. } => {
+            anyhow::bail!("daemon returned unexpected response for open document");
         }
     }
 

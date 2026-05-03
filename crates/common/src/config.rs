@@ -642,6 +642,7 @@ fn default_speak_actions() -> Vec<String> {
         "SearchWeb".to_string(),
         "OpenApplication".to_string(),
         "OpenUrl".to_string(),
+        "OpenDocument".to_string(),
     ]
 }
 

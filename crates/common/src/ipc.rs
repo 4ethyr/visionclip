@@ -90,6 +90,15 @@ pub struct UrlOpenJob {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentOpenJob {
+    pub request_id: Uuid,
+    pub transcript: Option<String>,
+    pub input_language: Option<AssistantLanguage>,
+    pub query: String,
+    pub speak: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthCheckJob {
     pub request_id: Uuid,
 }
@@ -156,6 +165,7 @@ pub enum VisionRequest {
     DocumentControl(DocumentControlJob),
     DocumentAsk(DocumentAskJob),
     DocumentSummarize(DocumentSummarizeJob),
+    OpenDocument(DocumentOpenJob),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -368,6 +378,16 @@ mod tests {
             })),
             10
         );
+        assert_eq!(
+            encoded_variant_tag(&VisionRequest::OpenDocument(DocumentOpenJob {
+                request_id,
+                transcript: None,
+                input_language: None,
+                query: "Programming TypeScript".into(),
+                speak: false,
+            })),
+            11
+        );
     }
 
     #[test]
@@ -390,6 +410,31 @@ mod tests {
                 assert_eq!(job.label, "YouTube");
                 assert_eq!(job.url, "https://www.youtube.com/");
                 assert_eq!(job.input_language, Some(AssistantLanguage::English));
+                assert!(job.speak);
+            }
+            _ => panic!("unexpected decoded request"),
+        }
+    }
+
+    #[test]
+    fn open_document_request_roundtrips_through_bincode() {
+        let request_id = Uuid::new_v4();
+        let request = VisionRequest::OpenDocument(DocumentOpenJob {
+            request_id,
+            transcript: Some("Open the book Programming TypeScript".into()),
+            input_language: Some(AssistantLanguage::English),
+            query: "Programming TypeScript".into(),
+            speak: true,
+        });
+        let payload = encode_message_payload(&request).expect("encode open document");
+        let decoded: VisionRequest =
+            decode_message_payload(&payload).expect("decode open document");
+
+        match decoded {
+            VisionRequest::OpenDocument(job) => {
+                assert_eq!(job.request_id, request_id);
+                assert_eq!(job.input_language, Some(AssistantLanguage::English));
+                assert_eq!(job.query, "Programming TypeScript");
                 assert!(job.speak);
             }
             _ => panic!("unexpected decoded request"),

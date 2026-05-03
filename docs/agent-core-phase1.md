@@ -32,12 +32,13 @@ Principais módulos atuais:
 - `SessionManager` básico com contexto, histórico curto, documento atual e expiração.
 - `AuditLog` básico em memória com redaction de campos sensíveis.
 - `AgentOrchestrator` mínimo com planejamento determinístico para comandos simples e validação de tool calls.
-- O daemon agora valida e audita `open_application`, `open_url`, `search_web` e `capture_screen_context` antes da execução nativa.
+- O daemon agora valida e audita `open_application`, `open_url`, `open_document`, `search_web` e `capture_screen_context` antes da execução nativa.
 
 ## Revisão e continuação
 
 - `AgentTurn.policy` agora influencia a avaliação de cada turno.
 - `open_url` é bloqueado pelo `PermissionEngine` quando a URL não é `http://`/`https://`, contém whitespace/control chars ou usa esquemas como `javascript:`/`file:`.
+- `open_document` busca documentos/ebooks locais por título em diretórios usuais do usuário e abre apenas arquivos com extensões allowlistadas por launcher de desktop seguro.
 - `set_volume`, `set_brightness` e `toggle_vpn` foram registrados como tools de risco 3. Elas exigem confirmação e ainda não possuem executor nativo nesta fase.
 - Alterações de rede/VPN sempre exigem confirmação, mesmo quando o contexto é iniciado pelo usuário.
 - `visionclip-documents` adiciona loader TXT/Markdown/PDF textual, chunker, sessão de leitura e pipeline incremental traduzir -> TTS -> áudio com backpressure.

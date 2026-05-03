@@ -30,7 +30,7 @@ pub use intent::{IntentDetection, IntentKind};
 pub use ipc::{
     decode_message_payload, encode_message_payload, read_message, read_message_payload,
     write_message, Action, ApplicationLaunchJob, CaptureJob, DocumentAskJob, DocumentControlJob,
-    DocumentControlKind, DocumentIngestJob, DocumentReadJob, DocumentSummarizeJob,
+    DocumentControlKind, DocumentIngestJob, DocumentOpenJob, DocumentReadJob, DocumentSummarizeJob,
     DocumentTranslateJob, HealthCheckJob, JobResult, SessionType, UrlOpenJob, VisionRequest,
     VoiceSearchJob,
 };

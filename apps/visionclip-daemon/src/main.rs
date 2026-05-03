@@ -3,10 +3,12 @@ mod coddy_bridge;
 #[cfg(feature = "coddy-protocol")]
 mod coddy_contract;
 mod linux_apps;
+mod local_files;
 mod rendered_search;
 mod search;
 
 use crate::linux_apps::open_application;
+use crate::local_files::open_document_by_query;
 use crate::search::{GoogleSearchClient, SearchEnrichment};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -29,9 +31,10 @@ use visionclip_common::{
     decode_message_payload, normalize_latin_for_language, read_message_payload, redact_for_audit,
     write_message, Action, AppConfig, ApplicationLaunchJob, AssistantLanguage, AuditEvent,
     AuditLog, CaptureJob, DocumentAskJob, DocumentControlJob, DocumentControlKind,
-    DocumentIngestJob, DocumentReadJob, DocumentSummarizeJob, DocumentTranslateJob, HealthCheckJob,
-    JobResult, PermissionEngine, PolicyDecision, PolicyInput, RiskContext, RiskLevel, SessionId,
-    SessionManager, ToolCall, ToolRegistry, UrlOpenJob, VisionRequest, VoiceSearchJob,
+    DocumentIngestJob, DocumentOpenJob, DocumentReadJob, DocumentSummarizeJob,
+    DocumentTranslateJob, HealthCheckJob, JobResult, PermissionEngine, PolicyDecision, PolicyInput,
+    RiskContext, RiskLevel, SessionId, SessionManager, ToolCall, ToolRegistry, UrlOpenJob,
+    VisionRequest, VoiceSearchJob,
 };
 use visionclip_documents::{
     AudioCacheEntry, AudioCacheLookup, AudioCacheStore, AudioChunk, AudioSink, ChunkerConfig,
@@ -791,6 +794,7 @@ async fn process_request(state: &AppState, request: VisionRequest) -> Result<Job
         VisionRequest::VoiceSearch(job) => process_voice_search(state, job).await,
         VisionRequest::OpenApplication(job) => process_open_application(state, job).await,
         VisionRequest::OpenUrl(job) => process_open_url(state, job).await,
+        VisionRequest::OpenDocument(job) => process_open_document(state, job).await,
         VisionRequest::HealthCheck(job) => process_health_check(job).await,
         VisionRequest::DocumentIngest(job) => process_document_ingest(state, job).await,
         VisionRequest::DocumentTranslate(job) => process_document_translate(state, job).await,
@@ -994,6 +998,95 @@ async fn process_open_url(state: &AppState, job: UrlOpenJob) -> Result<JobResult
     })
 }
 
+async fn process_open_document(state: &AppState, job: DocumentOpenJob) -> Result<JobResult> {
+    let request_id = job.request_id;
+    let total_started_at = Instant::now();
+    let query = job.query.trim();
+    let speak_requested = state.config.action_should_speak("OpenDocument", job.speak)
+        || state
+            .config
+            .action_should_speak("OpenApplication", job.speak);
+    let session_id = ensure_request_session(state, request_id).await;
+
+    info!(
+        request_id = %request_id,
+        transcript = ?job.transcript,
+        input_language = ?job.input_language.map(|language| language.tts_language_code()),
+        query,
+        speak_requested,
+        "processing open document job"
+    );
+
+    let authorized_tool = authorize_tool_call(
+        state,
+        &session_id,
+        ToolCall::new(
+            format!("{request_id}-open-document"),
+            "open_document",
+            json!({"query": query, "max_results": 1}),
+        ),
+        RiskContext::user_initiated(),
+    )?;
+
+    let result = match open_document_by_query(query) {
+        Ok(result) => result,
+        Err(error) => {
+            record_tool_failed(
+                state,
+                &session_id,
+                &authorized_tool.name,
+                authorized_tool.risk_level,
+                &error.to_string(),
+            );
+            return Err(error);
+        }
+    };
+    let response_language =
+        response_language_from_input(job.input_language, job.transcript.as_deref());
+    let message = localized_open_document_message(response_language, &result.title);
+    record_tool_executed(
+        state,
+        &session_id,
+        &authorized_tool,
+        json!({
+            "query": query,
+            "path": result.path.display().to_string(),
+            "title": result.title,
+            "message": message
+        }),
+    );
+    let (tts_enqueue_ms, spoken) = enqueue_tts(
+        state.piper.as_ref(),
+        &state.tts_gate,
+        TtsEnqueueRequest {
+            request_id,
+            action_name: "OpenDocument",
+            text: &message,
+            fallback_text: None,
+            voice_id: tts_voice_for_response_language(&state.config, response_language),
+            requested: speak_requested,
+        },
+    );
+
+    let _ = notify("VisionClip", &message);
+
+    info!(
+        request_id = %request_id,
+        query,
+        path = %result.path.display(),
+        spoken,
+        tts_enqueue_ms,
+        total_ms = elapsed_ms(total_started_at),
+        "open document job completed"
+    );
+
+    Ok(JobResult::ActionStatus {
+        request_id,
+        message,
+        spoken,
+    })
+}
+
 fn response_language_from_transcript(transcript: Option<&str>) -> ResponseLanguage {
     ResponseLanguage::from_transcript(transcript)
 }
@@ -1073,6 +1166,35 @@ fn localized_open_url_message(language: ResponseLanguage, label: &str) -> String
                 format!("Abrindo {target}.")
             }
         }
+        ResponseLanguage::English => format!("Opening {target}."),
+        ResponseLanguage::Chinese => format!("正在打开{target}。"),
+        ResponseLanguage::Spanish => format!("Abriendo {target}."),
+        ResponseLanguage::Russian => format!("Открываю {target}."),
+        ResponseLanguage::Japanese => format!("{target}を開いています。"),
+        ResponseLanguage::Korean => format!("{target} 여는 중입니다."),
+        ResponseLanguage::Hindi => format!("{target} खोल रहा हूँ।"),
+    }
+}
+
+fn localized_open_document_message(language: ResponseLanguage, title: &str) -> String {
+    let target = if title.trim().is_empty() {
+        match language {
+            ResponseLanguage::PortugueseBrazil => "o documento",
+            ResponseLanguage::English => "the document",
+            ResponseLanguage::Chinese => "文档",
+            ResponseLanguage::Spanish => "el documento",
+            ResponseLanguage::Russian => "документ",
+            ResponseLanguage::Japanese => "ドキュメント",
+            ResponseLanguage::Korean => "문서",
+            ResponseLanguage::Hindi => "दस्तावेज़",
+        }
+        .to_string()
+    } else {
+        title.trim().to_string()
+    };
+
+    match language {
+        ResponseLanguage::PortugueseBrazil => format!("Abrindo {target}."),
         ResponseLanguage::English => format!("Opening {target}."),
         ResponseLanguage::Chinese => format!("正在打开{target}。"),
         ResponseLanguage::Spanish => format!("Abriendo {target}."),
@@ -3822,6 +3944,10 @@ mod tests {
         assert_eq!(
             localized_open_url_message(ResponseLanguage::English, "YouTube"),
             "Opening YouTube."
+        );
+        assert_eq!(
+            localized_open_document_message(ResponseLanguage::English, "Programming TypeScript"),
+            "Opening Programming TypeScript."
         );
     }
 

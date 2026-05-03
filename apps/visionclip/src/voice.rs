@@ -37,6 +37,11 @@ pub enum VoiceAgentCommand {
         language: AssistantLanguage,
         app_name: String,
     },
+    OpenDocument {
+        transcript: String,
+        language: AssistantLanguage,
+        query: String,
+    },
     OpenUrl {
         transcript: String,
         language: AssistantLanguage,
@@ -100,6 +105,14 @@ pub async fn resolve_voice_agent_command(
             capture_and_transcribe(config).await?
         };
     let language = AssistantLanguage::detect(&transcript);
+
+    if let Some(query) = resolve_open_document_query_from_transcript(&transcript) {
+        return Ok(VoiceAgentCommand::OpenDocument {
+            transcript,
+            language,
+            query,
+        });
+    }
 
     if let Some(target) = resolve_open_target_from_transcript(&transcript) {
         return match target {
@@ -609,6 +622,329 @@ fn resolve_search_query_from_transcript(transcript: &str) -> Result<String> {
     }
 
     Ok(query)
+}
+
+fn resolve_open_document_query_from_transcript(transcript: &str) -> Option<String> {
+    let raw = transcript.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let normalized = normalize_transcript(raw);
+    if normalized.is_empty() {
+        return None;
+    }
+
+    extract_document_subject_from_specific_prefix(raw, &normalized)
+        .or_else(|| extract_document_subject_from_generic_open(raw, &normalized))
+        .or_else(|| extract_document_subject_from_non_latin_command(raw, &normalized))
+        .and_then(|query| clean_document_query(&query))
+}
+
+#[cfg(test)]
+fn resolve_open_document_from_transcript(transcript: &str) -> Option<String> {
+    resolve_open_document_query_from_transcript(transcript)
+}
+
+fn extract_document_subject_from_specific_prefix(raw: &str, normalized: &str) -> Option<String> {
+    let prefixes = [
+        "por favor abra o livro",
+        "por favor abra o ebook",
+        "por favor abra o documento",
+        "por favor abra o arquivo",
+        "abra o livro",
+        "abra o ebook",
+        "abra o documento",
+        "abra o arquivo",
+        "abra livro",
+        "abra ebook",
+        "abra documento",
+        "abra arquivo",
+        "abrir o livro",
+        "abrir o documento",
+        "abre o livro",
+        "abre o documento",
+        "open the book",
+        "open book",
+        "open the ebook",
+        "open ebook",
+        "open the document",
+        "open document",
+        "open the file",
+        "open file",
+        "find and open the book",
+        "find and open the document",
+        "locate and open the book",
+        "abre el libro",
+        "abre libro",
+        "abrir el libro",
+        "abre el documento",
+        "abre documento",
+        "abrir el documento",
+        "открой книгу",
+        "открой документ",
+        "открой файл",
+        "запусти книгу",
+        "खोलो किताब",
+        "किताब खोलो",
+        "दस्तावेज खोलो",
+    ];
+
+    for prefix in prefixes {
+        if normalized == prefix {
+            return Some(String::new());
+        }
+        if normalized_prefix_match(normalized, prefix) {
+            return Some(raw_suffix_after_normalized_prefix(raw, prefix));
+        }
+    }
+
+    None
+}
+
+fn extract_document_subject_from_generic_open(raw: &str, normalized: &str) -> Option<String> {
+    for prefix in [
+        "open the",
+        "open",
+        "abra o",
+        "abra a",
+        "abra",
+        "abre o",
+        "abre a",
+        "abre",
+        "abrir o",
+        "abrir a",
+        "abrir",
+        "abre el",
+        "abre la",
+        "abrir el",
+        "abrir la",
+        "открой",
+    ] {
+        if normalized_prefix_match(normalized, prefix) {
+            let subject = raw_suffix_after_normalized_prefix(raw, prefix);
+            if document_query_has_marker(&normalize_transcript(&subject)) {
+                return Some(subject);
+            }
+        }
+    }
+    None
+}
+
+fn extract_document_subject_from_non_latin_command(raw: &str, normalized: &str) -> Option<String> {
+    let has_open_marker = [
+        "打开",
+        "打開",
+        "开启",
+        "開啟",
+        "開いて",
+        "開く",
+        "열어",
+        "열기",
+        "खोलो",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker));
+    if !has_open_marker || !document_query_has_marker(normalized) {
+        return None;
+    }
+
+    let mut value = raw.to_string();
+    for marker in [
+        "请打开",
+        "請打開",
+        "打开",
+        "打開",
+        "开启",
+        "開啟",
+        "这本书",
+        "這本書",
+        "本书",
+        "本書",
+        "书籍",
+        "書籍",
+        "电子书",
+        "電子書",
+        "文档",
+        "文件",
+        "書類",
+        "ドキュメント",
+        "を開いて",
+        "開いて",
+        "開く",
+        "열어줘",
+        "열어",
+        "열기",
+        "책",
+        "문서",
+        "파일",
+        "किताब",
+        "पुस्तक",
+        "दस्तावेज",
+        "फ़ाइल",
+        "फाइल",
+        "खोलो",
+    ] {
+        value = value.replace(marker, " ");
+    }
+    Some(value)
+}
+
+fn raw_suffix_after_normalized_prefix(raw: &str, prefix: &str) -> String {
+    let prefix_len = prefix.chars().count();
+    let start = raw
+        .char_indices()
+        .nth(prefix_len)
+        .map(|(index, _)| index)
+        .unwrap_or(raw.len());
+    raw[start..].to_string()
+}
+
+fn document_query_has_marker(normalized: &str) -> bool {
+    let tokens = normalized.split_whitespace().collect::<Vec<_>>();
+    if tokens.iter().any(|token| {
+        matches!(
+            *token,
+            "book"
+                | "ebook"
+                | "document"
+                | "file"
+                | "livro"
+                | "documento"
+                | "arquivo"
+                | "libro"
+                | "archivo"
+                | "книга"
+                | "книгу"
+                | "документ"
+                | "файл"
+                | "책"
+                | "문서"
+                | "파일"
+                | "किताब"
+                | "पुस्तक"
+                | "दस्तावेज"
+                | "फाइल"
+                | "फ़ाइल"
+        )
+    }) {
+        return true;
+    }
+
+    let compact = compact_normalized(normalized);
+    [
+        "书",
+        "書",
+        "书籍",
+        "書籍",
+        "文档",
+        "文件",
+        "本",
+        "ドキュメント",
+        "書類",
+    ]
+    .iter()
+    .any(|marker| compact.contains(marker))
+}
+
+fn clean_document_query(subject: &str) -> Option<String> {
+    let mut value = subject
+        .trim()
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '.' | ',' | ';' | ':'))
+        .to_string();
+    if value.is_empty() {
+        return None;
+    }
+
+    for qualifier in [
+        "the book",
+        "the ebook",
+        "the document",
+        "the file",
+        "book",
+        "ebook",
+        "document",
+        "file",
+        "o livro",
+        "o ebook",
+        "o documento",
+        "o arquivo",
+        "livro",
+        "documento",
+        "arquivo",
+        "el libro",
+        "el documento",
+        "el archivo",
+        "libro",
+        "documento",
+        "archivo",
+        "книгу",
+        "книга",
+        "документ",
+        "файл",
+    ] {
+        let normalized = normalize_transcript(&value);
+        if normalized == qualifier {
+            return None;
+        }
+        if normalized
+            .strip_prefix(qualifier)
+            .is_some_and(|rest| rest.starts_with(' '))
+        {
+            value = value_after_normalized_prefix(&value, qualifier);
+            break;
+        }
+    }
+
+    for qualifier in [
+        "the book",
+        "the ebook",
+        "the document",
+        "the file",
+        "book",
+        "ebook",
+        "document",
+        "file",
+        "livro",
+        "documento",
+        "arquivo",
+        "libro",
+        "archivo",
+        "книгу",
+        "книга",
+        "документ",
+        "файл",
+    ] {
+        let normalized = normalize_transcript(&value);
+        if normalized
+            .strip_suffix(qualifier)
+            .is_some_and(|rest| rest.ends_with(' '))
+        {
+            let keep_chars = normalized.chars().count() - qualifier.chars().count();
+            let end = value
+                .char_indices()
+                .nth(keep_chars)
+                .map(|(index, _)| index)
+                .unwrap_or(value.len());
+            value = value[..end].trim_end().to_string();
+            break;
+        }
+    }
+
+    let value = value
+        .trim()
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '.' | ',' | ';' | ':'))
+        .to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn value_after_normalized_prefix(value: &str, prefix: &str) -> String {
+    let prefix_len = prefix.chars().count();
+    let start = value
+        .char_indices()
+        .nth(prefix_len)
+        .map(|(index, _)| index)
+        .unwrap_or(value.len());
+    value[start..].trim_start().to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1470,6 +1806,76 @@ mod tests {
         for (transcript, expected_app) in cases {
             let app_name = resolve_open_application_from_transcript(transcript).unwrap();
             assert_eq!(app_name, expected_app);
+        }
+    }
+
+    #[test]
+    fn resolves_open_document_phrases() {
+        let cases = [
+            (
+                "abra o livro Programming TypeScript",
+                "Programming TypeScript",
+            ),
+            (
+                "Open the book Programming TypeScript",
+                "Programming TypeScript",
+            ),
+            ("open Programming TypeScript book", "Programming TypeScript"),
+            (
+                "abre el libro Programming TypeScript",
+                "Programming TypeScript",
+            ),
+            (
+                "открой книгу Programming TypeScript",
+                "Programming TypeScript",
+            ),
+            (
+                "打开 Programming TypeScript 这本书",
+                "Programming TypeScript",
+            ),
+            ("Programming TypeScript 책 열어줘", "Programming TypeScript"),
+        ];
+
+        for (transcript, expected_query) in cases {
+            let query = resolve_open_document_from_transcript(transcript).unwrap();
+            assert_eq!(query, expected_query);
+        }
+    }
+
+    #[test]
+    fn open_document_detection_does_not_steal_websites_or_apps() {
+        assert!(resolve_open_document_from_transcript("open facebook").is_none());
+        assert!(resolve_open_document_from_transcript("open the terminal").is_none());
+    }
+
+    #[tokio::test]
+    async fn voice_agent_prefers_open_document_intent() {
+        let config = VoiceConfig {
+            enabled: false,
+            backend: "auto".into(),
+            target: String::new(),
+            overlay_enabled: true,
+            shortcut: "<Super>F12".into(),
+            record_duration_ms: 4_000,
+            sample_rate_hz: 16_000,
+            channels: 1,
+            record_command: String::new(),
+            transcribe_command: String::new(),
+            transcribe_timeout_ms: 60_000,
+        };
+
+        let command =
+            resolve_voice_agent_command(&config, Some("Open the book Programming TypeScript"))
+                .await
+                .unwrap();
+        match command {
+            VoiceAgentCommand::OpenDocument {
+                query, language, ..
+            } => {
+                assert_eq!(query, "Programming TypeScript");
+                assert_eq!(language, AssistantLanguage::English);
+            }
+            other => panic!("unexpected voice agent command: {other:?}"),
         }
     }
 
