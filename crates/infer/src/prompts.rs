@@ -33,13 +33,18 @@ pub fn system_prompt(policy: PromptPolicy) -> &'static str {
         PromptPolicy::StrictOcr => "Extraia apenas o texto visível da captura. Nao converse. Nao explique. Preserve ordem, quebras de linha, simbolos e numeros exatamente como aparecem.",
         PromptPolicy::StrictCode => "Retorne somente o codigo ou comando visivel. Preserve indentacao, nomes, simbolos, flags e pontuacao. Nao use markdown, nao use cercas ``` e nao adicione explicacoes.",
         PromptPolicy::TechnicalTranslatePtBr => "Voce traduz texto de captura para PT-BR claro. Responda somente com a traducao final. Nao mencione OCR, tarefa, captura ou instrucoes. Preserve comandos, codigo, flags, caminhos, URLs, nomes de arquivo, APIs e identificadores literais. Ignore marcadores decorativos de markdown como #, **, >, -, _ e crases quando forem apenas formatacao.",
-        PromptPolicy::TechnicalExplainShort => "Voce explica conteudo tecnico em PT-BR curto e util. Responda somente com a explicacao final, em ate 4 frases curtas. Se for codigo, explique objetivo e comportamento. Se for terminal ou log, destaque erro principal, causa provavel e proxima verificacao. Se for texto natural, documento, dashboard ou UI, resuma o significado. Nao mencione OCR, tarefa, captura ou instrucoes. Nao recite simbolos decorativos.",
+        PromptPolicy::TechnicalExplainShort => "Voce explica conteudo tecnico no idioma solicitado, de forma curta e util. Se nenhum idioma for solicitado, use PT-BR. Responda somente com a explicacao final, em ate 4 frases curtas. Se for codigo, explique objetivo e comportamento. Se for terminal ou log, destaque erro principal, causa provavel e proxima verificacao. Se for texto natural, documento, dashboard ou UI, resuma o significado. Nao mencione OCR, tarefa, captura ou instrucoes. Nao recite simbolos decorativos.",
         PromptPolicy::SearchQueryBuilder => "Voce gera uma unica consulta curta para pesquisa web. Responda somente com a query final, em uma unica linha. Se a captura for tecnica, priorize produto, biblioteca, comando, arquivo, erro, sintoma e pistas de terminal ou log. Se a captura for geral, priorize assunto principal, pergunta do usuario, nomes proprios, pessoa, lugar, servico, organizacao, evento, data e termos centrais do tema. Preserve siglas e entidades uteis. Ignore marcadores decorativos de markdown. Nao use aspas, markdown ou comentarios.",
     }
 }
 
-pub fn user_prompt(action: &Action, source_app: Option<&str>) -> String {
+pub fn user_prompt(
+    action: &Action,
+    source_app: Option<&str>,
+    response_language: Option<&str>,
+) -> String {
     let context = source_app_context(source_app);
+    let response_language = response_language_instruction(action, response_language);
 
     match action {
         Action::CopyText => format!("{context}Extraia todo o texto desta captura."),
@@ -50,7 +55,7 @@ pub fn user_prompt(action: &Action, source_app: Option<&str>) -> String {
             "{context}Traduza para PT-BR o texto humano relevante desta captura. Se for documento ou interface, preserve o sentido completo. Se houver codigo, log ou terminal, preserve literais tecnicos. Ignore marcadores decorativos de markdown e devolva texto simples e legivel."
         ),
         Action::Explain => format!(
-            "{context}Explique tecnicamente o que aparece nesta captura. Se for codigo, explique objetivo e comportamento. Se for terminal ou log, destaque erro e proxima acao util. Se for documento, painel ou interface, resuma significado e pontos relevantes."
+            "{context}{response_language}Explique tecnicamente o que aparece nesta captura. Se for codigo, explique objetivo e comportamento. Se for terminal ou log, destaque erro e proxima acao util. Se for documento, painel ou interface, resuma significado e pontos relevantes."
         ),
         Action::SearchWeb => format!(
             "{context}Gere a melhor consulta unica para pesquisar o assunto principal desta captura. Se for conteudo tecnico, priorize erro, produto, biblioteca, nome de arquivo, comando e sintoma. Se for conteudo geral, preserve pergunta principal, topico central, nomes proprios, pessoa, lugar, servico, organizacao, evento, data ou idioma relevante. Ignore chrome visual da pagina e ruído decorativo."
@@ -58,8 +63,14 @@ pub fn user_prompt(action: &Action, source_app: Option<&str>) -> String {
     }
 }
 
-pub fn user_prompt_from_text(action: &Action, source_app: Option<&str>, ocr_text: &str) -> String {
+pub fn user_prompt_from_text(
+    action: &Action,
+    source_app: Option<&str>,
+    response_language: Option<&str>,
+    ocr_text: &str,
+) -> String {
     let context = source_app_context(source_app);
+    let response_language = response_language_instruction(action, response_language);
     let language_hint = ocr_language_hint(ocr_text);
     let profile_hint = ocr_profile_hint(ocr_text);
     let profile_guidance = ocr_profile_guidance(action, ocr_text);
@@ -76,12 +87,25 @@ pub fn user_prompt_from_text(action: &Action, source_app: Option<&str>, ocr_text
             "{context}{language_hint}{profile_hint}{profile_guidance}Traduza o texto OCR para portugues do Brasil.\nResponda somente com a traducao final.\nNao mencione OCR, captura, tarefa ou instrucao.\nPreserve siglas, nomes proprios, comandos, codigo, caminhos, URLs, APIs, flags e identificadores.\nIgnore #, **, >, -, _, crases e outros marcadores quando forem apenas formatacao.\nSe o texto estiver em outro idioma, entregue uma traducao natural e completa, nao apenas palavras-chave soltas.\nSe houver ruido leve de OCR, escolha a leitura mais provavel sem inventar conteudo novo.\n\nOCR:\n{text_block}"
         ),
         Action::Explain => format!(
-            "{context}{language_hint}{profile_hint}{profile_guidance}Explique em PT-BR o conteudo do OCR.\nResponda somente com a explicacao final.\nUse no maximo 4 frases curtas.\nSe for texto natural, documento ou UI, resuma o significado.\nSe for terminal ou log, destaque erro, causa provavel e proxima verificacao.\nSe for codigo, diga objetivo, tecnologia aparente e comportamento principal.\nNao mencione OCR, captura, tarefa ou instrucao.\nNao recite simbolos decorativos como #, **, >, -, _, crases ou cercas de markdown.\nNao devolva apenas palavras-chave desconexas; explique o sentido central do conteudo.\n\nOCR:\n{text_block}"
+            "{context}{language_hint}{profile_hint}{profile_guidance}{response_language}Explique o conteudo do OCR.\nResponda somente com a explicacao final.\nUse no maximo 4 frases curtas.\nSe for texto natural, documento ou UI, resuma o significado.\nSe for terminal ou log, destaque erro, causa provavel e proxima verificacao.\nSe for codigo, diga objetivo, tecnologia aparente e comportamento principal.\nNao mencione OCR, captura, tarefa ou instrucao.\nNao recite simbolos decorativos como #, **, >, -, _, crases ou cercas de markdown.\nNao devolva apenas palavras-chave desconexas; explique o sentido central do conteudo.\n\nOCR:\n{text_block}"
         ),
         Action::SearchWeb => format!(
             "{context}{language_hint}{profile_hint}{profile_guidance}Gere uma unica consulta curta para pesquisa web.\nResponda somente com a consulta final, em uma unica linha.\nSe for erro tecnico, priorize produto, biblioteca, comando, arquivo e sintoma.\nSe for texto natural, documento, pagina informativa ou pergunta geral, priorize o assunto central, pergunta principal, nomes proprios, pessoa, lugar, servico, organizacao, evento, data e termos essenciais.\nSe o texto estiver em outro idioma, preserve palavras-chave fortes e nomes proprios uteis para a busca.\nRemova marcacao decorativa e mantenha apenas sintaxe que muda o significado tecnico.\nNao mencione OCR, captura, tarefa ou instrucao.\nNao use aspas ou markdown.\n\nOCR:\n{text_block}"
         ),
     }
+}
+
+fn response_language_instruction(action: &Action, response_language: Option<&str>) -> String {
+    if !matches!(action, Action::Explain) {
+        return String::new();
+    }
+
+    let language = response_language
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Portuguese (Brazil)");
+
+    format!("Idioma da resposta: {language}. ")
 }
 
 pub fn search_answer_system_prompt() -> &'static str {
@@ -439,8 +463,18 @@ mod tests {
 
     #[test]
     fn user_prompt_includes_source_app_context_when_available() {
-        let prompt = user_prompt(&Action::Explain, Some("org.gnome.Terminal"));
+        let prompt = user_prompt(&Action::Explain, Some("org.gnome.Terminal"), None);
         assert!(prompt.contains("org.gnome.Terminal"));
+    }
+
+    #[test]
+    fn explain_prompts_include_requested_response_language() {
+        let image_prompt = user_prompt(&Action::Explain, None, Some("English"));
+        assert!(image_prompt.contains("Idioma da resposta: English"));
+
+        let text_prompt =
+            user_prompt_from_text(&Action::Explain, None, Some("Chinese"), "error: failed");
+        assert!(text_prompt.contains("Idioma da resposta: Chinese"));
     }
 
     #[test]
@@ -448,6 +482,7 @@ mod tests {
         let prompt = user_prompt_from_text(
             &Action::Explain,
             Some("org.gnome.Terminal"),
+            None,
             "error: daemon.sock not found",
         );
         assert!(prompt.contains("OCR"));
@@ -460,6 +495,7 @@ mod tests {
         let prompt = user_prompt_from_text(
             &Action::Explain,
             None,
+            None,
             "17の外国語で放送しています。短波、FM、中波や衛星ラジオによる送信。",
         );
         assert!(prompt.contains("texto natural"));
@@ -470,6 +506,7 @@ mod tests {
         let prompt = user_prompt_from_text(
             &Action::Explain,
             None,
+            None,
             "fn main() {\n    println!(\"hello\");\n}",
         );
         assert!(prompt.contains("codigo ou configuracao"));
@@ -477,8 +514,12 @@ mod tests {
 
     #[test]
     fn translate_prompt_mentions_cjk_language_hint() {
-        let prompt =
-            user_prompt_from_text(&Action::TranslatePtBr, None, "17の外国語で放送しています。");
+        let prompt = user_prompt_from_text(
+            &Action::TranslatePtBr,
+            None,
+            None,
+            "17の外国語で放送しています。",
+        );
         assert!(prompt.contains("japones ou outro idioma CJK"));
         assert!(prompt.contains("traducao natural e completa"));
     }
@@ -487,6 +528,7 @@ mod tests {
     fn explain_prompt_mentions_dashboard_guidance() {
         let prompt = user_prompt_from_text(
             &Action::Explain,
+            None,
             None,
             "Total CVEs\n0\nCritical\n0\nHigh\n0\nAvg CVSS\nN/A",
         );
@@ -499,6 +541,7 @@ mod tests {
         let prompt = user_prompt_from_text(
             &Action::TranslatePtBr,
             None,
+            None,
             "Сервис для граждан за рубежом",
         );
         assert!(prompt.contains("alfabeto cirilico"));
@@ -509,6 +552,7 @@ mod tests {
         let prompt = user_prompt_from_text(
             &Action::SearchWeb,
             Some("firefox"),
+            None,
             "Serviço para cidadãos japoneses no exterior com transmissão de notícias em 17 idiomas.",
         );
         assert!(prompt.contains("pergunta principal"));

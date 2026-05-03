@@ -159,6 +159,7 @@ pub async fn wait_for_rendered_ai_overview(
                 request_id: format!("{}-rendered-ai-overview-{attempts}", job.request_id),
                 action: Action::CopyText,
                 source_app: Some("rendered_search".to_string()),
+                response_language: None,
                 image_bytes: capture.bytes,
                 mime_type: "image/png".to_string(),
             })

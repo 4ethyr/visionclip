@@ -816,6 +816,7 @@ async fn process_open_application(
     info!(
         request_id = %request_id,
         transcript = ?job.transcript,
+        input_language = ?job.input_language.map(|language| language.tts_language_code()),
         app_name,
         speak_requested,
         "processing open application job"
@@ -845,7 +846,8 @@ async fn process_open_application(
             return Err(error);
         }
     };
-    let response_language = response_language_from_transcript(job.transcript.as_deref());
+    let response_language =
+        response_language_from_input(job.input_language, job.transcript.as_deref());
     let message = localized_open_application_message(
         response_language,
         app_name,
@@ -926,6 +928,7 @@ async fn process_open_url(state: &AppState, job: UrlOpenJob) -> Result<JobResult
     info!(
         request_id = %request_id,
         transcript = ?job.transcript,
+        input_language = ?job.input_language.map(|language| language.tts_language_code()),
         label,
         url,
         speak_requested,
@@ -942,7 +945,8 @@ async fn process_open_url(state: &AppState, job: UrlOpenJob) -> Result<JobResult
         );
         return Err(error);
     }
-    let response_language = response_language_from_transcript(job.transcript.as_deref());
+    let response_language =
+        response_language_from_input(job.input_language, job.transcript.as_deref());
     let message = localized_open_url_message(response_language, label);
     record_tool_executed(
         state,
@@ -984,6 +988,13 @@ async fn process_open_url(state: &AppState, job: UrlOpenJob) -> Result<JobResult
 
 fn response_language_from_transcript(transcript: Option<&str>) -> ResponseLanguage {
     ResponseLanguage::from_transcript(transcript)
+}
+
+fn response_language_from_input(
+    input_language: Option<ResponseLanguage>,
+    transcript: Option<&str>,
+) -> ResponseLanguage {
+    input_language.unwrap_or_else(|| response_language_from_transcript(transcript))
 }
 
 fn response_language_from_document_target(target_language: &str) -> ResponseLanguage {
@@ -1518,6 +1529,7 @@ async fn process_document_ask(state: &AppState, job: DocumentAskJob) -> Result<J
             request_id: format!("{request_id}-document-ask"),
             action: Action::Explain,
             source_app: Some("document".to_string()),
+            response_language: None,
             text: prompt,
         })
         .await?;
@@ -1619,6 +1631,7 @@ async fn process_document_summarize(
             request_id: format!("{request_id}-document-summary"),
             action: Action::Explain,
             source_app: Some("document".to_string()),
+            response_language: None,
             text: prompt,
         })
         .await?;
@@ -2207,6 +2220,7 @@ impl coddy_bridge::ReplNativeServices for DaemonReplNativeServices {
                 state,
                 ApplicationLaunchJob {
                     request_id,
+                    input_language: Some(ResponseLanguage::detect(&transcript)),
                     transcript: Some(transcript),
                     app_name,
                     speak,
@@ -2230,6 +2244,7 @@ impl coddy_bridge::ReplNativeServices for DaemonReplNativeServices {
                 state,
                 UrlOpenJob {
                     request_id,
+                    input_language: Some(ResponseLanguage::detect(&transcript)),
                     transcript: Some(transcript),
                     label,
                     url,
@@ -2253,6 +2268,7 @@ impl coddy_bridge::ReplNativeServices for DaemonReplNativeServices {
                 state,
                 VoiceSearchJob {
                     request_id,
+                    input_language: Some(ResponseLanguage::detect(&transcript)),
                     transcript,
                     query,
                     speak,
@@ -2366,29 +2382,36 @@ fn record_provider_selected(
 async fn run_provider_chat(
     state: &AppState,
     session_id: &SessionId,
-    request_id: String,
-    action: Action,
-    source_app: Option<String>,
-    text: String,
     operation: &str,
+    job: ProviderChatJob,
 ) -> Result<ChatResponse> {
     let provider =
         route_sensitive_local_provider(state, Some(session_id), AiTask::Chat, operation).await?;
     provider
         .provider
         .chat(ChatRequest {
-            request_id,
-            action,
-            source_app,
-            text,
+            request_id: job.request_id,
+            action: job.action,
+            source_app: job.source_app,
+            response_language: job.response_language,
+            text: job.text,
         })
         .await
+}
+
+struct ProviderChatJob {
+    request_id: String,
+    action: Action,
+    source_app: Option<String>,
+    response_language: Option<String>,
+    text: String,
 }
 
 struct ProviderVisionJob {
     request_id: String,
     action: Action,
     source_app: Option<String>,
+    response_language: Option<String>,
     image_bytes: Vec<u8>,
     mime_type: String,
 }
@@ -2405,6 +2428,7 @@ async fn run_provider_vision(
         request_id: job.request_id,
         action: job.action,
         source_app: job.source_app,
+        response_language: job.response_language,
         image_bytes: job.image_bytes,
         mime_type: job.mime_type,
     };
@@ -2634,9 +2658,15 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
     let request_id = job.request_id;
     let action_name = job.action.as_str();
     let total_started_at = Instant::now();
+    let response_language =
+        response_language_from_input(job.input_language, job.transcript.as_deref());
+    let response_language_label = response_language.prompt_label().to_string();
     info!(
         request_id = %request_id,
         action = action_name,
+        transcript = ?job.transcript,
+        input_language = ?job.input_language.map(|language| language.tts_language_code()),
+        response_language = response_language.tts_language_code(),
         image_bytes = job.image_bytes.len(),
         speak_requested = job.speak,
         "processing capture job"
@@ -2673,6 +2703,7 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                 request_id: request_id.to_string(),
                 action: ocr_action,
                 source_app: job.source_app.clone(),
+                response_language: None,
                 image_bytes: job.image_bytes.clone(),
                 mime_type: job.mime_type.clone(),
             },
@@ -2716,6 +2747,7 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                         request_id: request_id.to_string(),
                         action: job.action.clone(),
                         source_app: job.source_app.clone(),
+                        response_language: Some(response_language_label.clone()),
                         image_bytes: job.image_bytes.clone(),
                         mime_type: job.mime_type.clone(),
                     },
@@ -2730,11 +2762,14 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                 match run_provider_chat(
                     state,
                     &session_id,
-                    request_id.to_string(),
-                    job.action.clone(),
-                    job.source_app.clone(),
-                    text,
                     "capture.ocr_text_to_reasoning",
+                    ProviderChatJob {
+                        request_id: request_id.to_string(),
+                        action: job.action.clone(),
+                        source_app: job.source_app.clone(),
+                        response_language: Some(response_language_label.clone()),
+                        text,
+                    },
                 )
                 .await
                 {
@@ -2757,6 +2792,7 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                                 request_id: request_id.to_string(),
                                 action: job.action.clone(),
                                 source_app: job.source_app.clone(),
+                                response_language: Some(response_language_label.clone()),
                                 image_bytes: job.image_bytes.clone(),
                                 mime_type: job.mime_type.clone(),
                             },
@@ -2781,6 +2817,7 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                                 request_id: request_id.to_string(),
                                 action: job.action.clone(),
                                 source_app: job.source_app.clone(),
+                                response_language: Some(response_language_label.clone()),
                                 image_bytes: job.image_bytes.clone(),
                                 mime_type: job.mime_type.clone(),
                             },
@@ -2799,6 +2836,7 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                         request_id: request_id.to_string(),
                         action: job.action.clone(),
                         source_app: job.source_app.clone(),
+                        response_language: Some(response_language_label.clone()),
                         image_bytes: job.image_bytes.clone(),
                         mime_type: job.mime_type.clone(),
                     },
@@ -2824,7 +2862,7 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                 state,
                 request_id,
                 &cleaned,
-                ResponseLanguage::PortugueseBrazil,
+                response_language,
                 speak_requested,
                 total_started_at,
             )
@@ -2939,13 +2977,15 @@ async fn process_voice_search(state: &AppState, job: VoiceSearchJob) -> Result<J
         request_id = %request_id,
         action = action_name,
         transcript = %job.transcript,
+        input_language = ?job.input_language.map(|language| language.tts_language_code()),
         query = %cleaned,
         speak_requested = job.speak,
         "processing voice search job"
     );
 
     let speak_requested = state.config.action_should_speak(action_name, job.speak);
-    let response_language = ResponseLanguage::detect(&job.transcript);
+    let response_language =
+        response_language_from_input(job.input_language, Some(job.transcript.as_str()));
     let search_result = execute_search_query(
         state,
         request_id,
@@ -3707,6 +3747,21 @@ mod tests {
         assert_eq!(
             ResponseLanguage::detect("открой терминал"),
             ResponseLanguage::Russian
+        );
+    }
+
+    #[test]
+    fn input_language_metadata_overrides_transcript_detection() {
+        assert_eq!(
+            response_language_from_input(
+                Some(ResponseLanguage::Chinese),
+                Some("open the terminal")
+            ),
+            ResponseLanguage::Chinese
+        );
+        assert_eq!(
+            response_language_from_input(None, Some("open the terminal")),
+            ResponseLanguage::English
         );
     }
 

@@ -13,18 +13,20 @@ use tokio::{
 };
 use tracing::{info, warn};
 use uuid::Uuid;
-use visionclip_common::{config::VoiceConfig, Action};
+use visionclip_common::{config::VoiceConfig, Action, AssistantLanguage};
 use which::which;
 
 #[derive(Debug, Clone)]
 pub struct VoiceRequest {
     pub transcript: String,
+    pub language: AssistantLanguage,
     pub action: Action,
 }
 
 #[derive(Debug, Clone)]
 pub struct VoiceSearch {
     pub transcript: String,
+    pub language: AssistantLanguage,
     pub query: String,
 }
 
@@ -32,15 +34,18 @@ pub struct VoiceSearch {
 pub enum VoiceAgentCommand {
     OpenApplication {
         transcript: String,
+        language: AssistantLanguage,
         app_name: String,
     },
     OpenUrl {
         transcript: String,
+        language: AssistantLanguage,
         label: String,
         url: String,
     },
     SearchWeb {
         transcript: String,
+        language: AssistantLanguage,
         query: String,
     },
 }
@@ -57,7 +62,12 @@ pub async fn resolve_voice_request(
         };
 
     let action = resolve_action_from_transcript(&transcript)?;
-    Ok(VoiceRequest { transcript, action })
+    let language = AssistantLanguage::detect(&transcript);
+    Ok(VoiceRequest {
+        transcript,
+        language,
+        action,
+    })
 }
 
 pub async fn resolve_voice_search(
@@ -70,8 +80,13 @@ pub async fn resolve_voice_search(
         } else {
             capture_and_transcribe(config).await?
         };
+    let language = AssistantLanguage::detect(&transcript);
     let query = resolve_search_query_from_transcript(&transcript)?;
-    Ok(VoiceSearch { transcript, query })
+    Ok(VoiceSearch {
+        transcript,
+        language,
+        query,
+    })
 }
 
 pub async fn resolve_voice_agent_command(
@@ -84,15 +99,18 @@ pub async fn resolve_voice_agent_command(
         } else {
             capture_and_transcribe(config).await?
         };
+    let language = AssistantLanguage::detect(&transcript);
 
     if let Some(target) = resolve_open_target_from_transcript(&transcript) {
         return match target {
             VoiceOpenTarget::Application(app_name) => Ok(VoiceAgentCommand::OpenApplication {
                 transcript,
+                language,
                 app_name,
             }),
             VoiceOpenTarget::Url { label, url } => Ok(VoiceAgentCommand::OpenUrl {
                 transcript,
+                language,
                 label,
                 url,
             }),
@@ -100,7 +118,11 @@ pub async fn resolve_voice_agent_command(
     }
 
     let query = resolve_search_query_from_transcript(&transcript)?;
-    Ok(VoiceAgentCommand::SearchWeb { transcript, query })
+    Ok(VoiceAgentCommand::SearchWeb {
+        transcript,
+        language,
+        query,
+    })
 }
 
 async fn capture_and_transcribe(config: &VoiceConfig) -> Result<String> {

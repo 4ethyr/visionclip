@@ -1,4 +1,5 @@
 use crate::error::AppResult;
+use crate::language::AssistantLanguage;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -51,6 +52,8 @@ pub enum SessionType {
 pub struct CaptureJob {
     pub request_id: Uuid,
     pub action: Action,
+    pub transcript: Option<String>,
+    pub input_language: Option<AssistantLanguage>,
     pub mime_type: String,
     pub image_bytes: Vec<u8>,
     pub session_type: SessionType,
@@ -62,6 +65,7 @@ pub struct CaptureJob {
 pub struct VoiceSearchJob {
     pub request_id: Uuid,
     pub transcript: String,
+    pub input_language: Option<AssistantLanguage>,
     pub query: String,
     pub speak: bool,
 }
@@ -70,6 +74,7 @@ pub struct VoiceSearchJob {
 pub struct ApplicationLaunchJob {
     pub request_id: Uuid,
     pub transcript: Option<String>,
+    pub input_language: Option<AssistantLanguage>,
     pub app_name: String,
     pub speak: bool,
 }
@@ -78,6 +83,7 @@ pub struct ApplicationLaunchJob {
 pub struct UrlOpenJob {
     pub request_id: Uuid,
     pub transcript: Option<String>,
+    pub input_language: Option<AssistantLanguage>,
     pub label: String,
     pub url: String,
     pub speak: bool,
@@ -269,6 +275,8 @@ mod tests {
             encoded_variant_tag(&VisionRequest::Capture(CaptureJob {
                 request_id,
                 action: Action::CopyText,
+                transcript: None,
+                input_language: None,
                 mime_type: "image/png".into(),
                 image_bytes: Vec::new(),
                 session_type: SessionType::Unknown,
@@ -281,6 +289,7 @@ mod tests {
             encoded_variant_tag(&VisionRequest::VoiceSearch(VoiceSearchJob {
                 request_id,
                 transcript: "teste".into(),
+                input_language: Some(AssistantLanguage::PortugueseBrazil),
                 query: "teste".into(),
                 speak: false,
             })),
@@ -290,6 +299,7 @@ mod tests {
             encoded_variant_tag(&VisionRequest::OpenApplication(ApplicationLaunchJob {
                 request_id,
                 transcript: None,
+                input_language: None,
                 app_name: "terminal".into(),
                 speak: false,
             })),
@@ -299,6 +309,7 @@ mod tests {
             encoded_variant_tag(&VisionRequest::OpenUrl(UrlOpenJob {
                 request_id,
                 transcript: None,
+                input_language: None,
                 label: "Example".into(),
                 url: "https://example.com".into(),
                 speak: false,
@@ -365,6 +376,7 @@ mod tests {
         let request = VisionRequest::OpenUrl(UrlOpenJob {
             request_id,
             transcript: Some("youtube".into()),
+            input_language: Some(AssistantLanguage::English),
             label: "YouTube".into(),
             url: "https://www.youtube.com/".into(),
             speak: true,
@@ -377,6 +389,32 @@ mod tests {
                 assert_eq!(job.request_id, request_id);
                 assert_eq!(job.label, "YouTube");
                 assert_eq!(job.url, "https://www.youtube.com/");
+                assert_eq!(job.input_language, Some(AssistantLanguage::English));
+                assert!(job.speak);
+            }
+            _ => panic!("unexpected decoded request"),
+        }
+    }
+
+    #[test]
+    fn voice_search_request_roundtrips_language_metadata() {
+        let request_id = Uuid::new_v4();
+        let request = VisionRequest::VoiceSearch(VoiceSearchJob {
+            request_id,
+            transcript: "打开终端".into(),
+            input_language: Some(AssistantLanguage::Chinese),
+            query: "Rust async".into(),
+            speak: true,
+        });
+        let payload = encode_message_payload(&request).expect("encode voice search");
+        let decoded: VisionRequest = decode_message_payload(&payload).expect("decode voice search");
+
+        match decoded {
+            VisionRequest::VoiceSearch(job) => {
+                assert_eq!(job.request_id, request_id);
+                assert_eq!(job.input_language, Some(AssistantLanguage::Chinese));
+                assert_eq!(job.transcript, "打开终端");
+                assert_eq!(job.query, "Rust async");
                 assert!(job.speak);
             }
             _ => panic!("unexpected decoded request"),

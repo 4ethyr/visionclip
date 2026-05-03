@@ -106,6 +106,7 @@ pub struct ChatRequest {
     pub request_id: String,
     pub action: Action,
     pub source_app: Option<String>,
+    pub response_language: Option<String>,
     pub text: String,
 }
 
@@ -125,6 +126,7 @@ pub struct VisionRequest {
     pub request_id: String,
     pub action: Action,
     pub source_app: Option<String>,
+    pub response_language: Option<String>,
     pub image_bytes: Vec<u8>,
     pub mime_type: String,
 }
