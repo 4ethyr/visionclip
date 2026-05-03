@@ -2730,6 +2730,8 @@ dependencies = [
  "anyhow",
  "clap",
  "gtk4",
+ "reqwest",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

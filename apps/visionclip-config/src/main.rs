@@ -117,6 +117,16 @@ async fn run_doctor() -> Result<()> {
     }
     println!("Ollama URL: {}", config.infer.base_url);
 
+    println!("Piper URL: {}", config.audio.base_url);
+    let piper_voices_url = piper_voices_url(&config.audio.base_url);
+    match probe_http(&piper_voices_url).await {
+        Ok(status) => {
+            println!("Piper endpoint: reachable ({status})");
+            report_piper_voices(&config.audio).await;
+        }
+        Err(error) => println!("Piper endpoint: unavailable ({error})"),
+    }
+
     match list_ollama_models(&config.infer.base_url).await {
         Ok(models) => {
             let available = model_available(&models, &config.infer.model);
@@ -167,12 +177,6 @@ async fn run_doctor() -> Result<()> {
         Err(error) => {
             println!("Ollama API: unavailable ({error})");
         }
-    }
-
-    println!("Piper URL: {}", config.audio.base_url);
-    match probe_http(&config.audio.base_url).await {
-        Ok(status) => println!("Piper endpoint: reachable ({status})"),
-        Err(error) => println!("Piper endpoint: unavailable ({error})"),
     }
 
     println!("Desktop integration:");
@@ -235,6 +239,48 @@ async fn run_models() -> Result<()> {
 async fn probe_http(base_url: &str) -> Result<reqwest::StatusCode> {
     let response = Client::new().get(base_url).send().await?;
     Ok(response.status())
+}
+
+async fn report_piper_voices(audio: &visionclip_common::config::AudioConfig) {
+    let configured = audio.configured_voice_ids();
+    if configured.is_empty() {
+        println!("Configured Piper voices: none (server default will be used)");
+        return;
+    }
+
+    println!("Configured Piper voices: {}", configured.join(", "));
+    match list_piper_voices(&audio.base_url).await {
+        Ok(available) => {
+            let missing = audio.missing_configured_voice_ids(available.iter().map(String::as_str));
+            if missing.is_empty() {
+                println!("Configured Piper voices available: yes");
+            } else {
+                println!(
+                    "Configured Piper voices available: no (missing: {})",
+                    missing.join(", ")
+                );
+            }
+        }
+        Err(error) => {
+            println!("Configured Piper voices available: unknown ({error})");
+        }
+    }
+}
+
+async fn list_piper_voices(base_url: &str) -> Result<Vec<String>> {
+    let url = piper_voices_url(base_url);
+    let response = Client::new().get(url).send().await?.error_for_status()?;
+    let value: serde_json::Value = response.json().await?;
+    let Some(object) = value.as_object() else {
+        anyhow::bail!("Piper /voices did not return a JSON object");
+    };
+    let mut voices = object.keys().cloned().collect::<Vec<_>>();
+    voices.sort();
+    Ok(voices)
+}
+
+fn piper_voices_url(base_url: &str) -> String {
+    format!("{}/voices", base_url.trim_end_matches('/'))
 }
 
 async fn probe_ollama_model_with_timeout(

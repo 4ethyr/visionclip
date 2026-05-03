@@ -309,6 +309,8 @@ python3 -m piper.http_server \
   --port 5000
 ```
 
+Use `visionclip --doctor` ou `visionclip-config doctor` para verificar se as vozes configuradas em `[audio.voices]` aparecem no endpoint local `/voices` do Piper. Voz configurada e ausente é tratada como problema, porque o Piper faria fallback para a voz padrão e a pronúncia deixaria de ser natural para aquele idioma.
+
 ## Busca enriquecida
 
 O VisionClip tenta enriquecer `SearchWeb` com uma leitura inicial dos resultados do Google. Esse scrape e best-effort: quando houver bloco util equivalente a AI Overview/Visão geral criada por IA ou snippets organicos iniciais, o daemon monta contexto para clipboard e TTS.

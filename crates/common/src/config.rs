@@ -1,7 +1,11 @@
 use crate::error::{AppError, AppResult};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, env, fs, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    env, fs,
+    path::PathBuf,
+};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -153,6 +157,35 @@ pub struct AudioConfig {
 }
 
 impl AudioConfig {
+    pub fn configured_voice_ids(&self) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut voices = Vec::new();
+        for voice in std::iter::once(&self.default_voice).chain(self.voices.values()) {
+            let voice = voice.trim();
+            if voice.is_empty() || !seen.insert(voice.to_string()) {
+                continue;
+            }
+            voices.push(voice.to_string());
+        }
+        voices.sort();
+        voices
+    }
+
+    pub fn missing_configured_voice_ids<I, S>(&self, available: I) -> Vec<String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let available = available
+            .into_iter()
+            .map(|voice| voice.as_ref().trim().to_string())
+            .collect::<HashSet<_>>();
+        self.configured_voice_ids()
+            .into_iter()
+            .filter(|voice| !available.contains(voice))
+            .collect()
+    }
+
     pub fn voice_for_language(&self, language: &str) -> Option<String> {
         let requested = normalize_audio_language_key(language);
 
@@ -771,6 +804,36 @@ mod tests {
         assert_eq!(
             audio.voice_for_language("klingon").as_deref(),
             Some("pt_BR-fallback")
+        );
+    }
+
+    #[test]
+    fn audio_voice_inventory_is_deduplicated_and_reports_missing() {
+        let mut audio = AudioConfig {
+            default_voice: "pt_BR-faber-medium".into(),
+            ..AudioConfig::default()
+        };
+        audio
+            .voices
+            .insert("pt-BR".into(), "pt_BR-faber-medium".into());
+        audio
+            .voices
+            .insert("en".into(), "en_US-lessac-medium".into());
+        audio
+            .voices
+            .insert("zh".into(), "zh_CN-huayan-medium".into());
+
+        assert_eq!(
+            audio.configured_voice_ids(),
+            vec![
+                "en_US-lessac-medium".to_string(),
+                "pt_BR-faber-medium".to_string(),
+                "zh_CN-huayan-medium".to_string(),
+            ]
+        );
+        assert_eq!(
+            audio.missing_configured_voice_ids(["pt_BR-faber-medium", "zh_CN-huayan-medium"]),
+            vec!["en_US-lessac-medium".to_string()]
         );
     }
 
