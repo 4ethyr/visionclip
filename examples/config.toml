@@ -60,7 +60,7 @@ channels = 1
 record_command = ""
 # O comando de transcricao deve escrever o texto no stdout ou em {transcript_path}.
 # Placeholders: {wav_path}, {transcript_path}, {duration_ms}, {duration_s}, {sample_rate_hz}, {channels}
-transcribe_command = "venv/bin/python tools/stt/faster_whisper_transcribe.py {wav_path} --model base --language pt --cache-dir tools/stt-cache"
+transcribe_command = "venv/bin/python tools/stt/faster_whisper_transcribe.py {wav_path} --model base --language auto --beam-size 5 --vad-filter true --cache-dir tools/stt-cache"
 transcribe_timeout_ms = 60000
 
 [documents]

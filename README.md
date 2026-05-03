@@ -182,6 +182,8 @@ O instalador configura `Super+F12` como atalho principal, `Super+Shift+F12` como
 
 O wrapper importa o ambiente gráfico do `systemd --user` antes de iniciar o binário, para que `DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR` e o barramento D-Bus estejam disponíveis quando o comando vier do GNOME. O instalador grava a tecla Super como `Mod4`, que é o nome de baixo nível usado pelo GTK/GNOME para esse modificador. Logs de acionamento ficam em `~/.local/state/visionclip/voice-shortcut.log`.
 
+Para comandos multilíngues, deixe o STT detectar idioma automaticamente. O exemplo padrão usa `--language auto`, `--beam-size 5` e VAD para reduzir ruído em comandos curtos; forçar `--language pt` prejudica comandos em chinês, inglês, russo, japonês e coreano.
+
 Para testar outro acelerador no GNOME, passe o binding desejado ao instalador. O alias `Shift+CapsLk` é normalizado para `<Shift>Caps_Lock`:
 
 ```bash

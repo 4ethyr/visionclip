@@ -352,7 +352,6 @@ fn resolve_action_from_transcript(transcript: &str) -> Result<Action> {
         anyhow::bail!("voice transcript is empty");
     }
 
-    let padded = format!(" {normalized} ");
     let patterns = [
         (Action::ExtractCode, " extraia o codigo "),
         (Action::ExtractCode, " extrair codigo "),
@@ -360,11 +359,23 @@ fn resolve_action_from_transcript(transcript: &str) -> Result<Action> {
         (Action::ExtractCode, " copy code "),
         (Action::ExtractCode, " extract code "),
         (Action::ExtractCode, " extraia o comando "),
+        (Action::ExtractCode, "提取代码"),
+        (Action::ExtractCode, "复制代码"),
+        (Action::ExtractCode, "抽出コード"),
+        (Action::ExtractCode, "コードを抽出"),
+        (Action::ExtractCode, "코드 추출"),
+        (Action::ExtractCode, "извлеки код"),
         (Action::CopyText, " copie o texto "),
         (Action::CopyText, " copiar texto "),
         (Action::CopyText, " extraia o texto "),
         (Action::CopyText, " extract text "),
         (Action::CopyText, " read the text "),
+        (Action::CopyText, "复制文本"),
+        (Action::CopyText, "提取文本"),
+        (Action::CopyText, "识别文字"),
+        (Action::CopyText, "テキストをコピー"),
+        (Action::CopyText, "텍스트 복사"),
+        (Action::CopyText, "скопируй текст"),
         (Action::TranslatePtBr, " traduza "),
         (Action::TranslatePtBr, " traduzir "),
         (Action::TranslatePtBr, " traducao "),
@@ -374,6 +385,11 @@ fn resolve_action_from_transcript(transcript: &str) -> Result<Action> {
         (Action::TranslatePtBr, " translation "),
         (Action::TranslatePtBr, " traduce "),
         (Action::TranslatePtBr, " traducir "),
+        (Action::TranslatePtBr, "翻译"),
+        (Action::TranslatePtBr, "翻譯"),
+        (Action::TranslatePtBr, "翻訳"),
+        (Action::TranslatePtBr, "번역"),
+        (Action::TranslatePtBr, "переведи"),
         (Action::SearchWeb, " pesquise "),
         (Action::SearchWeb, " pesquisar "),
         (Action::SearchWeb, " busque "),
@@ -384,6 +400,14 @@ fn resolve_action_from_transcript(transcript: &str) -> Result<Action> {
         (Action::SearchWeb, " look up "),
         (Action::SearchWeb, " google "),
         (Action::SearchWeb, " web search "),
+        (Action::SearchWeb, "搜索"),
+        (Action::SearchWeb, "搜一下"),
+        (Action::SearchWeb, "查询"),
+        (Action::SearchWeb, "查找"),
+        (Action::SearchWeb, "検索"),
+        (Action::SearchWeb, "검색"),
+        (Action::SearchWeb, "найди"),
+        (Action::SearchWeb, "поиск"),
         (Action::Explain, " explique "),
         (Action::Explain, " explicar "),
         (Action::Explain, " explicacao "),
@@ -395,13 +419,20 @@ fn resolve_action_from_transcript(transcript: &str) -> Result<Action> {
         (Action::Explain, " resumir "),
         (Action::Explain, " o que significa "),
         (Action::Explain, " what does this mean "),
+        (Action::Explain, "解释"),
+        (Action::Explain, "說明"),
+        (Action::Explain, "说明"),
+        (Action::Explain, "説明"),
+        (Action::Explain, "설명"),
+        (Action::Explain, "объясни"),
     ];
 
     let mut best: Option<(usize, Action)> = None;
     let mut matched_actions = Vec::new();
 
     for (action, pattern) in patterns {
-        if !padded.contains(pattern) {
+        let normalized_pattern = normalize_transcript(pattern);
+        if !voice_pattern_matches(&normalized, &normalized_pattern) {
             continue;
         }
 
@@ -409,7 +440,7 @@ fn resolve_action_from_transcript(transcript: &str) -> Result<Action> {
             matched_actions.push(action.clone());
         }
 
-        let score = pattern.trim().chars().count();
+        let score = normalized_pattern.chars().count();
         match &best {
             None => best = Some((score, action.clone())),
             Some((best_score, _)) if score > *best_score => {
@@ -509,6 +540,14 @@ fn resolve_open_application_from_transcript(transcript: &str) -> Option<String> 
 
 fn extract_open_subject(raw: &str, normalized: &str) -> Option<String> {
     let prefixes = [
+        "请打开",
+        "請打開",
+        "打开",
+        "打開",
+        "开启",
+        "開啟",
+        "启动",
+        "啟動",
         "por favor abra o aplicativo",
         "por favor abra a aplicacao",
         "por favor abra o programa",
@@ -553,6 +592,17 @@ fn extract_open_subject(raw: &str, normalized: &str) -> Option<String> {
         "acessar o",
         "acessar a",
         "acessar",
+        "abre el",
+        "abre la",
+        "abrir el",
+        "abrir la",
+        "abrir",
+        "inicia el",
+        "inicia la",
+        "ejecuta el",
+        "ejecuta la",
+        "открой",
+        "запусти",
         "entre no",
         "entre na",
         "entre em",
@@ -574,10 +624,7 @@ fn extract_open_subject(raw: &str, normalized: &str) -> Option<String> {
         if normalized == prefix {
             return Some(String::new());
         }
-        if normalized
-            .strip_prefix(prefix)
-            .is_some_and(|rest| rest.starts_with(' '))
-        {
+        if normalized_prefix_match(normalized, prefix) {
             let prefix_len = prefix.chars().count();
             let start = raw
                 .char_indices()
@@ -604,6 +651,10 @@ fn resolve_open_subject(subject: &str, mode: OpenSubjectMode) -> Option<VoiceOpe
             label: website.label.to_string(),
             url: website.url.to_string(),
         });
+    }
+
+    if let Some(application) = known_application_name(&normalized) {
+        return Some(VoiceOpenTarget::Application(application.to_string()));
     }
 
     match mode {
@@ -647,6 +698,24 @@ fn clean_open_subject(subject: &str) -> Option<String> {
         "software",
         "site",
         "pagina",
+        "the",
+        "el",
+        "la",
+        "los",
+        "las",
+        "del",
+        "de la",
+        "приложение",
+        "программу",
+        "应用",
+        "應用",
+        "程序",
+        "软件",
+        "軟件",
+        "网站",
+        "網站",
+        "网页",
+        "網頁",
         "do",
         "da",
         "de",
@@ -682,6 +751,10 @@ fn is_standalone_open_candidate(normalized: &str) -> bool {
 }
 
 fn is_known_standalone_application(normalized: &str) -> bool {
+    if known_application_name(normalized).is_some() {
+        return true;
+    }
+
     let compact = compact_normalized(normalized);
     matches!(
         compact.as_str(),
@@ -712,10 +785,46 @@ fn is_known_standalone_application(normalized: &str) -> bool {
     )
 }
 
+fn known_application_name(normalized: &str) -> Option<&'static str> {
+    let compact = compact_normalized(normalized);
+    let exact = match compact.as_str() {
+        "terminal" | "terminalemulator" | "console" | "shell" | "终端" | "終端" | "终端机"
+        | "終端機" | "命令行" | "控制台" | "терминал" => Some("terminal"),
+        "vscode" | "code" | "visualstudiocode" => Some("VS Code"),
+        "configuracoes" | "settings" | "gnomesettings" | "ajustes" | "设置" | "設定" => {
+            Some("configurações")
+        }
+        _ => None,
+    };
+    if exact.is_some() {
+        return exact;
+    }
+
+    if likely_terminal_misrecognition(&compact) {
+        return Some("terminal");
+    }
+
+    None
+}
+
+fn likely_terminal_misrecognition(compact: &str) -> bool {
+    if !compact.chars().all(|ch| ch.is_ascii_alphabetic()) {
+        return false;
+    }
+    if !(6..=9).contains(&compact.len()) {
+        return false;
+    }
+    levenshtein_distance(compact, "terminal") <= 2
+}
+
 fn known_website(normalized: &str) -> Option<KnownWebsite> {
     let compact = compact_normalized(normalized);
     let target = match compact.as_str() {
         "youtube" | "youtubecom" => KnownWebsite {
+            label: "YouTube",
+            url: "https://www.youtube.com/",
+        },
+        "油管" | "youtube中国" | "youtube中文" => KnownWebsite {
             label: "YouTube",
             url: "https://www.youtube.com/",
         },
@@ -764,6 +873,10 @@ fn known_website(normalized: &str) -> Option<KnownWebsite> {
             url: "https://web.telegram.org/",
         },
         "google" | "googlecom" => KnownWebsite {
+            label: "Google",
+            url: "https://www.google.com/",
+        },
+        "谷歌" => KnownWebsite {
             label: "Google",
             url: "https://www.google.com/",
         },
@@ -835,7 +948,7 @@ fn normalize_transcript(input: &str) -> String {
     ascii_fold(input)
         .chars()
         .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch.is_ascii_whitespace() {
+            if ch.is_alphanumeric() || ch.is_whitespace() {
                 ch
             } else {
                 ' '
@@ -848,18 +961,63 @@ fn normalize_transcript(input: &str) -> String {
 }
 
 fn ascii_fold(input: &str) -> String {
-    input
-        .chars()
-        .map(|ch| match ch {
-            'á' | 'à' | 'ã' | 'â' | 'ä' | 'Á' | 'À' | 'Ã' | 'Â' | 'Ä' => 'a',
-            'é' | 'è' | 'ê' | 'ë' | 'É' | 'È' | 'Ê' | 'Ë' => 'e',
-            'í' | 'ì' | 'î' | 'ï' | 'Í' | 'Ì' | 'Î' | 'Ï' => 'i',
-            'ó' | 'ò' | 'õ' | 'ô' | 'ö' | 'Ó' | 'Ò' | 'Õ' | 'Ô' | 'Ö' => 'o',
-            'ú' | 'ù' | 'û' | 'ü' | 'Ú' | 'Ù' | 'Û' | 'Ü' => 'u',
-            'ç' | 'Ç' => 'c',
-            other => other.to_ascii_lowercase(),
-        })
-        .collect()
+    let mut output = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            'á' | 'à' | 'ã' | 'â' | 'ä' | 'Á' | 'À' | 'Ã' | 'Â' | 'Ä' => output.push('a'),
+            'é' | 'è' | 'ê' | 'ë' | 'É' | 'È' | 'Ê' | 'Ë' => output.push('e'),
+            'í' | 'ì' | 'î' | 'ï' | 'Í' | 'Ì' | 'Î' | 'Ï' => output.push('i'),
+            'ó' | 'ò' | 'õ' | 'ô' | 'ö' | 'Ó' | 'Ò' | 'Õ' | 'Ô' | 'Ö' => output.push('o'),
+            'ú' | 'ù' | 'û' | 'ü' | 'Ú' | 'Ù' | 'Û' | 'Ü' => output.push('u'),
+            'ç' | 'Ç' => output.push('c'),
+            other => output.extend(other.to_lowercase()),
+        }
+    }
+    output
+}
+
+fn voice_pattern_matches(normalized: &str, normalized_pattern: &str) -> bool {
+    if normalized_pattern.is_empty() {
+        return false;
+    }
+    if contains_non_ascii(normalized_pattern) {
+        return normalized.contains(normalized_pattern);
+    }
+
+    let padded = format!(" {normalized} ");
+    let padded_pattern = format!(" {normalized_pattern} ");
+    padded.contains(&padded_pattern)
+}
+
+fn normalized_prefix_match(normalized: &str, prefix: &str) -> bool {
+    let Some(rest) = normalized.strip_prefix(prefix) else {
+        return false;
+    };
+    rest.starts_with(' ')
+        || rest.chars().next().is_some_and(|ch| !ch.is_ascii())
+        || contains_non_ascii(prefix)
+}
+
+fn contains_non_ascii(value: &str) -> bool {
+    !value.is_ascii()
+}
+
+fn levenshtein_distance(left: &str, right: &str) -> usize {
+    let mut previous = (0..=right.chars().count()).collect::<Vec<_>>();
+    let mut current = vec![0; previous.len()];
+
+    for (left_index, left_char) in left.chars().enumerate() {
+        current[0] = left_index + 1;
+        for (right_index, right_char) in right.chars().enumerate() {
+            let substitution_cost = usize::from(left_char != right_char);
+            current[right_index + 1] = (previous[right_index + 1] + 1)
+                .min(current[right_index] + 1)
+                .min(previous[right_index] + substitution_cost);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+
+    previous[right.chars().count()]
 }
 
 fn temp_voice_path(extension: &str) -> PathBuf {
@@ -881,6 +1039,11 @@ fn strip_search_prefix(input: &str) -> String {
     let trimmed = input.trim();
     let normalized = normalize_transcript(trimmed);
     let prefixes = [
+        "搜索",
+        "搜一下",
+        "查询",
+        "查找",
+        "查一下",
         "pesquise por",
         "pesquise sobre",
         "pesquisar por",
@@ -902,7 +1065,7 @@ fn strip_search_prefix(input: &str) -> String {
         if normalized == prefix {
             return String::new();
         }
-        if normalized.starts_with(prefix) {
+        if normalized_prefix_match(&normalized, prefix) {
             let start = trimmed
                 .char_indices()
                 .nth(prefix_len)
@@ -917,6 +1080,11 @@ fn strip_search_prefix(input: &str) -> String {
 
 fn normalized_is_search_command_only(normalized: &str) -> bool {
     [
+        "搜索",
+        "搜一下",
+        "查询",
+        "查找",
+        "查一下",
         "pesquise por",
         "pesquise sobre",
         "pesquisar por",
@@ -986,6 +1154,22 @@ mod tests {
     }
 
     #[test]
+    fn resolves_chinese_screen_actions() {
+        assert_eq!(
+            resolve_action_from_transcript("翻译这个屏幕").unwrap(),
+            Action::TranslatePtBr
+        );
+        assert_eq!(
+            resolve_action_from_transcript("解释这个错误").unwrap(),
+            Action::Explain
+        );
+        assert_eq!(
+            resolve_action_from_transcript("搜索 Rust async").unwrap(),
+            Action::SearchWeb
+        );
+    }
+
+    #[test]
     fn reports_ambiguous_voice_request() {
         let error = resolve_action_from_transcript("traduza e explique").unwrap_err();
         assert!(error.to_string().contains("ambiguous"));
@@ -1026,6 +1210,12 @@ mod tests {
     }
 
     #[test]
+    fn strips_chinese_search_prefix_from_voice_transcript() {
+        let query = resolve_search_query_from_transcript("搜索Rust async 教程").unwrap();
+        assert_eq!(query, "Rust async 教程");
+    }
+
+    #[test]
     fn keeps_plain_voice_search_text_when_no_prefix_is_present() {
         let query = resolve_search_query_from_transcript("melhores cafeterias em Recife").unwrap();
         assert_eq!(query, "melhores cafeterias em Recife");
@@ -1047,7 +1237,7 @@ mod tests {
     fn resolves_standalone_known_app_from_voice_transcript() {
         let cases = [
             ("terminal", "terminal"),
-            ("vscode", "vscode"),
+            ("vscode", "VS Code"),
             ("configurações", "configurações"),
             ("BurpSuite", "BurpSuite"),
             ("wireshark", "wireshark"),
@@ -1066,7 +1256,10 @@ mod tests {
         let cases = [
             ("abra o navegador", "navegador"),
             ("abre o terminal", "terminal"),
-            ("abra o vscode", "vscode"),
+            ("abra o terminau", "terminal"),
+            ("abra o termnal", "terminal"),
+            ("open the terminal", "terminal"),
+            ("abra o vscode", "VS Code"),
             ("abra o BurpSuite", "BurpSuite"),
             ("abra o wireshark", "wireshark"),
             ("abra antigravity", "antigravity"),
@@ -1078,6 +1271,27 @@ mod tests {
             let app_name = resolve_open_application_from_transcript(transcript).unwrap();
             assert_eq!(app_name, expected_app);
         }
+    }
+
+    #[test]
+    fn resolves_chinese_open_application_phrases() {
+        let cases = [
+            ("打开终端", "terminal"),
+            ("请打开终端", "terminal"),
+            ("启动命令行", "terminal"),
+            ("打开 VS Code", "VS Code"),
+        ];
+
+        for (transcript, expected_app) in cases {
+            let app_name = resolve_open_application_from_transcript(transcript).unwrap();
+            assert_eq!(app_name, expected_app);
+        }
+    }
+
+    #[test]
+    fn preserves_non_latin_scripts_during_normalization() {
+        assert_eq!(normalize_transcript("打开终端!"), "打开终端");
+        assert_eq!(normalize_transcript("ОТКРОЙ терминал"), "открой терминал");
     }
 
     #[test]
@@ -1097,6 +1311,7 @@ mod tests {
                 "https://www.linkedin.com/",
             ),
             ("facebook.com", "Facebook", "https://www.facebook.com/"),
+            ("打开油管", "YouTube", "https://www.youtube.com/"),
         ];
 
         for (transcript, expected_label, expected_url) in cases {

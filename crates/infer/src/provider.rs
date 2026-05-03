@@ -181,6 +181,7 @@ impl From<InferenceOutput> for Translation {
 pub struct SearchAnswerRequest {
     pub request_id: String,
     pub query: String,
+    pub response_language: String,
     pub source_label: String,
     pub ai_overview_text: String,
     pub supporting_sources: String,
