@@ -2516,20 +2516,23 @@ fn search_answer_request(
     enrichment: &SearchEnrichment,
     source_label: &str,
 ) -> Result<SearchAnswerRequest> {
-    let overview = enrichment
+    let supporting_sources = supporting_sources_text(enrichment);
+    let context_text = enrichment
         .ai_overview
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .context("search enrichment does not include AI overview text")?;
+        .map(str::to_string)
+        .or_else(|| (!supporting_sources.trim().is_empty()).then(|| supporting_sources.clone()))
+        .context("search enrichment does not include usable answer context")?;
 
     Ok(SearchAnswerRequest {
         request_id,
         query: query.to_string(),
         response_language: response_language.to_string(),
         source_label: source_label.to_string(),
-        ai_overview_text: overview.to_string(),
-        supporting_sources: supporting_sources_text(enrichment),
+        ai_overview_text: context_text,
+        supporting_sources,
     })
 }
 
@@ -3091,23 +3094,29 @@ async fn execute_search_query(
                     .as_ref()
                     .map(|value| value.chars().count())
                     .unwrap_or_default();
-                if let Some(answer) = generate_google_ai_overview_answer(
-                    state,
-                    &session_id,
-                    request_id,
-                    query,
-                    response_language,
-                    &enrichment,
-                    "Visão Geral por IA extraída do Google Search",
-                )
-                .await
-                {
+                let should_generate_grounded_answer =
+                    enrichment.ai_overview.is_some() || !response_language.is_portuguese();
+                let grounded_answer = if should_generate_grounded_answer {
+                    generate_google_ai_overview_answer(
+                        state,
+                        &session_id,
+                        request_id,
+                        query,
+                        response_language,
+                        &enrichment,
+                        search_answer_source_label(&enrichment),
+                    )
+                    .await
+                } else {
+                    None
+                };
+                if let Some(answer) = grounded_answer {
                     search_spoken_text = Some(answer.clone());
-                    search_summary = Some(clipboard_text_for_google_ai_answer(
+                    search_summary = Some(clipboard_text_for_grounded_search_answer(
                         query,
                         &answer,
                         &enrichment,
-                        "Visão Geral por IA extraída do Google Search",
+                        search_answer_source_label(&enrichment),
                     ));
                 } else {
                     search_spoken_text = if response_language.is_portuguese() {
@@ -3272,7 +3281,7 @@ fn spawn_rendered_ai_overview_listener(
                 .await;
 
                 let summary = if let Some(answer) = grounded_answer.as_ref() {
-                    Some(clipboard_text_for_google_ai_answer(
+                    Some(clipboard_text_for_grounded_search_answer(
                         &job.query,
                         answer,
                         &result.enrichment,
@@ -3438,18 +3447,20 @@ fn sanitized_search_answer(
     }
 }
 
-fn clipboard_text_for_google_ai_answer(
+fn clipboard_text_for_grounded_search_answer(
     query: &str,
     answer: &str,
     enrichment: &SearchEnrichment,
     source_label: &str,
 ) -> String {
+    let answer_heading = if enrichment.ai_overview.is_some() {
+        "Resposta baseada na Visão Geral por IA do Google"
+    } else {
+        "Resposta baseada nos resultados iniciais"
+    };
     let mut sections = vec![
         format!("Pesquisa: {query}"),
-        format!(
-            "Resposta baseada na Visão Geral por IA do Google:\n{}",
-            answer.trim()
-        ),
+        format!("{answer_heading}:\n{}", answer.trim()),
     ];
 
     if let Some(overview) = enrichment.ai_overview.as_ref() {
@@ -3465,6 +3476,14 @@ fn clipboard_text_for_google_ai_answer(
     }
 
     sections.join("\n\n")
+}
+
+fn search_answer_source_label(enrichment: &SearchEnrichment) -> &'static str {
+    if enrichment.ai_overview.is_some() {
+        "Visão Geral por IA extraída do Google Search"
+    } else {
+        "Resultados orgânicos extraídos do Google Search"
+    }
 }
 
 fn supporting_sources_text(enrichment: &SearchEnrichment) -> String {
@@ -3816,6 +3835,63 @@ mod tests {
             search_browser_fallback_speech("Rust async", false, ResponseLanguage::Chinese),
             "我已在浏览器中搜索Rust async。请查看打开的标签页获取更多信息。"
         );
+    }
+
+    #[test]
+    fn search_answer_request_uses_organic_sources_without_ai_overview() {
+        let enrichment = SearchEnrichment {
+            ai_overview: None,
+            snippets: vec![crate::search::SearchSnippet {
+                title: "Apple Inc. - History".into(),
+                url: "https://www.apple.com/".into(),
+                domain: "apple.com".into(),
+                snippet: "Apple was founded on April 1, 1976, by Steve Jobs, Steve Wozniak, and Ronald Wayne.".into(),
+            }],
+            related_questions: Vec::new(),
+            related_searches: Vec::new(),
+        };
+
+        let request = search_answer_request(
+            "req-search-answer-organic".into(),
+            "When was Apple founded?",
+            "English",
+            &enrichment,
+            search_answer_source_label(&enrichment),
+        )
+        .unwrap();
+
+        assert_eq!(
+            request.source_label,
+            "Resultados orgânicos extraídos do Google Search"
+        );
+        assert!(request.ai_overview_text.contains("Apple was founded"));
+        assert!(request.supporting_sources.contains("apple.com"));
+    }
+
+    #[test]
+    fn grounded_search_clipboard_labels_organic_answers() {
+        let enrichment = SearchEnrichment {
+            ai_overview: None,
+            snippets: vec![crate::search::SearchSnippet {
+                title: "Rust Async".into(),
+                url: "https://example.com/rust-async".into(),
+                domain: "example.com".into(),
+                snippet: "Rust async allows tasks to make progress without blocking a thread."
+                    .into(),
+            }],
+            related_questions: Vec::new(),
+            related_searches: Vec::new(),
+        };
+
+        let text = clipboard_text_for_grounded_search_answer(
+            "Rust async",
+            "Rust async lets concurrent tasks progress without blocking a thread.",
+            &enrichment,
+            search_answer_source_label(&enrichment),
+        );
+
+        assert!(text.contains("Resposta baseada nos resultados iniciais"));
+        assert!(text.contains("Fontes orgânicas complementares"));
     }
 
     #[test]

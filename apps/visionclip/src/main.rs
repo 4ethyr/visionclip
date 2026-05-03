@@ -715,9 +715,16 @@ async fn run_voice_search(
                 total_ms = elapsed_ms(total_started_at),
                 "voice browser query response received"
             );
-            println!("Consulta por voz aberta no navegador: {}", query);
+            println!(
+                "{}",
+                localized_voice_search_opened_message(voice_search.language, &query)
+            );
             if let Some(summary) = summary {
-                println!("\nResumo inicial da pesquisa:\n{}", summary);
+                println!(
+                    "\n{}:\n{}",
+                    localized_voice_search_summary_heading(voice_search.language),
+                    summary
+                );
             }
         }
         JobResult::Error { code, message, .. } => {
@@ -744,4 +751,53 @@ fn detect_session_type() -> SessionType {
 
 fn elapsed_ms(started_at: Instant) -> u64 {
     started_at.elapsed().as_millis() as u64
+}
+
+fn localized_voice_search_opened_message(language: AssistantLanguage, query: &str) -> String {
+    match language {
+        AssistantLanguage::PortugueseBrazil => {
+            format!("Consulta por voz aberta no navegador: {query}")
+        }
+        AssistantLanguage::English => format!("Voice search opened in the browser: {query}"),
+        AssistantLanguage::Chinese => format!("已在浏览器中打开语音搜索：{query}"),
+        AssistantLanguage::Spanish => format!("Búsqueda por voz abierta en el navegador: {query}"),
+        AssistantLanguage::Russian => format!("Голосовой поиск открыт в браузере: {query}"),
+        AssistantLanguage::Japanese => format!("音声検索をブラウザで開きました: {query}"),
+        AssistantLanguage::Korean => format!("음성 검색을 브라우저에서 열었습니다: {query}"),
+        AssistantLanguage::Hindi => format!("वॉइस खोज ब्राउज़र में खोल दी गई: {query}"),
+    }
+}
+
+fn localized_voice_search_summary_heading(language: AssistantLanguage) -> &'static str {
+    match language {
+        AssistantLanguage::PortugueseBrazil => "Resumo inicial da pesquisa",
+        AssistantLanguage::English => "Initial search summary",
+        AssistantLanguage::Chinese => "初始搜索摘要",
+        AssistantLanguage::Spanish => "Resumen inicial de la búsqueda",
+        AssistantLanguage::Russian => "Первичное резюме поиска",
+        AssistantLanguage::Japanese => "検索の初期要約",
+        AssistantLanguage::Korean => "초기 검색 요약",
+        AssistantLanguage::Hindi => "प्रारंभिक खोज सारांश",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn localizes_voice_search_cli_messages() {
+        assert_eq!(
+            localized_voice_search_opened_message(AssistantLanguage::English, "Rust async"),
+            "Voice search opened in the browser: Rust async"
+        );
+        assert_eq!(
+            localized_voice_search_summary_heading(AssistantLanguage::Chinese),
+            "初始搜索摘要"
+        );
+        assert_eq!(
+            localized_voice_search_opened_message(AssistantLanguage::PortugueseBrazil, "Rust"),
+            "Consulta por voz aberta no navegador: Rust"
+        );
+    }
 }
