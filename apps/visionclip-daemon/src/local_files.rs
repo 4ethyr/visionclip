@@ -176,13 +176,20 @@ fn default_document_search_roots() -> Vec<PathBuf> {
 
     for relative in [
         "Documents",
+        "Documentos",
         "Downloads",
+        "Transferências",
+        "Transferencias",
         "Desktop",
+        "Área de Trabalho",
+        "Area de Trabalho",
         "Books",
         "Livros",
         "Ebooks",
         "eBooks",
+        "E-Books",
         "Calibre Library",
+        "Biblioteca do Calibre",
     ] {
         push_unique_path(&mut roots, home.join(relative));
     }
@@ -265,38 +272,65 @@ fn is_supported_document(path: &Path) -> bool {
 }
 
 fn score_document_candidate(path: &Path, normalized_query: &str) -> Option<usize> {
+    let normalized_query = normalize_document_query_for_matching(normalized_query);
+    if normalized_query.is_empty() {
+        return None;
+    }
+
     let title = document_title(path);
     let normalized_title = normalize_search_text(&title);
     if normalized_title.is_empty() {
         return None;
     }
 
-    let query_tokens = normalized_query.split_whitespace().collect::<Vec<_>>();
+    let query_tokens = expand_document_query_tokens(&normalized_query);
     if query_tokens.is_empty() {
         return None;
     }
 
     let title_tokens = normalized_title.split_whitespace().collect::<Vec<_>>();
-    let matched_tokens = query_tokens
+    let compact_query = compact_normalized(&normalized_query);
+    let compact_title = compact_normalized(&normalized_title);
+    let compact_title_contains_query =
+        compact_query.len() >= 4 && compact_title.contains(&compact_query);
+
+    let matched_query_tokens = query_tokens
         .iter()
-        .filter(|query_token| {
-            title_tokens
-                .iter()
-                .any(|title_token| title_token == *query_token)
-        })
+        .filter(|query_token| query_token_matches_title(query_token, &title_tokens, &compact_title))
         .count();
-    if matched_tokens == 0 {
+
+    let significant_query_tokens = query_tokens
+        .iter()
+        .filter(|token| !is_low_signal_query_token(token))
+        .collect::<Vec<_>>();
+    let significant_matches = significant_query_tokens
+        .iter()
+        .filter(|query_token| query_token_matches_title(query_token, &title_tokens, &compact_title))
+        .count();
+    if significant_query_tokens.is_empty() || matched_query_tokens == 0 {
+        return None;
+    }
+    if !compact_title_contains_query
+        && significant_matches
+            < minimum_required_significant_matches(significant_query_tokens.len())
+    {
+        return None;
+    }
+    if !critical_query_tokens_match(&query_tokens, &title_tokens) {
         return None;
     }
 
-    let mut score = matched_tokens * 20;
-    if matched_tokens == query_tokens.len() {
+    let mut score = significant_matches * 32 + matched_query_tokens * 8;
+    if significant_matches == significant_query_tokens.len() {
         score += 80;
     }
     if normalized_title == normalized_query {
         score += 500;
-    } else if normalized_title.contains(normalized_query) {
+    } else if normalized_title.contains(&normalized_query) {
         score += 220;
+    }
+    if compact_title_contains_query {
+        score += 260 + compact_query.len().min(80);
     }
     if has_ordered_tokens(&title_tokens, &query_tokens) {
         score += 60;
@@ -312,12 +346,233 @@ fn score_document_candidate(path: &Path, normalized_query: &str) -> Option<usize
     Some(score)
 }
 
-fn has_ordered_tokens(title_tokens: &[&str], query_tokens: &[&str]) -> bool {
+fn normalize_document_query_for_matching(normalized_query: &str) -> String {
+    normalized_query
+        .split_whitespace()
+        .filter(|token| !is_document_query_noise_token(token))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_document_query_noise_token(token: &str) -> bool {
+    matches!(
+        token,
+        "open"
+            | "launch"
+            | "start"
+            | "find"
+            | "locate"
+            | "please"
+            | "my"
+            | "this"
+            | "called"
+            | "named"
+            | "titled"
+            | "book"
+            | "boke"
+            | "bokeh"
+            | "boek"
+            | "ebook"
+            | "document"
+            | "file"
+            | "pdf"
+            | "epub"
+            | "mobi"
+            | "azw"
+            | "azw3"
+            | "abra"
+            | "abru"
+            | "abre"
+            | "abri"
+            | "abrir"
+            | "por"
+            | "favor"
+            | "meu"
+            | "minha"
+            | "o"
+            | "a"
+            | "os"
+            | "as"
+            | "livro"
+            | "livru"
+            | "documento"
+            | "arquivo"
+            | "apostila"
+            | "chamado"
+            | "chamada"
+            | "intitulado"
+            | "intitulada"
+            | "libro"
+            | "archivo"
+            | "mi"
+            | "llamado"
+            | "llamada"
+    )
+}
+
+fn expand_document_query_tokens(normalized_query: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for token in normalized_query.split_whitespace() {
+        match token {
+            "blackhead" | "blackhat" => {
+                tokens.push("black".to_string());
+                tokens.push("hat".to_string());
+            }
+            "greyhead" | "grayhead" | "greathead" | "greyhat" | "grayhat" | "greathat" => {
+                tokens.push("gray".to_string());
+                tokens.push("hat".to_string());
+            }
+            "headfirst" => {
+                tokens.push("head".to_string());
+                tokens.push("first".to_string());
+            }
+            "headfirstsql" => {
+                tokens.push("head".to_string());
+                tokens.push("first".to_string());
+                tokens.push("sql".to_string());
+            }
+            _ => tokens.push(token.to_string()),
+        }
+    }
+    tokens
+}
+
+fn query_token_matches_title(
+    query_token: &str,
+    title_tokens: &[&str],
+    compact_title: &str,
+) -> bool {
+    title_tokens
+        .iter()
+        .any(|title_token| tokens_match(query_token, title_token))
+        || (query_token.chars().count() >= 4 && compact_title.contains(query_token))
+}
+
+fn minimum_required_significant_matches(significant_query_tokens: usize) -> usize {
+    match significant_query_tokens {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        3 => 2,
+        4 | 5 => 3,
+        count => count.div_ceil(2),
+    }
+}
+
+fn critical_query_tokens_match(query_tokens: &[String], title_tokens: &[&str]) -> bool {
+    query_tokens
+        .iter()
+        .filter(|token| is_critical_short_query_token(token))
+        .all(|query_token| {
+            title_tokens
+                .iter()
+                .any(|title_token| tokens_match(query_token, title_token))
+        })
+}
+
+fn is_critical_short_query_token(token: &str) -> bool {
+    matches!(token, "ai" | "c" | "go" | "goo" | "js" | "sql" | "py" | "r")
+}
+
+fn is_low_signal_query_token(token: &str) -> bool {
+    matches!(
+        token,
+        "the"
+            | "a"
+            | "an"
+            | "and"
+            | "or"
+            | "of"
+            | "for"
+            | "from"
+            | "with"
+            | "to"
+            | "in"
+            | "on"
+            | "at"
+            | "by"
+            | "this"
+            | "that"
+            | "de"
+            | "da"
+            | "do"
+            | "das"
+            | "dos"
+            | "e"
+            | "para"
+            | "por"
+            | "el"
+            | "la"
+            | "los"
+            | "las"
+            | "del"
+            | "y"
+    )
+}
+
+fn tokens_match(query_token: &str, title_token: &str) -> bool {
+    if query_token == title_token || token_aliases_match(query_token, title_token) {
+        return true;
+    }
+
+    let query_len = query_token.chars().count();
+    let title_len = title_token.chars().count();
+    let min_len = query_len.min(title_len);
+    let max_len = query_len.max(title_len);
+    if min_len < 4 {
+        return false;
+    }
+
+    let distance = levenshtein_distance(query_token, title_token);
+    if max_len >= 8 {
+        distance <= 2
+    } else {
+        distance <= 1
+    }
+}
+
+fn token_aliases_match(query_token: &str, title_token: &str) -> bool {
+    let Some(query_alias) = token_alias(query_token) else {
+        return false;
+    };
+    token_alias(title_token).is_some_and(|title_alias| query_alias == title_alias)
+}
+
+fn token_alias(token: &str) -> Option<&'static str> {
+    match token {
+        "grey" | "gray" | "great" => Some("gray"),
+        "hat" | "head" => Some("hat"),
+        "go" | "goo" => Some("go"),
+        "js" | "javascript" => Some("javascript"),
+        "py" | "python" => Some("python"),
+        _ => None,
+    }
+}
+
+fn levenshtein_distance(left: &str, right: &str) -> usize {
+    let mut previous = (0..=right.chars().count()).collect::<Vec<_>>();
+    let mut current = vec![0; previous.len()];
+
+    for (left_index, left_char) in left.chars().enumerate() {
+        current[0] = left_index + 1;
+        for (right_index, right_char) in right.chars().enumerate() {
+            let substitution_cost = usize::from(left_char != right_char);
+            current[right_index + 1] = (previous[right_index + 1] + 1)
+                .min(current[right_index] + 1)
+                .min(previous[right_index] + substitution_cost);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+
+    previous[right.chars().count()]
+}
+
+fn has_ordered_tokens(title_tokens: &[&str], query_tokens: &[String]) -> bool {
     let mut next_index = 0_usize;
     for query_token in query_tokens {
         if let Some(offset) = title_tokens[next_index..]
             .iter()
-            .position(|title_token| title_token == query_token)
+            .position(|title_token| tokens_match(query_token, title_token))
         {
             next_index += offset + 1;
         } else {
@@ -325,6 +580,13 @@ fn has_ordered_tokens(title_tokens: &[&str], query_tokens: &[&str]) -> bool {
         }
     }
     true
+}
+
+fn compact_normalized(normalized: &str) -> String {
+    normalized
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect()
 }
 
 fn document_title(path: &Path) -> String {
@@ -462,6 +724,82 @@ mod tests {
         .unwrap();
 
         assert_eq!(matched.path, fs::canonicalize(&exact).unwrap());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolves_compact_voice_query_against_spaced_title() {
+        let root = test_root("compact-title");
+        let book = root.join("Head First SQL.pdf");
+        fs::write(&book, b"pdf").unwrap();
+
+        let matched =
+            resolve_document_candidate_in_roots("headfirstsql", std::slice::from_ref(&root))
+                .unwrap();
+
+        assert_eq!(matched.path, fs::canonicalize(&book).unwrap());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolves_mixed_language_command_noise_and_title_aliases() {
+        let root = test_root("mixed-language-title");
+        let intended = root.join("Gray Hat Python.pdf");
+        let generic = root.join("Pesquisa Detalhada Sobre Hacking Wi-Fi.pdf");
+        fs::write(&intended, b"pdf").unwrap();
+        fs::write(&generic, b"pdf").unwrap();
+
+        let matched = resolve_document_candidate_in_roots(
+            "abra o livro Greyhead Hacking",
+            std::slice::from_ref(&root),
+        )
+        .unwrap();
+
+        assert_eq!(matched.path, fs::canonicalize(&intended).unwrap());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_single_generic_token_match_for_multi_token_query() {
+        let root = test_root("generic-token");
+        fs::write(
+            root.join("Pesquisa Detalhada Sobre Hacking Wi-Fi.pdf"),
+            b"pdf",
+        )
+        .unwrap();
+
+        let error =
+            resolve_document_candidate_in_roots("Greyhead Hacking", std::slice::from_ref(&root))
+                .unwrap_err();
+
+        assert!(error.to_string().contains("no local document matched"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn requires_critical_short_title_tokens() {
+        let root = test_root("critical-token");
+        fs::write(root.join("Black Hat Rust.pdf"), b"pdf").unwrap();
+
+        let error =
+            resolve_document_candidate_in_roots("Black Hat Go", std::slice::from_ref(&root))
+                .unwrap_err();
+
+        assert!(error.to_string().contains("no local document matched"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolves_asr_alias_for_short_title_token() {
+        let root = test_root("short-token-alias");
+        let book = root.join("Black Hat Go.pdf");
+        fs::write(&book, b"pdf").unwrap();
+
+        let matched =
+            resolve_document_candidate_in_roots("Black Hat Goo", std::slice::from_ref(&root))
+                .unwrap();
+
+        assert_eq!(matched.path, fs::canonicalize(&book).unwrap());
         let _ = fs::remove_dir_all(root);
     }
 }

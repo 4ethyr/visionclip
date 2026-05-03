@@ -198,7 +198,10 @@ visionclip --voice-agent --voice-transcript 'Abra o VS Code'
 visionclip --voice-agent --voice-transcript 'youtube'
 visionclip --voice-agent --voice-transcript 'abra o site do LinkedIn'
 visionclip --voice-agent --voice-transcript 'abra o livro Programming TypeScript'
+visionclip --voice-agent --voice-transcript 'abra o livro Grey Hat Python'
+visionclip --voice-agent --voice-transcript 'abra meu livro chamado Grey Hat Python'
 visionclip --voice-agent --voice-transcript 'Open the book Programming TypeScript'
+visionclip --voice-agent --voice-transcript 'Open my book Grey Hat Python'
 visionclip --voice-agent --voice-transcript 'O que é JavaScript?'
 ```
 
@@ -209,7 +212,9 @@ visionclip --open-app terminal
 visionclip --open-app vscode
 ```
 
-O handler de abertura usa allowlists para casos conhecidos como terminal/navegador/configurações, resolução por arquivos `.desktop` com `gtk-launch`/`gio` e uma lista explícita de sites comuns que devem abrir no navegador padrão, como YouTube, Facebook e LinkedIn. Comandos como “abra o livro …” ou “open the book …” acionam busca local por documentos/ebooks em diretórios usuais do usuário, como Documents, Downloads, Desktop, Books, Livros, Ebooks e Calibre Library, aceitando extensões como PDF, EPUB, MOBI, AZW3, TXT, Markdown, DOCX, ODT e RTF. O LLM não executa shell arbitrário.
+O handler de abertura usa allowlists para casos conhecidos como terminal/navegador/configurações, resolução por arquivos `.desktop` com `gtk-launch`/`gio` e uma lista explícita de sites comuns que devem abrir no navegador padrão, como YouTube, Facebook e LinkedIn. Comandos como “abra o livro …”, “abra o pdf …”, “open the book …” ou “open my book …” acionam busca local por documentos/ebooks em diretórios usuais do usuário, como Documents, Documentos, Downloads, Transferências, Desktop, Área de Trabalho, Books, Livros, Ebooks, Calibre Library e Biblioteca do Calibre, aceitando extensões como PDF, EPUB, MOBI, AZW3, TXT, Markdown, DOCX, ODT e RTF.
+
+A busca local de livros tolera comandos em uma língua com títulos em outra. Ela remove ruído de comando/documento antes de buscar e aplica matching conservador para variações comuns de STT, como `Grey/Greyhead` contra `Gray Hat`, títulos colados como `headfirstsql` contra `Head First SQL`, e tokens curtos críticos como `Go`, `JS` e `SQL`. O LLM não executa shell arbitrário.
 
 ## Diagnóstico e operação
 

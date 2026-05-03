@@ -649,28 +649,60 @@ fn extract_document_subject_from_specific_prefix(raw: &str, normalized: &str) ->
     let prefixes = [
         "por favor abra o livro",
         "por favor abra o ebook",
+        "por favor abra o pdf",
         "por favor abra o documento",
         "por favor abra o arquivo",
+        "por favor abra meu livro",
+        "por favor abra minha apostila",
         "abra o livro",
         "abra o ebook",
+        "abra o pdf",
+        "abra o epub",
+        "abra o mobi",
         "abra o documento",
         "abra o arquivo",
+        "abra meu livro",
+        "abra minha apostila",
         "abra livro",
         "abra ebook",
+        "abra pdf",
+        "abra epub",
         "abra documento",
         "abra arquivo",
         "abrir o livro",
+        "abrir o pdf",
         "abrir o documento",
         "abre o livro",
+        "abre o pdf",
         "abre o documento",
+        "abru livru",
+        "abru o livru",
+        "abri o livro",
+        "abri livro",
         "open the book",
+        "open my book",
+        "open this book",
         "open book",
         "open the ebook",
+        "open my ebook",
         "open ebook",
+        "open the pdf",
+        "open my pdf",
+        "open pdf",
+        "open the epub",
+        "open epub",
         "open the document",
+        "open my document",
         "open document",
         "open the file",
+        "open my file",
         "open file",
+        "open de boek",
+        "open boek",
+        "open the boke",
+        "open boke",
+        "open the bokeh",
+        "open bokeh",
         "find and open the book",
         "find and open the document",
         "locate and open the book",
@@ -805,10 +837,19 @@ fn document_query_has_marker(normalized: &str) -> bool {
         matches!(
             *token,
             "book"
+                | "boke"
+                | "bokeh"
+                | "boek"
                 | "ebook"
+                | "pdf"
+                | "epub"
+                | "mobi"
+                | "azw"
+                | "azw3"
                 | "document"
                 | "file"
                 | "livro"
+                | "livru"
                 | "documento"
                 | "arquivo"
                 | "libro"
@@ -855,77 +896,47 @@ fn clean_document_query(subject: &str) -> Option<String> {
         return None;
     }
 
-    for qualifier in [
-        "the book",
-        "the ebook",
-        "the document",
-        "the file",
-        "book",
-        "ebook",
-        "document",
-        "file",
-        "o livro",
-        "o ebook",
-        "o documento",
-        "o arquivo",
-        "livro",
-        "documento",
-        "arquivo",
-        "el libro",
-        "el documento",
-        "el archivo",
-        "libro",
-        "documento",
-        "archivo",
-        "книгу",
-        "книга",
-        "документ",
-        "файл",
-    ] {
-        let normalized = normalize_transcript(&value);
-        if normalized == qualifier {
-            return None;
+    loop {
+        let mut changed = false;
+        for qualifier in leading_document_query_qualifiers() {
+            let normalized = normalize_transcript(&value);
+            if normalized == *qualifier {
+                return None;
+            }
+            if normalized
+                .strip_prefix(*qualifier)
+                .is_some_and(|rest| rest.starts_with(' '))
+            {
+                value = value_after_normalized_prefix(&value, qualifier);
+                changed = true;
+                break;
+            }
         }
-        if normalized
-            .strip_prefix(qualifier)
-            .is_some_and(|rest| rest.starts_with(' '))
-        {
-            value = value_after_normalized_prefix(&value, qualifier);
+        if !changed {
             break;
         }
     }
 
-    for qualifier in [
-        "the book",
-        "the ebook",
-        "the document",
-        "the file",
-        "book",
-        "ebook",
-        "document",
-        "file",
-        "livro",
-        "documento",
-        "arquivo",
-        "libro",
-        "archivo",
-        "книгу",
-        "книга",
-        "документ",
-        "файл",
-    ] {
-        let normalized = normalize_transcript(&value);
-        if normalized
-            .strip_suffix(qualifier)
-            .is_some_and(|rest| rest.ends_with(' '))
-        {
-            let keep_chars = normalized.chars().count() - qualifier.chars().count();
-            let end = value
-                .char_indices()
-                .nth(keep_chars)
-                .map(|(index, _)| index)
-                .unwrap_or(value.len());
-            value = value[..end].trim_end().to_string();
+    loop {
+        let mut changed = false;
+        for qualifier in trailing_document_query_qualifiers() {
+            let normalized = normalize_transcript(&value);
+            if normalized
+                .strip_suffix(*qualifier)
+                .is_some_and(|rest| rest.ends_with(' '))
+            {
+                let keep_chars = normalized.chars().count() - qualifier.chars().count();
+                let end = value
+                    .char_indices()
+                    .nth(keep_chars)
+                    .map(|(index, _)| index)
+                    .unwrap_or(value.len());
+                value = value[..end].trim_end().to_string();
+                changed = true;
+                break;
+            }
+        }
+        if !changed {
             break;
         }
     }
@@ -935,6 +946,108 @@ fn clean_document_query(subject: &str) -> Option<String> {
         .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '.' | ',' | ';' | ':'))
         .to_string();
     (!value.is_empty()).then_some(value)
+}
+
+fn leading_document_query_qualifiers() -> &'static [&'static str] {
+    &[
+        "the book",
+        "the ebook",
+        "the document",
+        "the file",
+        "the pdf",
+        "the epub",
+        "my book",
+        "my ebook",
+        "my document",
+        "my file",
+        "my pdf",
+        "this book",
+        "this document",
+        "called",
+        "named",
+        "titled",
+        "book called",
+        "book named",
+        "ebook called",
+        "pdf called",
+        "book",
+        "boke",
+        "bokeh",
+        "boek",
+        "ebook",
+        "document",
+        "file",
+        "pdf",
+        "epub",
+        "mobi",
+        "azw",
+        "azw3",
+        "o livro",
+        "o ebook",
+        "o documento",
+        "o arquivo",
+        "o pdf",
+        "meu livro",
+        "minha apostila",
+        "meu documento",
+        "meu arquivo",
+        "chamado",
+        "chamada",
+        "intitulado",
+        "intitulada",
+        "livro chamado",
+        "livru",
+        "livro",
+        "documento",
+        "arquivo",
+        "apostila",
+        "el libro",
+        "el documento",
+        "el archivo",
+        "mi libro",
+        "mi documento",
+        "llamado",
+        "llamada",
+        "libro",
+        "documento",
+        "archivo",
+        "книгу",
+        "книга",
+        "документ",
+        "файл",
+    ]
+}
+
+fn trailing_document_query_qualifiers() -> &'static [&'static str] {
+    &[
+        "the book",
+        "the ebook",
+        "the document",
+        "the file",
+        "book",
+        "boke",
+        "bokeh",
+        "boek",
+        "ebook",
+        "document",
+        "file",
+        "pdf",
+        "epub",
+        "mobi",
+        "azw",
+        "azw3",
+        "livru",
+        "livro",
+        "documento",
+        "arquivo",
+        "apostila",
+        "libro",
+        "archivo",
+        "книгу",
+        "книга",
+        "документ",
+        "файл",
+    ]
 }
 
 fn value_after_normalized_prefix(value: &str, prefix: &str) -> String {
@@ -1816,11 +1929,23 @@ mod tests {
                 "abra o livro Programming TypeScript",
                 "Programming TypeScript",
             ),
+            ("abra o pdf Grey Hat Python", "Grey Hat Python"),
+            ("abra meu livro chamado Grey Hat Python", "Grey Hat Python"),
+            ("abru lívru Grey Hat Python", "Grey Hat Python"),
             (
                 "Open the book Programming TypeScript",
                 "Programming TypeScript",
             ),
+            ("open my book Grey Hat Python", "Grey Hat Python"),
             ("open Programming TypeScript book", "Programming TypeScript"),
+            (
+                "Open de boek, Computer Security Fundamentals",
+                "Computer Security Fundamentals",
+            ),
+            (
+                "Open the bokeh Metasploit for beginners",
+                "Metasploit for beginners",
+            ),
             (
                 "abre el libro Programming TypeScript",
                 "Programming TypeScript",
