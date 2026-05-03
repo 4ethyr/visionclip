@@ -226,6 +226,7 @@ Use `visionclip --doctor` para validar especificamente o fluxo operacional do cl
 - gravador nativo de microfone
 - comando STT configurado
 - player de TTS
+- `pdftotext` opcional para ingestão local de PDFs textuais
 - wrapper `~/.local/bin/visionclip-voice-search`
 - bindings GNOME `Super+F12` e `Super+Shift+F12`
 
