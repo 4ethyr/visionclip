@@ -10,6 +10,7 @@ VisionClip é um serviço local para Linux que transforma seus modelos locais em
 - Suporte a ações de `CopyText`, `ExtractCode`, `TranslatePtBr`, `Explain` e `SearchWeb`.
 - Núcleo agentic inicial com `ToolRegistry`, `PermissionEngine`, `SessionManager` e `AuditLog` básicos para validar ferramentas antes da execução.
 - Base inicial de `AiProvider`/`ProviderRouter` no crate de inferência, com roteamento local-first/local-only para documentos, captura/OCR, busca enriquecida e REPL.
+- Política explícita de providers em `[providers]`, com Ollama habilitado por padrão e cloud providers desligados.
 - Pipeline padrão com `gemma4:e2b` para OCR e raciocínio textual no mesmo stack local.
 - `SearchWeb` agora gera a query, tenta enriquecer a resposta com scrape best-effort do Google e pode copiar um resumo inicial para o clipboard antes de abrir o navegador.
 - Integração com Ollama via `/api/chat`, com retry automático quando o modelo não suporta `think`.
@@ -26,7 +27,7 @@ VisionClip é um serviço local para Linux que transforma seus modelos locais em
 2. A requisição é enviada por socket Unix ao `visionclip-daemon`.
 3. O daemon valida a ferramenta no registry e aplica política de risco/permissão antes de executar efeitos colaterais.
 4. Para screenshots, o daemon extrai texto com `infer.ocr_model` e envia esse texto para o modelo principal configurado no Ollama. No default atual, `gemma4:e2b` faz as duas etapas.
-5. A inferência local está preparada atrás de `AiProvider`/`ProviderRouter`; documentos, captura/OCR, busca enriquecida e REPL já usam esse caminho e cloud providers continuam desabilitados por padrão.
+5. A inferência local está preparada atrás de `AiProvider`/`ProviderRouter`; documentos, captura/OCR, busca enriquecida e REPL já usam esse caminho. A política `[providers]` mantém dados sensíveis em `local_only`.
 6. Para documentos, o daemon usa chunks locais, embeddings opcionais e prompts locais para responder, resumir, traduzir ou narrar.
 7. A saída é enviada para clipboard, navegador ou TTS, e eventos relevantes são auditados em memória e no SQLite local.
 
@@ -219,6 +220,7 @@ Use `visionclip-config doctor` para verificar:
 - disponibilidade do Ollama
 - modelos locais expostos pelo runtime
 - modelo de embeddings configurado, quando houver
+- política de providers (`route_mode`, `sensitive_data_mode`, Ollama e cloud)
 - probe real de carregamento do modelo configurado
 - reachability do Piper HTTP
 - disponibilidade opcional de `pdftotext` para PDFs textuais
@@ -240,6 +242,29 @@ Use `visionclip-config models` para listar os modelos disponíveis no Ollama e a
 Quando nenhum `--image` ou `--capture-command` é informado, o launcher usa `capture.backend`. Em `auto`, o fluxo tenta portal com `gdbus` quando `prefer_portal = true` e, se necessário, cai para GNOME Shell Screenshot via D-Bus, `gnome-screenshot`, `grim` ou `maim`, conforme a sessão e os mecanismos disponíveis no host.
 
 Em desktops Wayland via portal, a captura pode depender de uma confirmação explícita do usuário na janela do `xdg-desktop-portal`. Se esse diálogo não for concluído dentro do timeout configurado, o launcher retorna erro com o resumo dos backends de screenshot detectados para a sessão atual.
+
+## Providers e privacidade
+
+O daemon usa `ProviderRouter` para escolher o provider de inferência por tarefa. Nesta etapa, somente o provider local Ollama é registrado; stubs e provedores cloud ainda não executam chamadas externas. A configuração existe para fixar a política antes de adicionar integrações externas.
+
+Configuração padrão:
+
+```toml
+[providers]
+route_mode = "local_first"
+sensitive_data_mode = "local_only"
+ollama_enabled = true
+cloud_enabled = false
+```
+
+Significado:
+
+- `route_mode = "local_first"`: tarefas comuns preferem providers locais.
+- `sensitive_data_mode = "local_only"`: documentos, OCR de tela, busca renderizada e contexto de REPL não devem sair da máquina.
+- `ollama_enabled = true`: registra o provider local Ollama no daemon.
+- `cloud_enabled = false`: mantém provedores externos desligados. Mesmo que isso seja alterado futuramente, dados sensíveis continuam bloqueados pela política.
+
+Modos válidos são `local_only`, `local_first` e `cloud_allowed`. A configuração rejeita `sensitive_data_mode = "cloud_allowed"` quando `cloud_enabled = true`, porque esse caminho violaria a política local-first para dados sensíveis.
 
 ## TTS
 
@@ -306,6 +331,7 @@ systemctl --user enable --now visionclip-daemon.service
 - O fluxo de áudio real depende de um Piper HTTP ativo no host
 - Documentos já suportam TXT/Markdown/PDF textual; EPUB e OCR de documento escaneado continuam pendentes
 - O `ProviderRouter` já cobre documentos, captura/OCR, busca enriquecida, OCR de busca renderizada e REPL, mas ainda há somente o provider local Ollama registrado no daemon
+- Cloud providers externos ainda não estão implementados; a seção `[providers]` prepara a política para essa evolução sem habilitar rede externa por padrão
 - SQLite já está integrado como persistência local/migração, mas busca vetorial com `sqlite-vec` ainda não foi ligada
 - Pause/resume/stop de leitura persistem estado, mas o pipeline de áudio ainda precisa de um `AudioRuntime` controlável para interrupção em tempo real
 

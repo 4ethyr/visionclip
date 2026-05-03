@@ -79,7 +79,7 @@ impl ProviderRouteRequest {
     pub fn sensitive(task: AiTask) -> Self {
         Self {
             task,
-            mode: ProviderMode::LocalFirst,
+            mode: ProviderMode::LocalOnly,
             sensitive: true,
         }
     }

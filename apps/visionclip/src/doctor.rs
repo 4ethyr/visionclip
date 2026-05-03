@@ -7,7 +7,7 @@ use std::{
 };
 use tokio::net::UnixStream;
 use visionclip_common::{
-    config::{AudioConfig, DocumentsConfig, SearchConfig, VoiceConfig},
+    config::{AudioConfig, DocumentsConfig, ProvidersConfig, SearchConfig, VoiceConfig},
     discover_capture_backends, discover_rendered_capture_backends, read_message,
     summarize_capture_backends, write_message, AppConfig, HealthCheckJob, JobResult, SessionType,
     VisionRequest,
@@ -81,6 +81,7 @@ pub(crate) async fn run(config: &AppConfig) -> Result<bool> {
     checks.push(check_daemon_socket(config).await);
     checks.push(check_overlay_runtime());
     checks.push(check_capture_system(command_available));
+    checks.push(check_provider_policy(&config.providers));
     checks.push(check_rendered_ai_overview_listener(
         &config.search,
         command_available,
@@ -107,6 +108,40 @@ pub(crate) async fn run(config: &AppConfig) -> Result<bool> {
     Ok(!checks
         .iter()
         .any(|check| matches!(check.status, CheckStatus::Fail)))
+}
+
+fn check_provider_policy(providers: &ProvidersConfig) -> DoctorCheck {
+    if let Err(error) = providers.validate() {
+        return DoctorCheck::fail("providers", error.to_string());
+    }
+
+    if providers.cloud_enabled {
+        DoctorCheck::warn(
+            "providers",
+            format!(
+                "cloud habilitado na config, mas dados sensiveis seguem {}; providers externos ainda nao sao registrados pelo daemon",
+                providers.sensitive_data_mode_normalized()
+            ),
+        )
+    } else {
+        DoctorCheck::ok(
+            "providers",
+            format!(
+                "modo {}, sensivel {}, Ollama {}, cloud off",
+                providers.route_mode_normalized(),
+                providers.sensitive_data_mode_normalized(),
+                yes_no(providers.ollama_enabled),
+            ),
+        )
+    }
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
 }
 
 fn check_config_path() -> Result<DoctorCheck> {
@@ -894,6 +929,27 @@ mod tests {
         let check = check_capture_system_with(|command| command == "grim", false);
         assert_eq!(check.status, CheckStatus::Ok);
         assert!(check.message.contains("grim"));
+    }
+
+    #[test]
+    fn provider_policy_reports_local_default() {
+        let check = check_provider_policy(&ProvidersConfig::default());
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(check.message.contains("local_first"));
+        assert!(check.message.contains("cloud off"));
+    }
+
+    #[test]
+    fn provider_policy_rejects_invalid_mode() {
+        let providers = ProvidersConfig {
+            route_mode: "unsafe".into(),
+            ..Default::default()
+        };
+
+        let check = check_provider_policy(&providers);
+
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert!(check.message.contains("providers.route_mode"));
     }
 
     #[test]
