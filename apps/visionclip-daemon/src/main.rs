@@ -428,16 +428,16 @@ struct OllamaDocumentTranslator {
 impl TranslationProvider for OllamaDocumentTranslator {
     async fn translate(&self, request: TranslationRequest) -> Result<String> {
         ensure_supported_document_target_language(&request.target_language)?;
+        let target_language_label = document_target_language_label(&request.target_language);
         let output = self
             .infer
-            .infer_from_text(
+            .translate_document_text(
                 format!(
                     "{}-document-translate-{}",
                     self.request_id, request.chunk_index
                 ),
-                Action::TranslatePtBr,
-                Some("document".to_string()),
-                request.source_text,
+                target_language_label,
+                &request.source_text,
             )
             .await?;
         Ok(sanitize_output(&Action::TranslatePtBr, &output.text))
@@ -1404,25 +1404,47 @@ fn normalize_document_target_language(target_language: &str) -> Result<String> {
     if target.is_empty() {
         return Ok("pt-BR".to_string());
     }
-    ensure_supported_document_target_language(target)?;
-    Ok("pt-BR".to_string())
+    let normalized = target.to_ascii_lowercase().replace('_', "-");
+    let compact = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    match compact.as_str() {
+        "pt" | "pt-br" | "portuguese" | "portugues" | "português"
+        | "portugues do brasil" | "português do brasil" | "brazilian portuguese" => {
+            Ok("pt-BR".to_string())
+        }
+        "en" | "en-us" | "en-gb" | "english" | "ingles" | "inglês" => Ok("en".to_string()),
+        "es" | "es-es" | "es-mx" | "spanish" | "espanol" | "español" | "castellano" => {
+            Ok("es".to_string())
+        }
+        "zh" | "zh-cn" | "zh-hans" | "chinese" | "chines" | "chinês" | "mandarin"
+        | "mandarim" | "中文" => Ok("zh".to_string()),
+        "ru" | "russian" | "russo" | "русский" => Ok("ru".to_string()),
+        "ja" | "jp" | "japanese" | "japones" | "japonês" | "日本語" => Ok("ja".to_string()),
+        "ko" | "kr" | "korean" | "coreano" | "한국어" => Ok("ko".to_string()),
+        "hi" | "hindi" | "indian" | "indiano" | "हिन्दी" | "हिंदी" => Ok("hi".to_string()),
+        _ => anyhow::bail!(
+            "unsupported document translation target `{}`; supported targets: pt-BR, en, es, zh, ru, ja, ko, hi",
+            target_language
+        ),
+    }
 }
 
 fn ensure_supported_document_target_language(target_language: &str) -> Result<()> {
-    let normalized = target_language
-        .trim()
-        .to_ascii_lowercase()
-        .replace('_', "-");
-    if matches!(
-        normalized.as_str(),
-        "pt" | "pt-br" | "portuguese" | "portugues" | "português"
-    ) {
-        return Ok(());
+    normalize_document_target_language(target_language).map(|_| ())
+}
+
+fn document_target_language_label(target_language: &str) -> &'static str {
+    match target_language {
+        "pt-BR" => "Brazilian Portuguese",
+        "en" => "English",
+        "es" => "Spanish",
+        "zh" => "Chinese",
+        "ru" => "Russian",
+        "ja" => "Japanese",
+        "ko" => "Korean",
+        "hi" => "Hindi",
+        _ => "Brazilian Portuguese",
     }
-    anyhow::bail!(
-        "document translation currently supports only pt-BR; requested `{}`",
-        target_language
-    );
 }
 
 fn document_audio_cache_dir() -> Result<PathBuf> {
@@ -3308,6 +3330,35 @@ mod tests {
             stable_audio_text_hash("pt-BR", "voice-a", "texto"),
             stable_audio_text_hash("pt-BR", "voice-b", "texto")
         );
+    }
+
+    #[test]
+    fn document_target_language_normalization_supports_priority_languages() {
+        let cases = [
+            ("", "pt-BR", "Brazilian Portuguese"),
+            ("Português do Brasil", "pt-BR", "Brazilian Portuguese"),
+            ("english", "en", "English"),
+            ("español", "es", "Spanish"),
+            ("chinês", "zh", "Chinese"),
+            ("русский", "ru", "Russian"),
+            ("japonês", "ja", "Japanese"),
+            ("coreano", "ko", "Korean"),
+            ("हिंदी", "hi", "Hindi"),
+        ];
+
+        for (input, expected, label) in cases {
+            let normalized = normalize_document_target_language(input).unwrap();
+            assert_eq!(normalized, expected);
+            assert_eq!(document_target_language_label(&normalized), label);
+        }
+    }
+
+    #[test]
+    fn document_target_language_normalization_rejects_unsupported_language() {
+        let error = normalize_document_target_language("klingon").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unsupported document translation target"));
     }
 
     #[tokio::test]

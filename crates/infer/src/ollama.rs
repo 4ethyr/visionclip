@@ -83,6 +83,49 @@ impl OllamaBackend {
             .await
     }
 
+    pub async fn translate_document_text(
+        &self,
+        request_id: String,
+        target_language: &str,
+        source_text: &str,
+    ) -> Result<InferenceOutput> {
+        let target_language = target_language.trim();
+        if target_language.is_empty() {
+            return Err(anyhow!(
+                "document translation target language cannot be empty"
+            ));
+        }
+        let source_text = source_text.trim();
+        if source_text.is_empty() {
+            return Err(anyhow!("document translation source text cannot be empty"));
+        }
+
+        let action = visionclip_common::ipc::Action::TranslatePtBr;
+        let model = self.config.model.as_str();
+        let payload = json!({
+            "model": model,
+            "stream": false,
+            "keep_alive": self.config.keep_alive,
+            "options": ollama_options(
+                &self.config,
+                document_translation_num_predict(source_text)
+            ),
+            "messages": [
+                {
+                    "role": "system",
+                    "content": document_translation_system_prompt()
+                },
+                {
+                    "role": "user",
+                    "content": document_translation_user_prompt(target_language, source_text)
+                }
+            ]
+        });
+
+        self.send_chat_request(&request_id, &action, model, "document_text", payload)
+            .await
+    }
+
     pub async fn answer_search_from_context(
         &self,
         request_id: String,
@@ -528,6 +571,22 @@ fn num_predict_for_action(action: &visionclip_common::ipc::Action, input_mode: &
     }
 }
 
+fn document_translation_num_predict(source_text: &str) -> u32 {
+    ((source_text.chars().count() as u32) / 2).clamp(512, 3072)
+}
+
+fn document_translation_system_prompt() -> &'static str {
+    "Voce traduz trechos de documentos para o idioma solicitado. Responda somente com a traducao final. Preserve significado, ordem dos paragrafos, listas simples e tom do texto. Preserve literalmente comandos, codigo, caminhos, URLs, nomes de arquivo, APIs, flags, identificadores e numeros. Nao explique, nao resuma, nao mencione OCR, prompt, tarefa ou instrucoes."
+}
+
+fn document_translation_user_prompt(target_language: &str, source_text: &str) -> String {
+    format!(
+        "Idioma alvo: {}\n\nTexto fonte:\n<<<DOCUMENT\n{}\nDOCUMENT>>>\n\nTraduza o texto fonte para o idioma alvo. Retorne somente a traducao final.",
+        target_language.trim(),
+        source_text.trim()
+    )
+}
+
 fn ollama_options(config: &InferConfig, num_predict: u32) -> serde_json::Value {
     let mut options = json!({
         "temperature": config.temperature,
@@ -835,6 +894,41 @@ mod tests {
         assert_eq!(json["input"][0], "primeiro trecho");
         assert_eq!(json["input"][1], "segundo trecho");
         assert_eq!(json["keep_alive"], "5m");
+    }
+
+    #[tokio::test]
+    async fn document_translation_uses_target_language_prompt() {
+        let server = TestServer::spawn(r#"{"message":{"content":"Hola mundo"}}"#);
+        let backend = OllamaBackend::new(InferConfig {
+            base_url: server.base_url.clone(),
+            model: "gemma4:test".into(),
+            keep_alive: "5m".into(),
+            temperature: 0.1,
+            ..InferConfig::default()
+        });
+
+        let output = backend
+            .translate_document_text(
+                "req-doc-translate".into(),
+                "Spanish",
+                "Hello world.\nPreserve cargo test.",
+            )
+            .await
+            .unwrap();
+
+        let requests = server.finish();
+        let (headers, body) = &requests[0];
+        assert!(headers.starts_with("POST /api/chat HTTP/1.1"));
+        assert_eq!(output.text, "Hola mundo");
+
+        let json: serde_json::Value = serde_json::from_str(body).unwrap();
+        let user_prompt = json["messages"][1]["content"]
+            .as_str()
+            .expect("document translation user prompt");
+        assert_eq!(json["model"], "gemma4:test");
+        assert_eq!(json["options"]["num_predict"], 512);
+        assert!(user_prompt.contains("Idioma alvo: Spanish"));
+        assert!(user_prompt.contains("Preserve cargo test."));
     }
 
     #[tokio::test]

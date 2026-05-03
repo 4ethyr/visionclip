@@ -94,10 +94,11 @@ visionclip document ask <document_id> 'Qual é a ideia principal deste capítulo
 # Resumir trechos iniciais do documento
 visionclip document summarize <document_id>
 
-# Traduzir o documento para PT-BR e copiar para o clipboard
+# Traduzir o documento e copiar para o clipboard
 visionclip document translate <document_id> --target-lang pt-BR
+visionclip document translate <document_id> --target-lang es
 
-# Ler o documento em voz alta com tradução incremental para PT-BR
+# Ler o documento em voz alta com tradução incremental
 visionclip document read <document_id> --target-lang pt-BR
 
 # Controlar uma sessão de leitura
@@ -105,6 +106,8 @@ visionclip document pause <reading_session_id>
 visionclip document resume <reading_session_id>
 visionclip document stop <reading_session_id>
 ```
+
+`document translate` e `document read` aceitam alvos explícitos `pt-BR`, `en`, `es`, `zh`, `ru`, `ja`, `ko` e `hi`, com aliases comuns como `english`, `español`, `chinês`, `japonês`, `coreano` e `hindi`.
 
 Quando `infer.embedding_model` está configurado, a ingestão tenta gerar embeddings locais via Ollama para cada chunk. `document ask` usa ranking semântico quando há vetores persistidos e volta para busca lexical se o modelo não estiver configurado, falhar ou retornar vetores inválidos.
 

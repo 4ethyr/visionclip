@@ -31,6 +31,7 @@ integration work.
   - `visionclip document ask <document_id> "<question>"`
   - `visionclip document summarize <document_id>`
   - `visionclip document translate <document_id> --target-lang pt-BR`
+  - `visionclip document translate <document_id> --target-lang es`
   - `visionclip document read <document_id> --target-lang pt-BR`
   - `visionclip document pause|resume|stop <reading_session_id>`
 - Daemon integration with local document persistence at the app data directory:
@@ -59,6 +60,8 @@ integration work.
   again.
 - Textual PDF ingestion via optional `pdftotext`/poppler-utils using fixed
   process arguments and no shell execution.
+- Document translation/read target language normalization for `pt-BR`, `en`,
+  `es`, `zh`, `ru`, `ja`, `ko`, and `hi` plus common aliases.
 
 ## Safety Decisions
 
@@ -68,8 +71,8 @@ integration work.
 - Textual PDF extraction uses local `pdftotext`; scanned PDFs still require OCR.
 - The runtime does not send content to cloud providers. The daemon adapter uses
   the existing local Ollama backend and Piper HTTP TTS.
-- Non-PT-BR document translation is rejected until a generic translation prompt
-  or ProviderRouter route exists.
+- Document translation targets are allowlisted; unsupported target names are
+  rejected before model calls.
 
 ## Current Limitations
 

@@ -42,6 +42,7 @@ Principais módulos atuais:
 - Alterações de rede/VPN sempre exigem confirmação, mesmo quando o contexto é iniciado pelo usuário.
 - `visionclip-documents` adiciona loader TXT/Markdown/PDF textual, chunker, sessão de leitura e pipeline incremental traduzir -> TTS -> áudio com backpressure.
 - `ingest_document`, `ask_document`, `summarize_document`, `read_document_aloud`, `translate_document` e controles de leitura já passam por IPC/CLI/daemon com validação de tool e store local persistido.
+- `translate_document` e `read_document_aloud` aceitam alvos allowlisted `pt-BR`, `en`, `es`, `zh`, `ru`, `ja`, `ko` e `hi`; idiomas desconhecidos são rejeitados antes de chamar o modelo.
 - `ask_document` usa embeddings locais via Ollama quando `infer.embedding_model` esta configurado e ha vetores persistidos para o documento; caso contrario volta para recuperação lexical. `summarize_document` ainda usa prefixo local.
 - `visionclip-documents` agora tem `SqliteDocumentStore` com schema versionado para documentos, chunks, sessões, progresso, traduções, embeddings, cache de áudio e eventos de auditoria; o daemon espelha o snapshot JSON para SQLite e consegue recarregar do SQLite quando o JSON nao existe.
 - Eventos de auditoria de tools/security continuam em memória para uso imediato e agora também são persistidos no SQLite com payload redigido.
