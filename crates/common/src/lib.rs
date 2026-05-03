@@ -6,6 +6,7 @@ pub mod config;
 pub mod error;
 pub mod intent;
 pub mod ipc;
+pub mod language;
 pub mod portal;
 pub mod router;
 pub mod security;
@@ -33,6 +34,7 @@ pub use ipc::{
     DocumentTranslateJob, HealthCheckJob, JobResult, SessionType, UrlOpenJob, VisionRequest,
     VoiceSearchJob,
 };
+pub use language::{normalize_latin_for_language, AssistantLanguage};
 pub use portal::{
     current_desktops, screenshot_portal_backends_for_current_desktop, summarize_portal_backends,
     PortalBackendDescriptor,

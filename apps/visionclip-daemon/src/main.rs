@@ -26,12 +26,12 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use visionclip_common::{
-    decode_message_payload, read_message_payload, redact_for_audit, write_message, Action,
-    AppConfig, ApplicationLaunchJob, AuditEvent, AuditLog, CaptureJob, DocumentAskJob,
-    DocumentControlJob, DocumentControlKind, DocumentIngestJob, DocumentReadJob,
-    DocumentSummarizeJob, DocumentTranslateJob, HealthCheckJob, JobResult, PermissionEngine,
-    PolicyDecision, PolicyInput, RiskContext, RiskLevel, SessionId, SessionManager, ToolCall,
-    ToolRegistry, UrlOpenJob, VisionRequest, VoiceSearchJob,
+    decode_message_payload, normalize_latin_for_language, read_message_payload, redact_for_audit,
+    write_message, Action, AppConfig, ApplicationLaunchJob, AssistantLanguage, AuditEvent,
+    AuditLog, CaptureJob, DocumentAskJob, DocumentControlJob, DocumentControlKind,
+    DocumentIngestJob, DocumentReadJob, DocumentSummarizeJob, DocumentTranslateJob, HealthCheckJob,
+    JobResult, PermissionEngine, PolicyDecision, PolicyInput, RiskContext, RiskLevel, SessionId,
+    SessionManager, ToolCall, ToolRegistry, UrlOpenJob, VisionRequest, VoiceSearchJob,
 };
 use visionclip_documents::{
     AudioCacheEntry, AudioCacheLookup, AudioCacheStore, AudioChunk, AudioSink, ChunkerConfig,
@@ -145,49 +145,7 @@ struct AppState {
     repl: Mutex<coddy_bridge::ReplRuntimeState>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ResponseLanguage {
-    PortugueseBrazil,
-    English,
-    Chinese,
-    Spanish,
-    Russian,
-    Japanese,
-    Korean,
-    Hindi,
-}
-
-impl ResponseLanguage {
-    fn prompt_label(self) -> &'static str {
-        match self {
-            Self::PortugueseBrazil => "Portuguese (Brazil)",
-            Self::English => "English",
-            Self::Chinese => "Chinese",
-            Self::Spanish => "Spanish",
-            Self::Russian => "Russian",
-            Self::Japanese => "Japanese",
-            Self::Korean => "Korean",
-            Self::Hindi => "Hindi",
-        }
-    }
-
-    fn tts_language_code(self) -> &'static str {
-        match self {
-            Self::PortugueseBrazil => "pt-BR",
-            Self::English => "en",
-            Self::Chinese => "zh",
-            Self::Spanish => "es",
-            Self::Russian => "ru",
-            Self::Japanese => "ja",
-            Self::Korean => "ko",
-            Self::Hindi => "hi",
-        }
-    }
-
-    fn is_portuguese(self) -> bool {
-        matches!(self, Self::PortugueseBrazil)
-    }
-}
+type ResponseLanguage = AssistantLanguage;
 
 fn build_provider_router(config: &AppConfig, infer: OllamaBackend) -> Result<ProviderRouter> {
     let mut router = ProviderRouter::new();
@@ -1025,22 +983,11 @@ async fn process_open_url(state: &AppState, job: UrlOpenJob) -> Result<JobResult
 }
 
 fn response_language_from_transcript(transcript: Option<&str>) -> ResponseLanguage {
-    transcript
-        .map(detect_response_language)
-        .unwrap_or(ResponseLanguage::PortugueseBrazil)
+    ResponseLanguage::from_transcript(transcript)
 }
 
 fn response_language_from_document_target(target_language: &str) -> ResponseLanguage {
-    match target_language {
-        "en" => ResponseLanguage::English,
-        "es" => ResponseLanguage::Spanish,
-        "zh" => ResponseLanguage::Chinese,
-        "ru" => ResponseLanguage::Russian,
-        "ja" => ResponseLanguage::Japanese,
-        "ko" => ResponseLanguage::Korean,
-        "hi" => ResponseLanguage::Hindi,
-        _ => ResponseLanguage::PortugueseBrazil,
-    }
+    ResponseLanguage::from_language_code(target_language)
 }
 
 fn tts_voice_for_response_language(
@@ -1057,7 +1004,7 @@ fn tts_voice_for_language_code(config: &AppConfig, language_code: &str) -> Optio
 }
 
 fn tts_voice_for_text(config: &AppConfig, text: &str) -> Option<String> {
-    tts_voice_for_response_language(config, detect_response_language(text))
+    tts_voice_for_response_language(config, ResponseLanguage::detect(text))
 }
 
 fn tts_voice_for_action_output(config: &AppConfig, action: &Action, text: &str) -> Option<String> {
@@ -1067,124 +1014,6 @@ fn tts_voice_for_action_output(config: &AppConfig, action: &Action, text: &str) 
             tts_voice_for_text(config, text)
         }
     }
-}
-
-fn detect_response_language(input: &str) -> ResponseLanguage {
-    let mut has_han = false;
-    let mut has_hiragana_or_katakana = false;
-    let mut has_hangul = false;
-    let mut has_devanagari = false;
-    let mut has_cyrillic = false;
-
-    for ch in input.chars() {
-        let code = ch as u32;
-        if (0x4E00..=0x9FFF).contains(&code) || (0x3400..=0x4DBF).contains(&code) {
-            has_han = true;
-        } else if (0x3040..=0x30FF).contains(&code) {
-            has_hiragana_or_katakana = true;
-        } else if (0xAC00..=0xD7AF).contains(&code) || (0x1100..=0x11FF).contains(&code) {
-            has_hangul = true;
-        } else if (0x0900..=0x097F).contains(&code) {
-            has_devanagari = true;
-        } else if (0x0400..=0x04FF).contains(&code) {
-            has_cyrillic = true;
-        }
-    }
-
-    if has_hiragana_or_katakana {
-        ResponseLanguage::Japanese
-    } else if has_hangul {
-        ResponseLanguage::Korean
-    } else if has_han {
-        ResponseLanguage::Chinese
-    } else if has_devanagari {
-        ResponseLanguage::Hindi
-    } else if has_cyrillic {
-        ResponseLanguage::Russian
-    } else {
-        detect_latin_response_language(input)
-    }
-}
-
-fn detect_latin_response_language(input: &str) -> ResponseLanguage {
-    let normalized = normalize_latin_for_language(input);
-    let padded = format!(" {normalized} ");
-
-    if [
-        " abra ",
-        " abre o ",
-        " abre a ",
-        " abrir o ",
-        " abrir a ",
-        " pesquise ",
-        " pesquisar ",
-        " busque ",
-        " buscar ",
-        " explique ",
-        " traduza ",
-        " o que ",
-        " quem ",
-    ]
-    .iter()
-    .any(|pattern| padded.contains(pattern))
-    {
-        return ResponseLanguage::PortugueseBrazil;
-    }
-
-    if [
-        " open ", " launch ", " start ", " search ", " what ", " who ", " where ", " when ",
-        " why ", " how ",
-    ]
-    .iter()
-    .any(|pattern| padded.contains(pattern))
-    {
-        return ResponseLanguage::English;
-    }
-
-    if [
-        " abre ",
-        " abrir ",
-        " busca ",
-        " buscar ",
-        " traduce ",
-        " traducir ",
-        " explica ",
-        " que es ",
-    ]
-    .iter()
-    .any(|pattern| padded.contains(pattern))
-        || input.contains('¿')
-    {
-        return ResponseLanguage::Spanish;
-    }
-
-    ResponseLanguage::PortugueseBrazil
-}
-
-fn normalize_latin_for_language(input: &str) -> String {
-    input
-        .chars()
-        .map(|ch| match ch {
-            'á' | 'à' | 'ã' | 'â' | 'ä' | 'Á' | 'À' | 'Ã' | 'Â' | 'Ä' => 'a',
-            'é' | 'è' | 'ê' | 'ë' | 'É' | 'È' | 'Ê' | 'Ë' => 'e',
-            'í' | 'ì' | 'î' | 'ï' | 'Í' | 'Ì' | 'Î' | 'Ï' => 'i',
-            'ó' | 'ò' | 'õ' | 'ô' | 'ö' | 'Ó' | 'Ò' | 'Õ' | 'Ô' | 'Ö' => 'o',
-            'ú' | 'ù' | 'û' | 'ü' | 'Ú' | 'Ù' | 'Û' | 'Ü' => 'u',
-            'ç' | 'Ç' => 'c',
-            'ñ' | 'Ñ' => 'n',
-            other => other.to_ascii_lowercase(),
-        })
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch.is_ascii_whitespace() {
-                ch
-            } else {
-                ' '
-            }
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn localized_open_application_message(
@@ -2293,7 +2122,7 @@ impl coddy_bridge::ReplNativeServices for DaemonReplNativeServices {
     ) -> coddy_bridge::ReplJobFuture<'a> {
         Box::pin(async move {
             let session_id = ensure_request_session(state, request_id).await;
-            let response_language = detect_response_language(&command_text);
+            let response_language = ResponseLanguage::detect(&command_text);
             let provider = route_sensitive_local_provider(
                 state,
                 Some(&session_id),
@@ -3116,7 +2945,7 @@ async fn process_voice_search(state: &AppState, job: VoiceSearchJob) -> Result<J
     );
 
     let speak_requested = state.config.action_should_speak(action_name, job.speak);
-    let response_language = detect_response_language(&job.transcript);
+    let response_language = ResponseLanguage::detect(&job.transcript);
     let search_result = execute_search_query(
         state,
         request_id,
@@ -3864,19 +3693,19 @@ mod tests {
     #[test]
     fn detects_response_language_from_voice_transcript() {
         assert_eq!(
-            detect_response_language("open the terminal"),
+            ResponseLanguage::detect("open the terminal"),
             ResponseLanguage::English
         );
         assert_eq!(
-            detect_response_language("abra o terminal"),
+            ResponseLanguage::detect("abra o terminal"),
             ResponseLanguage::PortugueseBrazil
         );
         assert_eq!(
-            detect_response_language("打开终端"),
+            ResponseLanguage::detect("打开终端"),
             ResponseLanguage::Chinese
         );
         assert_eq!(
-            detect_response_language("открой терминал"),
+            ResponseLanguage::detect("открой терминал"),
             ResponseLanguage::Russian
         );
     }
