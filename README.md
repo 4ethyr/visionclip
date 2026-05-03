@@ -10,6 +10,7 @@ VisionClip é um serviço local para Linux que transforma seus modelos locais em
 - Suporte a ações de `CopyText`, `ExtractCode`, `TranslatePtBr`, `Explain` e `SearchWeb`.
 - Núcleo agentic inicial com `ToolRegistry`, `PermissionEngine`, `SessionManager` e `AuditLog` básicos para validar ferramentas antes da execução.
 - Base inicial de `AiProvider`/`ProviderRouter` no crate de inferência, com roteamento local-first/local-only para documentos, captura/OCR, busca enriquecida e REPL.
+- Política explícita de providers em `[providers]`, com Ollama habilitado por padrão e cloud providers desligados.
 - Pipeline padrão com `gemma4:e2b` para OCR e raciocínio textual no mesmo stack local.
 - `SearchWeb` agora gera a query, tenta enriquecer a resposta com scrape best-effort do Google e pode copiar um resumo inicial para o clipboard antes de abrir o navegador.
 - Integração com Ollama via `/api/chat`, com retry automático quando o modelo não suporta `think`.
@@ -26,7 +27,7 @@ VisionClip é um serviço local para Linux que transforma seus modelos locais em
 2. A requisição é enviada por socket Unix ao `visionclip-daemon`.
 3. O daemon valida a ferramenta no registry e aplica política de risco/permissão antes de executar efeitos colaterais.
 4. Para screenshots, o daemon extrai texto com `infer.ocr_model` e envia esse texto para o modelo principal configurado no Ollama. No default atual, `gemma4:e2b` faz as duas etapas.
-5. A inferência local está preparada atrás de `AiProvider`/`ProviderRouter`; documentos, captura/OCR, busca enriquecida e REPL já usam esse caminho e cloud providers continuam desabilitados por padrão.
+5. A inferência local está preparada atrás de `AiProvider`/`ProviderRouter`; documentos, captura/OCR, busca enriquecida e REPL já usam esse caminho. A política `[providers]` mantém dados sensíveis em `local_only`.
 6. Para documentos, o daemon usa chunks locais, embeddings opcionais e prompts locais para responder, resumir, traduzir ou narrar.
 7. A saída é enviada para clipboard, navegador ou TTS, e eventos relevantes são auditados em memória e no SQLite local.
 
@@ -181,6 +182,8 @@ O instalador configura `Super+F12` como atalho principal, `Super+Shift+F12` como
 
 O wrapper importa o ambiente gráfico do `systemd --user` antes de iniciar o binário, para que `DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR` e o barramento D-Bus estejam disponíveis quando o comando vier do GNOME. O instalador grava a tecla Super como `Mod4`, que é o nome de baixo nível usado pelo GTK/GNOME para esse modificador. Logs de acionamento ficam em `~/.local/state/visionclip/voice-shortcut.log`.
 
+Para comandos multilíngues, deixe o STT detectar idioma automaticamente. O exemplo padrão usa `--language auto`, `--beam-size 5` e VAD para reduzir ruído em comandos curtos; forçar `--language pt` prejudica comandos em chinês, inglês, russo, japonês e coreano.
+
 Para testar outro acelerador no GNOME, passe o binding desejado ao instalador. O alias `Shift+CapsLk` é normalizado para `<Shift>Caps_Lock`:
 
 ```bash
@@ -219,6 +222,7 @@ Use `visionclip-config doctor` para verificar:
 - disponibilidade do Ollama
 - modelos locais expostos pelo runtime
 - modelo de embeddings configurado, quando houver
+- política de providers (`route_mode`, `sensitive_data_mode`, Ollama e cloud)
 - probe real de carregamento do modelo configurado
 - reachability do Piper HTTP
 - disponibilidade opcional de `pdftotext` para PDFs textuais
@@ -241,6 +245,29 @@ Quando nenhum `--image` ou `--capture-command` é informado, o launcher usa `cap
 
 Em desktops Wayland via portal, a captura pode depender de uma confirmação explícita do usuário na janela do `xdg-desktop-portal`. Se esse diálogo não for concluído dentro do timeout configurado, o launcher retorna erro com o resumo dos backends de screenshot detectados para a sessão atual.
 
+## Providers e privacidade
+
+O daemon usa `ProviderRouter` para escolher o provider de inferência por tarefa. Nesta etapa, somente o provider local Ollama executa chamadas. Quando `cloud_enabled = true`, o daemon registra stubs indisponíveis para OpenAI, Gemini, Anthropic, Mistral e OpenRouter, mas eles não podem ser selecionados nem fazem chamadas externas.
+
+Configuração padrão:
+
+```toml
+[providers]
+route_mode = "local_first"
+sensitive_data_mode = "local_only"
+ollama_enabled = true
+cloud_enabled = false
+```
+
+Significado:
+
+- `route_mode = "local_first"`: tarefas comuns preferem providers locais.
+- `sensitive_data_mode = "local_only"`: documentos, OCR de tela, busca renderizada e contexto de REPL são roteados como sensíveis e não devem sair da máquina.
+- `ollama_enabled = true`: registra o provider local Ollama no daemon.
+- `cloud_enabled = false`: mantém provedores externos desligados. Mesmo quando habilitado nesta fase, cloud registra apenas stubs indisponíveis; dados sensíveis continuam bloqueados pela política.
+
+Modos válidos são `local_only`, `local_first` e `cloud_allowed`. A configuração rejeita `sensitive_data_mode = "cloud_allowed"` quando `cloud_enabled = true`, porque esse caminho violaria a política local-first para dados sensíveis.
+
 ## TTS
 
 Com Piper HTTP ativo, o daemon pode responder em áudio para `TranslatePtBr`, `Explain`, `SearchWeb`, `OpenApplication` e `OpenUrl` quando `--speak` estiver ligado.
@@ -256,6 +283,33 @@ playback_timeout_ms = 120000
 ```
 
 O daemon serializa a reprodução de áudio: se outra ação com `--speak` terminar enquanto uma fala ainda está tocando, a nova resposta aguarda a anterior terminar em vez de abrir outro player por cima.
+
+Para pronúncia natural multilíngue, configure vozes Piper por idioma. O daemon usa o idioma detectado do comando de voz para `OpenApplication`, `OpenUrl` e `SearchWeb`, e usa o idioma alvo em leitura/tradução de documentos:
+
+```toml
+[audio.voices]
+"pt-BR" = "pt_BR-faber-medium"
+en = "en_US-lessac-medium"
+zh = "zh_CN-huayan-medium"
+es = "es_ES-sharvard-medium"
+ru = "ru_RU-ruslan-medium"
+hi = "hi_IN-pratham-medium"
+```
+
+Para japonês e coreano, deixe `ja`/`ko` sem configuração até instalar uma voz Piper compatível ou plugar outro provider TTS local; sem uma voz do idioma, o fallback continuará usando a voz padrão.
+
+O `piper.http_server` precisa iniciar com o diretório de vozes como `--data-dir`/`--download-dir`, pois o servidor carrega a voz solicitada no payload `voice` sob demanda:
+
+```bash
+python3 -m piper.http_server \
+  -m tools/piper-voices/pt_BR-faber-medium.onnx \
+  --data-dir tools/piper-voices \
+  --download-dir tools/piper-voices \
+  --host 127.0.0.1 \
+  --port 5000
+```
+
+Use `visionclip --doctor` ou `visionclip-config doctor` para verificar se as vozes configuradas em `[audio.voices]` aparecem no endpoint local `/voices` do Piper. Voz configurada e ausente é tratada como problema, porque o Piper faria fallback para a voz padrão e a pronúncia deixaria de ser natural para aquele idioma.
 
 ## Busca enriquecida
 
@@ -281,12 +335,6 @@ rendered_ai_overview_wait_ms = 12000
 rendered_ai_overview_poll_interval_ms = 3000
 ```
 
-Exemplo de inicialização do Piper HTTP:
-
-```bash
-python3 -m piper.http_server -m <VOICE_NAME> --host 127.0.0.1 --port 5000
-```
-
 ## systemd de usuário
 
 O repositório inclui units em `deploy/systemd/` e um instalador auxiliar em `deploy/install-user.sh`.
@@ -305,7 +353,8 @@ systemctl --user enable --now visionclip-daemon.service
 - A qualidade do OCR ainda depende da captura e do modelo configurado; se a captura vier ruidosa, erros pequenos como `170 -> 17` ainda podem acontecer
 - O fluxo de áudio real depende de um Piper HTTP ativo no host
 - Documentos já suportam TXT/Markdown/PDF textual; EPUB e OCR de documento escaneado continuam pendentes
-- O `ProviderRouter` já cobre documentos, captura/OCR, busca enriquecida, OCR de busca renderizada e REPL, mas ainda há somente o provider local Ollama registrado no daemon
+- O `ProviderRouter` já cobre documentos, captura/OCR, busca enriquecida, OCR de busca renderizada e REPL, mas ainda há somente o provider local Ollama disponível para execução
+- Cloud providers externos ainda não estão implementados; a seção `[providers]` registra apenas stubs indisponíveis quando cloud é habilitado, sem habilitar rede externa por padrão
 - SQLite já está integrado como persistência local/migração, mas busca vetorial com `sqlite-vec` ainda não foi ligada
 - Pause/resume/stop de leitura persistem estado, mas o pipeline de áudio ainda precisa de um `AudioRuntime` controlável para interrupção em tempo real
 

@@ -61,10 +61,12 @@ plus current upstream documentation.
 
 ## Current Gap Priority
 
-1. Add provider configuration and disabled-by-default cloud stubs on top of the
-   `AiProvider`/`ProviderRouter` foundation. Daemon document flows, main
+1. Replace the disabled-by-default cloud stubs on top of the `[providers]`
+   policy with real opt-in provider implementations. Daemon document flows, main
    capture/OCR, enriched search answers, rendered-search OCR, and REPL answers
-   already route through the local-first router.
+   already route through the local-first router; provider configuration is now
+   explicit, applied by the daemon, registers unavailable cloud stubs when
+   enabled, and keeps sensitive data `local_only`.
 2. Make SQLite the single document store after the JSON compatibility window and
    add optional `sqlite-vec` vector search.
 3. Add OCR fallback for scanned PDFs behind explicit consent and local-only

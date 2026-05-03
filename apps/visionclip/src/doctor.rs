@@ -1,13 +1,14 @@
 use crate::voice_overlay;
 use anyhow::{Context, Result};
 use std::{
+    collections::HashSet,
     env, fs,
     path::{Path, PathBuf},
     process::Command,
 };
 use tokio::net::UnixStream;
 use visionclip_common::{
-    config::{AudioConfig, DocumentsConfig, SearchConfig, VoiceConfig},
+    config::{AudioConfig, DocumentsConfig, ProvidersConfig, SearchConfig, VoiceConfig},
     discover_capture_backends, discover_rendered_capture_backends, read_message,
     summarize_capture_backends, write_message, AppConfig, HealthCheckJob, JobResult, SessionType,
     VisionRequest,
@@ -81,6 +82,7 @@ pub(crate) async fn run(config: &AppConfig) -> Result<bool> {
     checks.push(check_daemon_socket(config).await);
     checks.push(check_overlay_runtime());
     checks.push(check_capture_system(command_available));
+    checks.push(check_provider_policy(&config.providers));
     checks.push(check_rendered_ai_overview_listener(
         &config.search,
         command_available,
@@ -88,6 +90,8 @@ pub(crate) async fn run(config: &AppConfig) -> Result<bool> {
     checks.push(check_voice_recorder(&config.voice, command_available));
     checks.push(check_voice_transcriber(&config.voice, command_available));
     checks.push(check_tts_player(&config.audio, command_available));
+    checks.push(check_tts_endpoint(&config.audio).await);
+    checks.push(check_tts_voices(&config.audio).await);
     checks.push(check_pdf_extractor(&config.documents, command_available));
     checks.push(check_voice_wrapper());
     checks.push(check_shortcut_environment());
@@ -107,6 +111,40 @@ pub(crate) async fn run(config: &AppConfig) -> Result<bool> {
     Ok(!checks
         .iter()
         .any(|check| matches!(check.status, CheckStatus::Fail)))
+}
+
+fn check_provider_policy(providers: &ProvidersConfig) -> DoctorCheck {
+    if let Err(error) = providers.validate() {
+        return DoctorCheck::fail("providers", error.to_string());
+    }
+
+    if providers.cloud_enabled {
+        DoctorCheck::warn(
+            "providers",
+            format!(
+                "cloud habilitado na config, mas dados sensiveis seguem {}; daemon registra apenas stubs cloud indisponiveis nesta fase",
+                providers.sensitive_data_mode_normalized()
+            ),
+        )
+    } else {
+        DoctorCheck::ok(
+            "providers",
+            format!(
+                "modo {}, sensivel {}, Ollama {}, cloud off",
+                providers.route_mode_normalized(),
+                providers.sensitive_data_mode_normalized(),
+                yes_no(providers.ollama_enabled),
+            ),
+        )
+    }
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
 }
 
 fn check_config_path() -> Result<DoctorCheck> {
@@ -393,6 +431,81 @@ fn check_tts_player(audio: &AudioConfig, command_exists: impl Fn(&str) -> bool) 
     };
 
     check_command("tts", &command, command_exists)
+}
+
+async fn check_tts_endpoint(audio: &AudioConfig) -> DoctorCheck {
+    if !audio.enabled {
+        return DoctorCheck::warn("tts-http", "audio/TTS desabilitado na configuracao");
+    }
+
+    let url = audio.base_url.trim();
+    if url.is_empty() {
+        return DoctorCheck::fail("tts-http", "base_url do Piper HTTP nao configurada");
+    }
+
+    let voices_url = piper_voices_url(url);
+    match reqwest::get(&voices_url).await {
+        Ok(response) if response.status().is_success() => {
+            DoctorCheck::ok("tts-http", format!("Piper HTTP respondeu em {voices_url}"))
+        }
+        Ok(response) => DoctorCheck::fail(
+            "tts-http",
+            format!("Piper HTTP retornou {}", response.status()),
+        ),
+        Err(error) => DoctorCheck::fail("tts-http", format!("Piper HTTP indisponivel: {error}")),
+    }
+}
+
+async fn check_tts_voices(audio: &AudioConfig) -> DoctorCheck {
+    if !audio.enabled {
+        return DoctorCheck::warn("tts-voices", "audio/TTS desabilitado na configuracao");
+    }
+
+    let configured = audio.configured_voice_ids();
+    if configured.is_empty() {
+        return DoctorCheck::warn(
+            "tts-voices",
+            "nenhuma voz configurada em [audio.voices]; Piper usara a voz padrao do servidor",
+        );
+    }
+
+    match list_piper_voices(&audio.base_url).await {
+        Ok(available) => {
+            let missing = audio.missing_configured_voice_ids(available.iter().map(String::as_str));
+            if missing.is_empty() {
+                DoctorCheck::ok(
+                    "tts-voices",
+                    format!("{} voz(es) configurada(s) disponiveis", configured.len()),
+                )
+            } else {
+                DoctorCheck::fail(
+                    "tts-voices",
+                    format!(
+                        "vozes configuradas ausentes no Piper: {}",
+                        missing.join(", ")
+                    ),
+                )
+            }
+        }
+        Err(error) => DoctorCheck::warn(
+            "tts-voices",
+            format!("nao foi possivel consultar /voices do Piper: {error}"),
+        ),
+    }
+}
+
+async fn list_piper_voices(base_url: &str) -> Result<HashSet<String>> {
+    let url = piper_voices_url(base_url);
+    let response = reqwest::get(url).await?.error_for_status()?;
+    let value: serde_json::Value = response.json().await?;
+    let Some(object) = value.as_object() else {
+        anyhow::bail!("Piper /voices nao retornou um objeto JSON");
+    };
+    Ok(object.keys().cloned().collect())
+}
+
+fn piper_voices_url(base_url: &str) -> String {
+    format!("{}/voices", base_url.trim_end_matches('/'))
 }
 
 fn check_pdf_extractor(
@@ -790,6 +903,7 @@ mod tests {
             backend: "piper_http".into(),
             base_url: "http://127.0.0.1:5000".into(),
             default_voice: String::new(),
+            voices: Default::default(),
             speak_actions: vec!["SearchWeb".into()],
             player_command: "pw-play".into(),
             request_timeout_ms: 60_000,
@@ -850,6 +964,26 @@ mod tests {
         assert_eq!(check.status, CheckStatus::Ok);
     }
 
+    #[tokio::test]
+    async fn tts_voices_warns_without_configured_voice() {
+        let mut audio = audio_config();
+        audio.default_voice.clear();
+        audio.voices.clear();
+
+        let check = check_tts_voices(&audio).await;
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.message.contains("[audio.voices]"));
+    }
+
+    #[test]
+    fn piper_voices_url_appends_endpoint() {
+        assert_eq!(
+            piper_voices_url("http://127.0.0.1:5000/"),
+            "http://127.0.0.1:5000/voices"
+        );
+    }
+
     #[test]
     fn pdf_extractor_is_optional_for_document_runtime() {
         let check = check_pdf_extractor(&DocumentsConfig::default(), |_| false);
@@ -894,6 +1028,27 @@ mod tests {
         let check = check_capture_system_with(|command| command == "grim", false);
         assert_eq!(check.status, CheckStatus::Ok);
         assert!(check.message.contains("grim"));
+    }
+
+    #[test]
+    fn provider_policy_reports_local_default() {
+        let check = check_provider_policy(&ProvidersConfig::default());
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(check.message.contains("local_first"));
+        assert!(check.message.contains("cloud off"));
+    }
+
+    #[test]
+    fn provider_policy_rejects_invalid_mode() {
+        let providers = ProvidersConfig {
+            route_mode: "unsafe".into(),
+            ..Default::default()
+        };
+
+        let check = check_provider_policy(&providers);
+
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert!(check.message.contains("providers.route_mode"));
     }
 
     #[test]

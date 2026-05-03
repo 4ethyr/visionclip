@@ -44,7 +44,8 @@ use visionclip_infer::{
     postprocess::{sanitize_for_speech, sanitize_output},
     AiProvider, AiTask, ChatRequest, ChatResponse, EmbedRequest, OllamaBackend, ProviderMode,
     ProviderRouteRequest, ProviderRouter, ProviderSelection, SearchAnswerRequest,
-    SearchAnswerResponse, TranslateRequest, VisionRequest as ProviderVisionRequest, VisionResponse,
+    SearchAnswerResponse, TranslateRequest, UnavailableCloudProvider,
+    VisionRequest as ProviderVisionRequest, VisionResponse,
 };
 use visionclip_output::{notify, open_search_query, open_url, ClipboardOwner};
 use visionclip_tts::PiperHttpClient;
@@ -87,9 +88,7 @@ async fn main() -> Result<()> {
     };
 
     let infer = OllamaBackend::new(config.infer.clone());
-    let ollama_provider: Arc<dyn AiProvider> = Arc::new(infer.clone());
-    let provider_router =
-        Arc::new(ProviderRouter::new().with_provider("ollama", Arc::clone(&ollama_provider)));
+    let provider_router = Arc::new(build_provider_router(&config, infer.clone())?);
 
     let state = Arc::new(AppState {
         config: config.clone(),
@@ -144,6 +143,140 @@ struct AppState {
     documents: Arc<Mutex<DocumentStore>>,
     #[cfg(feature = "coddy-protocol")]
     repl: Mutex<coddy_bridge::ReplRuntimeState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResponseLanguage {
+    PortugueseBrazil,
+    English,
+    Chinese,
+    Spanish,
+    Russian,
+    Japanese,
+    Korean,
+    Hindi,
+}
+
+impl ResponseLanguage {
+    fn prompt_label(self) -> &'static str {
+        match self {
+            Self::PortugueseBrazil => "Portuguese (Brazil)",
+            Self::English => "English",
+            Self::Chinese => "Chinese",
+            Self::Spanish => "Spanish",
+            Self::Russian => "Russian",
+            Self::Japanese => "Japanese",
+            Self::Korean => "Korean",
+            Self::Hindi => "Hindi",
+        }
+    }
+
+    fn tts_language_code(self) -> &'static str {
+        match self {
+            Self::PortugueseBrazil => "pt-BR",
+            Self::English => "en",
+            Self::Chinese => "zh",
+            Self::Spanish => "es",
+            Self::Russian => "ru",
+            Self::Japanese => "ja",
+            Self::Korean => "ko",
+            Self::Hindi => "hi",
+        }
+    }
+
+    fn is_portuguese(self) -> bool {
+        matches!(self, Self::PortugueseBrazil)
+    }
+}
+
+fn build_provider_router(config: &AppConfig, infer: OllamaBackend) -> Result<ProviderRouter> {
+    let mut router = ProviderRouter::new();
+    let route_mode = provider_route_mode(config);
+    let sensitive_mode = sensitive_provider_mode(config);
+    let mut available_provider_registered = false;
+
+    if config.providers.ollama_enabled {
+        let ollama_provider: Arc<dyn AiProvider> = Arc::new(infer);
+        router.register("ollama", ollama_provider);
+        available_provider_registered = true;
+    }
+
+    if config.providers.cloud_enabled {
+        let stub_count = register_cloud_provider_stubs(&mut router);
+        warn!(
+            stub_count,
+            "cloud providers are enabled in config but only unavailable stubs are registered in this build"
+        );
+    }
+
+    if router.is_empty() {
+        anyhow::bail!("no AI providers are enabled; enable providers.ollama_enabled");
+    }
+
+    if !available_provider_registered {
+        anyhow::bail!(
+            "no available AI providers are registered; cloud providers are unavailable stubs in this build; enable providers.ollama_enabled"
+        );
+    }
+
+    info!(
+        ?route_mode,
+        ?sensitive_mode,
+        ollama_enabled = config.providers.ollama_enabled,
+        cloud_enabled = config.providers.cloud_enabled,
+        "provider routing policy loaded"
+    );
+
+    Ok(router)
+}
+
+const CLOUD_PROVIDER_STUBS: &[(&str, &str)] = &[
+    ("openai", "OpenAI"),
+    ("gemini", "Gemini"),
+    ("anthropic", "Anthropic"),
+    ("mistral", "Mistral"),
+    ("openrouter", "OpenRouter"),
+];
+
+fn register_cloud_provider_stubs(router: &mut ProviderRouter) -> usize {
+    for (id, display_name) in CLOUD_PROVIDER_STUBS {
+        let provider: Arc<dyn AiProvider> =
+            Arc::new(UnavailableCloudProvider::cloud_stub(*id, *display_name));
+        router.register(*id, provider);
+    }
+    CLOUD_PROVIDER_STUBS.len()
+}
+
+fn provider_route_mode(config: &AppConfig) -> ProviderMode {
+    provider_mode_from_policy_value(&config.providers.route_mode)
+}
+
+fn sensitive_provider_mode(config: &AppConfig) -> ProviderMode {
+    provider_mode_from_policy_value(&config.providers.sensitive_data_mode)
+}
+
+fn provider_mode_from_policy_value(value: &str) -> ProviderMode {
+    match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "cloud_allowed" => ProviderMode::CloudAllowed,
+        "local_first" => ProviderMode::LocalFirst,
+        _ => ProviderMode::LocalOnly,
+    }
+}
+
+fn provider_route_request(
+    task: AiTask,
+    mode: ProviderMode,
+    sensitive: bool,
+) -> ProviderRouteRequest {
+    ProviderRouteRequest {
+        task,
+        mode,
+        sensitive,
+    }
+}
+
+fn sensitive_provider_route_request(config: &AppConfig, task: AiTask) -> ProviderRouteRequest {
+    provider_route_request(task, sensitive_provider_mode(config), true)
 }
 
 struct DocumentStore {
@@ -430,6 +563,7 @@ impl DocumentStore {
 #[derive(Clone)]
 struct RoutedDocumentTranslator {
     provider_router: Arc<ProviderRouter>,
+    sensitive_provider_mode: ProviderMode,
     request_id: uuid::Uuid,
 }
 
@@ -440,7 +574,11 @@ impl TranslationProvider for RoutedDocumentTranslator {
         let target_language_label = document_target_language_label(&request.target_language);
         let selection = self
             .provider_router
-            .route(ProviderRouteRequest::sensitive(AiTask::DocumentTranslation))
+            .route(provider_route_request(
+                AiTask::DocumentTranslation,
+                self.sensitive_provider_mode,
+                true,
+            ))
             .await
             .context("failed to route local document translation provider")?;
         let output = selection
@@ -749,7 +887,13 @@ async fn process_open_application(
             return Err(error);
         }
     };
-    let message = result.message;
+    let response_language = response_language_from_transcript(job.transcript.as_deref());
+    let message = localized_open_application_message(
+        response_language,
+        app_name,
+        &result.resolved_app,
+        &result.message,
+    );
     record_tool_executed(
         state,
         &session_id,
@@ -759,11 +903,14 @@ async fn process_open_application(
     let (tts_enqueue_ms, spoken) = enqueue_tts(
         state.piper.as_ref(),
         &state.tts_gate,
-        request_id,
-        "OpenApplication",
-        &message,
-        None,
-        speak_requested,
+        TtsEnqueueRequest {
+            request_id,
+            action_name: "OpenApplication",
+            text: &message,
+            fallback_text: None,
+            voice_id: tts_voice_for_response_language(&state.config, response_language),
+            requested: speak_requested,
+        },
     );
 
     let _ = notify("VisionClip", &message);
@@ -837,11 +984,8 @@ async fn process_open_url(state: &AppState, job: UrlOpenJob) -> Result<JobResult
         );
         return Err(error);
     }
-    let message = if label.is_empty() {
-        "Abrindo o site.".to_string()
-    } else {
-        format!("Abrindo {label}.")
-    };
+    let response_language = response_language_from_transcript(job.transcript.as_deref());
+    let message = localized_open_url_message(response_language, label);
     record_tool_executed(
         state,
         &session_id,
@@ -851,11 +995,14 @@ async fn process_open_url(state: &AppState, job: UrlOpenJob) -> Result<JobResult
     let (tts_enqueue_ms, spoken) = enqueue_tts(
         state.piper.as_ref(),
         &state.tts_gate,
-        request_id,
-        "OpenUrl",
-        &message,
-        None,
-        speak_requested,
+        TtsEnqueueRequest {
+            request_id,
+            action_name: "OpenUrl",
+            text: &message,
+            fallback_text: None,
+            voice_id: tts_voice_for_response_language(&state.config, response_language),
+            requested: speak_requested,
+        },
     );
 
     let _ = notify("VisionClip", &message);
@@ -875,6 +1022,278 @@ async fn process_open_url(state: &AppState, job: UrlOpenJob) -> Result<JobResult
         message,
         spoken,
     })
+}
+
+fn response_language_from_transcript(transcript: Option<&str>) -> ResponseLanguage {
+    transcript
+        .map(detect_response_language)
+        .unwrap_or(ResponseLanguage::PortugueseBrazil)
+}
+
+fn response_language_from_document_target(target_language: &str) -> ResponseLanguage {
+    match target_language {
+        "en" => ResponseLanguage::English,
+        "es" => ResponseLanguage::Spanish,
+        "zh" => ResponseLanguage::Chinese,
+        "ru" => ResponseLanguage::Russian,
+        "ja" => ResponseLanguage::Japanese,
+        "ko" => ResponseLanguage::Korean,
+        "hi" => ResponseLanguage::Hindi,
+        _ => ResponseLanguage::PortugueseBrazil,
+    }
+}
+
+fn tts_voice_for_response_language(
+    config: &AppConfig,
+    language: ResponseLanguage,
+) -> Option<String> {
+    config
+        .audio
+        .voice_for_language(language.tts_language_code())
+}
+
+fn tts_voice_for_language_code(config: &AppConfig, language_code: &str) -> Option<String> {
+    config.audio.voice_for_language(language_code)
+}
+
+fn tts_voice_for_text(config: &AppConfig, text: &str) -> Option<String> {
+    tts_voice_for_response_language(config, detect_response_language(text))
+}
+
+fn tts_voice_for_action_output(config: &AppConfig, action: &Action, text: &str) -> Option<String> {
+    match action {
+        Action::TranslatePtBr => tts_voice_for_language_code(config, "pt-BR"),
+        Action::SearchWeb | Action::Explain | Action::CopyText | Action::ExtractCode => {
+            tts_voice_for_text(config, text)
+        }
+    }
+}
+
+fn detect_response_language(input: &str) -> ResponseLanguage {
+    let mut has_han = false;
+    let mut has_hiragana_or_katakana = false;
+    let mut has_hangul = false;
+    let mut has_devanagari = false;
+    let mut has_cyrillic = false;
+
+    for ch in input.chars() {
+        let code = ch as u32;
+        if (0x4E00..=0x9FFF).contains(&code) || (0x3400..=0x4DBF).contains(&code) {
+            has_han = true;
+        } else if (0x3040..=0x30FF).contains(&code) {
+            has_hiragana_or_katakana = true;
+        } else if (0xAC00..=0xD7AF).contains(&code) || (0x1100..=0x11FF).contains(&code) {
+            has_hangul = true;
+        } else if (0x0900..=0x097F).contains(&code) {
+            has_devanagari = true;
+        } else if (0x0400..=0x04FF).contains(&code) {
+            has_cyrillic = true;
+        }
+    }
+
+    if has_hiragana_or_katakana {
+        ResponseLanguage::Japanese
+    } else if has_hangul {
+        ResponseLanguage::Korean
+    } else if has_han {
+        ResponseLanguage::Chinese
+    } else if has_devanagari {
+        ResponseLanguage::Hindi
+    } else if has_cyrillic {
+        ResponseLanguage::Russian
+    } else {
+        detect_latin_response_language(input)
+    }
+}
+
+fn detect_latin_response_language(input: &str) -> ResponseLanguage {
+    let normalized = normalize_latin_for_language(input);
+    let padded = format!(" {normalized} ");
+
+    if [
+        " abra ",
+        " abre o ",
+        " abre a ",
+        " abrir o ",
+        " abrir a ",
+        " pesquise ",
+        " pesquisar ",
+        " busque ",
+        " buscar ",
+        " explique ",
+        " traduza ",
+        " o que ",
+        " quem ",
+    ]
+    .iter()
+    .any(|pattern| padded.contains(pattern))
+    {
+        return ResponseLanguage::PortugueseBrazil;
+    }
+
+    if [
+        " open ", " launch ", " start ", " search ", " what ", " who ", " where ", " when ",
+        " why ", " how ",
+    ]
+    .iter()
+    .any(|pattern| padded.contains(pattern))
+    {
+        return ResponseLanguage::English;
+    }
+
+    if [
+        " abre ",
+        " abrir ",
+        " busca ",
+        " buscar ",
+        " traduce ",
+        " traducir ",
+        " explica ",
+        " que es ",
+    ]
+    .iter()
+    .any(|pattern| padded.contains(pattern))
+        || input.contains('¿')
+    {
+        return ResponseLanguage::Spanish;
+    }
+
+    ResponseLanguage::PortugueseBrazil
+}
+
+fn normalize_latin_for_language(input: &str) -> String {
+    input
+        .chars()
+        .map(|ch| match ch {
+            'á' | 'à' | 'ã' | 'â' | 'ä' | 'Á' | 'À' | 'Ã' | 'Â' | 'Ä' => 'a',
+            'é' | 'è' | 'ê' | 'ë' | 'É' | 'È' | 'Ê' | 'Ë' => 'e',
+            'í' | 'ì' | 'î' | 'ï' | 'Í' | 'Ì' | 'Î' | 'Ï' => 'i',
+            'ó' | 'ò' | 'õ' | 'ô' | 'ö' | 'Ó' | 'Ò' | 'Õ' | 'Ô' | 'Ö' => 'o',
+            'ú' | 'ù' | 'û' | 'ü' | 'Ú' | 'Ù' | 'Û' | 'Ü' => 'u',
+            'ç' | 'Ç' => 'c',
+            'ñ' | 'Ñ' => 'n',
+            other => other.to_ascii_lowercase(),
+        })
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch.is_ascii_whitespace() {
+                ch
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn localized_open_application_message(
+    language: ResponseLanguage,
+    requested_app: &str,
+    resolved_app: &str,
+    default_message: &str,
+) -> String {
+    if language.is_portuguese() {
+        return default_message.to_string();
+    }
+
+    let app = localized_application_label(language, requested_app, resolved_app);
+    match language {
+        ResponseLanguage::English => format!("Opening {app}."),
+        ResponseLanguage::Chinese => format!("正在打开{app}。"),
+        ResponseLanguage::Spanish => format!("Abriendo {app}."),
+        ResponseLanguage::Russian => format!("Открываю {app}."),
+        ResponseLanguage::Japanese => format!("{app}を開いています。"),
+        ResponseLanguage::Korean => format!("{app} 여는 중입니다."),
+        ResponseLanguage::Hindi => format!("{app} खोल रहा हूँ।"),
+        ResponseLanguage::PortugueseBrazil => default_message.to_string(),
+    }
+}
+
+fn localized_open_url_message(language: ResponseLanguage, label: &str) -> String {
+    let target = if label.trim().is_empty() {
+        localized_site_label(language)
+    } else {
+        label.trim().to_string()
+    };
+
+    match language {
+        ResponseLanguage::PortugueseBrazil => {
+            if label.trim().is_empty() {
+                "Abrindo o site.".to_string()
+            } else {
+                format!("Abrindo {target}.")
+            }
+        }
+        ResponseLanguage::English => format!("Opening {target}."),
+        ResponseLanguage::Chinese => format!("正在打开{target}。"),
+        ResponseLanguage::Spanish => format!("Abriendo {target}."),
+        ResponseLanguage::Russian => format!("Открываю {target}."),
+        ResponseLanguage::Japanese => format!("{target}を開いています。"),
+        ResponseLanguage::Korean => format!("{target} 여는 중입니다."),
+        ResponseLanguage::Hindi => format!("{target} खोल रहा हूँ।"),
+    }
+}
+
+fn localized_site_label(language: ResponseLanguage) -> String {
+    match language {
+        ResponseLanguage::PortugueseBrazil => "o site",
+        ResponseLanguage::English => "the site",
+        ResponseLanguage::Chinese => "网站",
+        ResponseLanguage::Spanish => "el sitio",
+        ResponseLanguage::Russian => "сайт",
+        ResponseLanguage::Japanese => "サイト",
+        ResponseLanguage::Korean => "사이트",
+        ResponseLanguage::Hindi => "साइट",
+    }
+    .to_string()
+}
+
+fn localized_application_label(
+    language: ResponseLanguage,
+    requested_app: &str,
+    resolved_app: &str,
+) -> String {
+    let normalized = normalize_latin_for_language(requested_app);
+    let compact = normalized.split_whitespace().collect::<String>();
+
+    if compact == "terminal"
+        || compact == "console"
+        || compact == "shell"
+        || requested_app.contains('终')
+        || requested_app.contains('端')
+    {
+        return match language {
+            ResponseLanguage::Chinese => "终端",
+            ResponseLanguage::Russian => "терминал",
+            ResponseLanguage::Japanese => "ターミナル",
+            ResponseLanguage::Korean => "터미널",
+            ResponseLanguage::Hindi => "टर्मिनल",
+            _ => "terminal",
+        }
+        .to_string();
+    }
+
+    if compact == "browser" || compact == "navegador" {
+        return match language {
+            ResponseLanguage::PortugueseBrazil => "o navegador",
+            ResponseLanguage::English => "the browser",
+            ResponseLanguage::Chinese => "浏览器",
+            ResponseLanguage::Spanish => "el navegador",
+            ResponseLanguage::Russian => "браузер",
+            ResponseLanguage::Japanese => "ブラウザ",
+            ResponseLanguage::Korean => "브라우저",
+            ResponseLanguage::Hindi => "ब्राउज़र",
+        }
+        .to_string();
+    }
+
+    let display = if requested_app.trim().is_empty() {
+        resolved_app.trim()
+    } else {
+        requested_app.trim()
+    };
+    display.to_string()
 }
 
 async fn process_document_ingest(state: &AppState, job: DocumentIngestJob) -> Result<JobResult> {
@@ -988,6 +1407,7 @@ async fn process_document_translate(
 
     let translator = RoutedDocumentTranslator {
         provider_router: Arc::clone(&state.provider_router),
+        sensitive_provider_mode: sensitive_provider_mode(&state.config),
         request_id,
     };
     let translation_session_id = format!("{request_id}-translate");
@@ -1108,6 +1528,7 @@ async fn process_document_read(state: &AppState, job: DocumentReadJob) -> Result
     let mut pipeline = TranslatedReadingPipeline::new(
         Arc::new(RoutedDocumentTranslator {
             provider_router: Arc::clone(&state.provider_router),
+            sensitive_provider_mode: sensitive_provider_mode(&state.config),
             request_id,
         }),
         Arc::new(PiperDocumentTts {
@@ -1121,7 +1542,7 @@ async fn process_document_read(state: &AppState, job: DocumentReadJob) -> Result
             documents: Arc::clone(&state.documents),
         }),
     )
-    .with_voice_id(default_document_voice_id(&state.config));
+    .with_voice_id(document_voice_id(&state.config, &target_language));
 
     if state.config.documents.cache_audio {
         pipeline = pipeline.with_audio_cache(Arc::new(DaemonAudioCacheStore {
@@ -1282,11 +1703,14 @@ async fn process_document_ask(state: &AppState, job: DocumentAskJob) -> Result<J
     let (tts_enqueue_ms, spoken) = enqueue_tts(
         state.piper.as_ref(),
         &state.tts_gate,
-        request_id,
-        "AskDocument",
-        &speech_text,
-        None,
-        job.speak,
+        TtsEnqueueRequest {
+            request_id,
+            action_name: "AskDocument",
+            text: &speech_text,
+            fallback_text: None,
+            voice_id: tts_voice_for_language_code(&state.config, "pt-BR"),
+            requested: job.speak,
+        },
     );
 
     record_tool_executed(
@@ -1377,11 +1801,14 @@ async fn process_document_summarize(
     let (tts_enqueue_ms, spoken) = enqueue_tts(
         state.piper.as_ref(),
         &state.tts_gate,
-        request_id,
-        "SummarizeDocument",
-        &speech_text,
-        None,
-        job.speak,
+        TtsEnqueueRequest {
+            request_id,
+            action_name: "SummarizeDocument",
+            text: &speech_text,
+            fallback_text: None,
+            voice_id: tts_voice_for_language_code(&state.config, "pt-BR"),
+            requested: job.speak,
+        },
     );
 
     record_tool_executed(
@@ -1471,13 +1898,9 @@ fn document_audio_cache_dir() -> Result<PathBuf> {
     Ok(AppConfig::data_dir()?.join("document-audio-cache"))
 }
 
-fn default_document_voice_id(config: &AppConfig) -> Option<String> {
-    let voice = config.audio.default_voice.trim();
-    if voice.is_empty() {
-        None
-    } else {
-        Some(voice.to_string())
-    }
+fn document_voice_id(config: &AppConfig, target_language: &str) -> Option<String> {
+    let response_language = response_language_from_document_target(target_language);
+    tts_voice_for_response_language(config, response_language)
 }
 
 fn normalized_audio_cache_voice_id(voice_id: Option<&str>) -> String {
@@ -1535,7 +1958,10 @@ async fn generate_document_embeddings(
     }
     let provider = state
         .provider_router
-        .route(ProviderRouteRequest::sensitive(AiTask::Embeddings))
+        .route(sensitive_provider_route_request(
+            &state.config,
+            AiTask::Embeddings,
+        ))
         .await
         .ok()?;
 
@@ -1606,7 +2032,10 @@ async fn select_document_context_with_optional_embeddings(
     if let Some(embeddings) = embeddings {
         if let Ok(provider) = state
             .provider_router
-            .route(ProviderRouteRequest::sensitive(AiTask::Embeddings))
+            .route(sensitive_provider_route_request(
+                &state.config,
+                AiTask::Embeddings,
+            ))
             .await
         {
             match provider
@@ -1864,6 +2293,7 @@ impl coddy_bridge::ReplNativeServices for DaemonReplNativeServices {
     ) -> coddy_bridge::ReplJobFuture<'a> {
         Box::pin(async move {
             let session_id = ensure_request_session(state, request_id).await;
+            let response_language = detect_response_language(&command_text);
             let provider = route_sensitive_local_provider(
                 state,
                 Some(&session_id),
@@ -1886,11 +2316,14 @@ impl coddy_bridge::ReplNativeServices for DaemonReplNativeServices {
             let (_, spoken) = enqueue_tts(
                 state.piper.as_ref(),
                 &state.tts_gate,
-                request_id,
-                Action::Explain.as_str(),
-                &speech_text,
-                None,
-                speak_requested,
+                TtsEnqueueRequest {
+                    request_id,
+                    action_name: Action::Explain.as_str(),
+                    text: &speech_text,
+                    fallback_text: None,
+                    voice_id: tts_voice_for_response_language(&state.config, response_language),
+                    requested: speak_requested,
+                },
             );
 
             Ok(JobResult::ClipboardText {
@@ -1913,9 +2346,15 @@ impl coddy_bridge::ReplNativeServices for DaemonReplNativeServices {
             let speak_requested = state
                 .config
                 .action_should_speak(Action::SearchWeb.as_str(), speak);
-            let search_result =
-                execute_search_query(state, request_id, &query, speak_requested, total_started_at)
-                    .await?;
+            let search_result = execute_search_query(
+                state,
+                request_id,
+                &query,
+                ResponseLanguage::PortugueseBrazil,
+                speak_requested,
+                total_started_at,
+            )
+            .await?;
 
             Ok(JobResult::BrowserQuery {
                 request_id,
@@ -2066,11 +2505,7 @@ async fn route_sensitive_local_provider(
 ) -> Result<ProviderSelection> {
     let selection = state
         .provider_router
-        .route(ProviderRouteRequest {
-            task,
-            mode: ProviderMode::LocalFirst,
-            sensitive: true,
-        })
+        .route(sensitive_provider_route_request(&state.config, task))
         .await
         .with_context(|| format!("failed to route local AI provider for {operation}"))?;
 
@@ -2152,13 +2587,18 @@ async fn run_provider_vision(
     }
 }
 
+struct GroundedSearchAnswerContext<'a> {
+    query: &'a str,
+    response_language: &'a str,
+    enrichment: &'a SearchEnrichment,
+    source_label: &'a str,
+}
+
 async fn run_provider_search_answer(
     state: &AppState,
     session_id: &SessionId,
     request_id: String,
-    query: &str,
-    enrichment: &SearchEnrichment,
-    source_label: &str,
+    context: GroundedSearchAnswerContext<'_>,
     operation: &str,
 ) -> Result<SearchAnswerResponse> {
     let provider =
@@ -2167,31 +2607,36 @@ async fn run_provider_search_answer(
         .provider
         .answer_search(search_answer_request(
             request_id,
-            query,
-            enrichment,
-            source_label,
+            context.query,
+            context.response_language,
+            context.enrichment,
+            context.source_label,
         )?)
         .await
 }
 
 async fn run_provider_search_answer_with_router(
     provider_router: &ProviderRouter,
+    sensitive_provider_mode: ProviderMode,
     request_id: String,
-    query: &str,
-    enrichment: &SearchEnrichment,
-    source_label: &str,
+    context: GroundedSearchAnswerContext<'_>,
 ) -> Result<SearchAnswerResponse> {
     let provider = provider_router
-        .route(ProviderRouteRequest::sensitive(AiTask::Chat))
+        .route(provider_route_request(
+            AiTask::Chat,
+            sensitive_provider_mode,
+            true,
+        ))
         .await
         .context("failed to route local search answer provider")?;
     provider
         .provider
         .answer_search(search_answer_request(
             request_id,
-            query,
-            enrichment,
-            source_label,
+            context.query,
+            context.response_language,
+            context.enrichment,
+            context.source_label,
         )?)
         .await
 }
@@ -2199,6 +2644,7 @@ async fn run_provider_search_answer_with_router(
 fn search_answer_request(
     request_id: String,
     query: &str,
+    response_language: &str,
     enrichment: &SearchEnrichment,
     source_label: &str,
 ) -> Result<SearchAnswerRequest> {
@@ -2212,6 +2658,7 @@ fn search_answer_request(
     Ok(SearchAnswerRequest {
         request_id,
         query: query.to_string(),
+        response_language: response_language.to_string(),
         source_label: source_label.to_string(),
         ai_overview_text: overview.to_string(),
         supporting_sources: supporting_sources_text(enrichment),
@@ -2548,6 +2995,7 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                 state,
                 request_id,
                 &cleaned,
+                ResponseLanguage::PortugueseBrazil,
                 speak_requested,
                 total_started_at,
             )
@@ -2610,11 +3058,14 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
             let (tts_enqueue_ms, spoken) = enqueue_tts(
                 state.piper.as_ref(),
                 &state.tts_gate,
-                request_id,
-                action_name,
-                &speech_text,
-                Some(tts_fallback_message(&job.action)),
-                speak_requested,
+                TtsEnqueueRequest {
+                    request_id,
+                    action_name,
+                    text: &speech_text,
+                    fallback_text: Some(tts_fallback_message(&job.action)),
+                    voice_id: tts_voice_for_action_output(&state.config, &job.action, &speech_text),
+                    requested: speak_requested,
+                },
             );
 
             info!(
@@ -2665,10 +3116,12 @@ async fn process_voice_search(state: &AppState, job: VoiceSearchJob) -> Result<J
     );
 
     let speak_requested = state.config.action_should_speak(action_name, job.speak);
+    let response_language = detect_response_language(&job.transcript);
     let search_result = execute_search_query(
         state,
         request_id,
         &cleaned,
+        response_language,
         speak_requested,
         total_started_at,
     )
@@ -2715,6 +3168,7 @@ async fn execute_search_query(
     state: &AppState,
     request_id: uuid::Uuid,
     query: &str,
+    response_language: ResponseLanguage,
     speak_requested: bool,
     total_started_at: Instant,
 ) -> Result<SearchExecution> {
@@ -2758,6 +3212,7 @@ async fn execute_search_query(
                     &session_id,
                     request_id,
                     query,
+                    response_language,
                     &enrichment,
                     "Visão Geral por IA extraída do Google Search",
                 )
@@ -2771,7 +3226,11 @@ async fn execute_search_query(
                         "Visão Geral por IA extraída do Google Search",
                     ));
                 } else {
-                    search_spoken_text = enrichment.spoken_text(query);
+                    search_spoken_text = if response_language.is_portuguese() {
+                        enrichment.spoken_text(query)
+                    } else {
+                        None
+                    };
                     search_summary = enrichment.clipboard_text(query);
                 }
             }
@@ -2803,7 +3262,11 @@ async fn execute_search_query(
         search_summary = Some(search_browser_fallback_summary(query, search_blocked));
     }
     if search_spoken_text.is_none() {
-        search_spoken_text = Some(search_browser_fallback_speech(query, search_blocked));
+        search_spoken_text = Some(search_browser_fallback_speech(
+            query,
+            search_blocked,
+            response_language,
+        ));
     }
 
     let output_started_at = Instant::now();
@@ -2813,7 +3276,13 @@ async fn execute_search_query(
     if state.config.search.open_browser {
         open_search_query(query)?;
         if ai_overview_chars == 0 {
-            spawn_rendered_ai_overview_listener(state, request_id, query, speak_requested);
+            spawn_rendered_ai_overview_listener(
+                state,
+                request_id,
+                query,
+                response_language,
+                speak_requested,
+            );
         }
     }
     let _ = notify(
@@ -2827,20 +3296,24 @@ async fn execute_search_query(
         },
     );
     let output_ms = elapsed_ms(output_started_at);
+    let fallback_spoken_text = localized_search_opened_speech(query, false, response_language);
     let tts_text = sanitize_for_speech(
         &Action::SearchWeb,
         search_spoken_text
             .as_deref()
-            .unwrap_or("Pesquisa aberta no navegador para aprofundar o tema."),
+            .unwrap_or(fallback_spoken_text.as_str()),
     );
     let (tts_enqueue_ms, spoken) = enqueue_tts(
         state.piper.as_ref(),
         &state.tts_gate,
-        request_id,
-        Action::SearchWeb.as_str(),
-        &tts_text,
-        None,
-        speak_requested,
+        TtsEnqueueRequest {
+            request_id,
+            action_name: Action::SearchWeb.as_str(),
+            text: &tts_text,
+            fallback_text: None,
+            voice_id: tts_voice_for_response_language(&state.config, response_language),
+            requested: speak_requested,
+        },
     );
 
     info!(
@@ -2880,6 +3353,7 @@ fn spawn_rendered_ai_overview_listener(
     state: &AppState,
     request_id: uuid::Uuid,
     query: &str,
+    response_language: ResponseLanguage,
     speak_requested: bool,
 ) {
     if !state.config.search.rendered_ai_overview_listener {
@@ -2891,6 +3365,9 @@ fn spawn_rendered_ai_overview_listener(
         query: query.to_string(),
         search: state.config.search.clone(),
         provider_router: Arc::clone(&state.provider_router),
+        sensitive_provider_mode: sensitive_provider_mode(&state.config),
+        response_language: response_language.prompt_label().to_string(),
+        tts_voice_id: tts_voice_for_response_language(&state.config, response_language),
     };
     let piper = state.piper.clone();
     let tts_gate = state.tts_gate.clone();
@@ -2901,8 +3378,10 @@ fn spawn_rendered_ai_overview_listener(
             Ok(Some(result)) => {
                 let grounded_answer = generate_google_ai_overview_answer_with_router(
                     &job.provider_router,
+                    job.sensitive_provider_mode,
                     job.request_id,
                     &job.query,
+                    &job.response_language,
                     &result.enrichment,
                     "Visão Geral por IA renderizada no Google Search",
                 )
@@ -2938,11 +3417,14 @@ fn spawn_rendered_ai_overview_listener(
                 let (tts_enqueue_ms, spoken) = enqueue_tts(
                     piper.as_ref(),
                     &tts_gate,
-                    job.request_id,
-                    "SearchWebRenderedOverview",
-                    &speech_text,
-                    None,
-                    speak_requested,
+                    TtsEnqueueRequest {
+                        request_id: job.request_id,
+                        action_name: "SearchWebRenderedOverview",
+                        text: &speech_text,
+                        fallback_text: None,
+                        voice_id: job.tts_voice_id.clone(),
+                        requested: speak_requested,
+                    },
                 );
                 let _ = notify(
                     "VisionClip",
@@ -2988,6 +3470,7 @@ async fn generate_google_ai_overview_answer(
     session_id: &SessionId,
     request_id: uuid::Uuid,
     query: &str,
+    response_language: ResponseLanguage,
     enrichment: &SearchEnrichment,
     source_label: &str,
 ) -> Option<String> {
@@ -2995,9 +3478,12 @@ async fn generate_google_ai_overview_answer(
         state,
         session_id,
         format!("{request_id}-google-ai-overview-answer"),
-        query,
-        enrichment,
-        source_label,
+        GroundedSearchAnswerContext {
+            query,
+            response_language: response_language.prompt_label(),
+            enrichment,
+            source_label,
+        },
         "search.ai_overview_answer",
     )
     .await
@@ -3017,17 +3503,23 @@ async fn generate_google_ai_overview_answer(
 
 async fn generate_google_ai_overview_answer_with_router(
     provider_router: &ProviderRouter,
+    sensitive_provider_mode: ProviderMode,
     request_id: uuid::Uuid,
     query: &str,
+    response_language: &str,
     enrichment: &SearchEnrichment,
     source_label: &str,
 ) -> Option<String> {
     match run_provider_search_answer_with_router(
         provider_router,
+        sensitive_provider_mode,
         format!("{request_id}-google-ai-overview-answer"),
-        query,
-        enrichment,
-        source_label,
+        GroundedSearchAnswerContext {
+            query,
+            response_language,
+            enrichment,
+            source_label,
+        },
     )
     .await
     {
@@ -3135,7 +3627,67 @@ fn search_browser_fallback_summary(query: &str, search_blocked: bool) -> String 
     )
 }
 
-fn search_browser_fallback_speech(query: &str, search_blocked: bool) -> String {
+fn search_browser_fallback_speech(
+    query: &str,
+    search_blocked: bool,
+    language: ResponseLanguage,
+) -> String {
+    localized_search_opened_speech(query, search_blocked, language)
+}
+
+fn localized_search_opened_speech(
+    query: &str,
+    search_blocked: bool,
+    language: ResponseLanguage,
+) -> String {
+    if !language.is_portuguese() {
+        return match language {
+            ResponseLanguage::English if search_blocked => format!(
+                "I opened a browser search for {query}. Google blocked local result extraction in this session."
+            ),
+            ResponseLanguage::English => {
+                format!("I opened a browser search for {query}. Check the tab for more details.")
+            }
+            ResponseLanguage::Chinese if search_blocked => {
+                format!("我已在浏览器中搜索{query}。Google 在这次会话中阻止了本地结果提取。")
+            }
+            ResponseLanguage::Chinese => {
+                format!("我已在浏览器中搜索{query}。请查看打开的标签页获取更多信息。")
+            }
+            ResponseLanguage::Spanish if search_blocked => format!(
+                "Abrí una búsqueda en el navegador sobre {query}. Google bloqueó la extracción local de resultados en esta sesión."
+            ),
+            ResponseLanguage::Spanish => format!(
+                "Abrí una búsqueda en el navegador sobre {query}. Revisa la pestaña para más detalles."
+            ),
+            ResponseLanguage::Russian if search_blocked => format!(
+                "Я открыл поиск в браузере по запросу {query}. Google заблокировал локальное извлечение результатов в этой сессии."
+            ),
+            ResponseLanguage::Russian => format!(
+                "Я открыл поиск в браузере по запросу {query}. Посмотрите открытую вкладку для подробностей."
+            ),
+            ResponseLanguage::Japanese if search_blocked => format!(
+                "{query} の検索をブラウザで開きました。Google がこのセッションでローカルの結果抽出をブロックしました。"
+            ),
+            ResponseLanguage::Japanese => {
+                format!("{query} の検索をブラウザで開きました。詳細は開いたタブを確認してください。")
+            }
+            ResponseLanguage::Korean if search_blocked => format!(
+                "{query} 검색을 브라우저에서 열었습니다. Google이 이 세션에서 로컬 결과 추출을 차단했습니다."
+            ),
+            ResponseLanguage::Korean => {
+                format!("{query} 검색을 브라우저에서 열었습니다. 자세한 내용은 열린 탭을 확인하세요.")
+            }
+            ResponseLanguage::Hindi if search_blocked => format!(
+                "मैंने {query} के लिए ब्राउज़र खोज खोल दी है। Google ने इस सत्र में स्थानीय परिणाम निकालने को रोक दिया।"
+            ),
+            ResponseLanguage::Hindi => format!(
+                "मैंने {query} के लिए ब्राउज़र खोज खोल दी है। अधिक जानकारी के लिए खुले टैब को देखें।"
+            ),
+            ResponseLanguage::PortugueseBrazil => unreachable!(),
+        };
+    }
+
     if search_blocked {
         format!(
             "Pesquisa aberta no navegador para {query}. O Google bloqueou a coleta local de resultados nesta sessão."
@@ -3147,16 +3699,21 @@ fn search_browser_fallback_speech(query: &str, search_blocked: bool) -> String {
     }
 }
 
+struct TtsEnqueueRequest<'a> {
+    request_id: uuid::Uuid,
+    action_name: &'a str,
+    text: &'a str,
+    fallback_text: Option<&'a str>,
+    voice_id: Option<String>,
+    requested: bool,
+}
+
 fn enqueue_tts(
     piper: Option<&PiperHttpClient>,
     tts_gate: &TtsPlaybackGate,
-    request_id: uuid::Uuid,
-    action_name: &str,
-    text: &str,
-    fallback_text: Option<&str>,
-    requested: bool,
+    request: TtsEnqueueRequest<'_>,
 ) -> (u64, bool) {
-    if !requested {
+    if !request.requested {
         return (0, false);
     }
 
@@ -3164,25 +3721,30 @@ fn enqueue_tts(
         return (0, false);
     };
 
-    let text = if text.trim().is_empty() {
-        let Some(fallback) = fallback_text.filter(|value| !value.trim().is_empty()) else {
-            warn!(request_id = %request_id, action = %action_name, "skipping TTS for empty text");
+    let text = if request.text.trim().is_empty() {
+        let Some(fallback) = request
+            .fallback_text
+            .filter(|value| !value.trim().is_empty())
+        else {
+            warn!(request_id = %request.request_id, action = %request.action_name, "skipping TTS for empty text");
             return (0, false);
         };
         fallback.trim().to_string()
     } else {
-        text.trim().to_string()
+        request.text.trim().to_string()
     };
 
     let enqueue_started_at = Instant::now();
-    let action_name = action_name.to_string();
+    let request_id = request.request_id;
+    let action_name = request.action_name.to_string();
+    let voice_id = request.voice_id.filter(|voice| !voice.trim().is_empty());
     let tts_gate = tts_gate.clone();
 
     tokio::spawn(async move {
         tts_gate
             .run(async move {
                 let tts_started_at = Instant::now();
-                match piper.synthesize(&text, None).await {
+                match piper.synthesize(&text, voice_id.as_deref()).await {
                     Ok(wav) => {
                         let tts_synthesize_ms = elapsed_ms(tts_started_at);
                         let playback_started_at = Instant::now();
@@ -3194,6 +3756,7 @@ fn enqueue_tts(
                                 info!(
                                     request_id = %request_id,
                                     action = %action_name,
+                                    voice_id = ?voice_id,
                                     output_chars = text.chars().count(),
                                     tts_synthesize_ms,
                                     tts_playback_ms = elapsed_ms(playback_started_at),
@@ -3264,6 +3827,161 @@ mod tests {
         assert!(validate_browser_url("http://example.com").is_ok());
         assert!(validate_browser_url("file:///etc/passwd").is_err());
         assert!(validate_browser_url("https://example.com/a b").is_err());
+    }
+
+    #[test]
+    fn provider_policy_modes_parse_config_values() {
+        assert_eq!(
+            provider_mode_from_policy_value("local-only"),
+            ProviderMode::LocalOnly
+        );
+        assert_eq!(
+            provider_mode_from_policy_value("LOCAL_FIRST"),
+            ProviderMode::LocalFirst
+        );
+        assert_eq!(
+            provider_mode_from_policy_value("cloud_allowed"),
+            ProviderMode::CloudAllowed
+        );
+        assert_eq!(
+            provider_mode_from_policy_value("unexpected"),
+            ProviderMode::LocalOnly
+        );
+    }
+
+    #[test]
+    fn sensitive_provider_request_uses_configured_mode() {
+        let mut config = AppConfig::default();
+        config.providers.sensitive_data_mode = "local-first".into();
+
+        let request = sensitive_provider_route_request(&config, AiTask::Chat);
+
+        assert_eq!(request.task, AiTask::Chat);
+        assert_eq!(request.mode, ProviderMode::LocalFirst);
+        assert!(request.sensitive);
+    }
+
+    #[test]
+    fn detects_response_language_from_voice_transcript() {
+        assert_eq!(
+            detect_response_language("open the terminal"),
+            ResponseLanguage::English
+        );
+        assert_eq!(
+            detect_response_language("abra o terminal"),
+            ResponseLanguage::PortugueseBrazil
+        );
+        assert_eq!(
+            detect_response_language("打开终端"),
+            ResponseLanguage::Chinese
+        );
+        assert_eq!(
+            detect_response_language("открой терминал"),
+            ResponseLanguage::Russian
+        );
+    }
+
+    #[test]
+    fn localizes_voice_open_messages() {
+        assert_eq!(
+            localized_open_application_message(
+                ResponseLanguage::English,
+                "terminal",
+                "x-terminal-emulator",
+                "Abrindo o terminal.",
+            ),
+            "Opening terminal."
+        );
+        assert_eq!(
+            localized_open_application_message(
+                ResponseLanguage::Chinese,
+                "terminal",
+                "x-terminal-emulator",
+                "Abrindo o terminal.",
+            ),
+            "正在打开终端。"
+        );
+        assert_eq!(
+            localized_open_url_message(ResponseLanguage::English, "YouTube"),
+            "Opening YouTube."
+        );
+    }
+
+    #[test]
+    fn localizes_search_fallback_speech() {
+        assert_eq!(
+            search_browser_fallback_speech("Rust async", false, ResponseLanguage::English),
+            "I opened a browser search for Rust async. Check the tab for more details."
+        );
+        assert_eq!(
+            search_browser_fallback_speech("Rust async", false, ResponseLanguage::Chinese),
+            "我已在浏览器中搜索Rust async。请查看打开的标签页获取更多信息。"
+        );
+    }
+
+    #[test]
+    fn selects_tts_voice_for_response_and_document_languages() {
+        let mut config = AppConfig {
+            audio: visionclip_common::config::AudioConfig {
+                default_voice: "pt_BR-fallback".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        config
+            .audio
+            .voices
+            .insert("en".into(), "en_US-lessac-medium".into());
+        config
+            .audio
+            .voices
+            .insert("zh-CN".into(), "zh_CN-huayan-medium".into());
+        config
+            .audio
+            .voices
+            .insert("pt-BR".into(), "pt_BR-faber-medium".into());
+
+        assert_eq!(
+            tts_voice_for_response_language(&config, ResponseLanguage::English).as_deref(),
+            Some("en_US-lessac-medium")
+        );
+        assert_eq!(
+            tts_voice_for_response_language(&config, ResponseLanguage::Chinese).as_deref(),
+            Some("zh_CN-huayan-medium")
+        );
+        assert_eq!(
+            document_voice_id(&config, "pt-BR").as_deref(),
+            Some("pt_BR-faber-medium")
+        );
+        assert_eq!(
+            document_voice_id(&config, "ru").as_deref(),
+            Some("pt_BR-fallback")
+        );
+    }
+
+    #[test]
+    fn cloud_enabled_registers_unavailable_provider_stubs() {
+        let mut config = AppConfig::default();
+        config.providers.cloud_enabled = true;
+
+        let router = build_provider_router(&config, OllamaBackend::new(config.infer.clone()))
+            .expect("provider router");
+
+        assert_eq!(router.len(), 1 + CLOUD_PROVIDER_STUBS.len());
+    }
+
+    #[test]
+    fn cloud_only_stubs_do_not_count_as_available_provider() {
+        let mut config = AppConfig::default();
+        config.providers.ollama_enabled = false;
+        config.providers.cloud_enabled = true;
+
+        let error = match build_provider_router(&config, OllamaBackend::new(config.infer.clone())) {
+            Ok(_) => panic!("cloud stubs must not make the daemon runnable"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("unavailable stubs"));
     }
 
     #[test]

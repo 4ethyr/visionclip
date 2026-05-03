@@ -1,7 +1,11 @@
 use crate::error::{AppError, AppResult};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
-use std::{env, fs, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    env, fs,
+    path::PathBuf,
+};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -11,6 +15,8 @@ pub struct AppConfig {
     pub capture: CaptureConfig,
     #[serde(default)]
     pub infer: InferConfig,
+    #[serde(default)]
+    pub providers: ProvidersConfig,
     #[serde(default)]
     pub search: SearchConfig,
     #[serde(default)]
@@ -64,6 +70,47 @@ pub struct InferConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvidersConfig {
+    #[serde(default = "default_provider_route_mode")]
+    pub route_mode: String,
+    #[serde(default = "default_sensitive_provider_mode")]
+    pub sensitive_data_mode: String,
+    #[serde(default = "default_true")]
+    pub ollama_enabled: bool,
+    #[serde(default)]
+    pub cloud_enabled: bool,
+}
+
+impl ProvidersConfig {
+    pub fn validate(&self) -> AppResult<()> {
+        validate_provider_mode("providers.route_mode", &self.route_mode)?;
+        validate_provider_mode("providers.sensitive_data_mode", &self.sensitive_data_mode)?;
+
+        if !self.ollama_enabled && !self.cloud_enabled {
+            return Err(AppError::Config(
+                "at least one provider family must be enabled".into(),
+            ));
+        }
+
+        if self.cloud_enabled && self.sensitive_data_mode_normalized() == "cloud_allowed" {
+            return Err(AppError::Config(
+                "providers.sensitive_data_mode cannot be cloud_allowed".into(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub fn route_mode_normalized(&self) -> String {
+        normalize_provider_mode(&self.route_mode)
+    }
+
+    pub fn sensitive_data_mode_normalized(&self) -> String {
+        normalize_provider_mode(&self.sensitive_data_mode)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -97,6 +144,8 @@ pub struct AudioConfig {
     pub base_url: String,
     #[serde(default)]
     pub default_voice: String,
+    #[serde(default)]
+    pub voices: HashMap<String, String>,
     #[serde(default = "default_speak_actions")]
     pub speak_actions: Vec<String>,
     #[serde(default = "default_player_command")]
@@ -105,6 +154,62 @@ pub struct AudioConfig {
     pub request_timeout_ms: u64,
     #[serde(default = "default_tts_playback_timeout_ms")]
     pub playback_timeout_ms: u64,
+}
+
+impl AudioConfig {
+    pub fn configured_voice_ids(&self) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut voices = Vec::new();
+        for voice in std::iter::once(&self.default_voice).chain(self.voices.values()) {
+            let voice = voice.trim();
+            if voice.is_empty() || !seen.insert(voice.to_string()) {
+                continue;
+            }
+            voices.push(voice.to_string());
+        }
+        voices.sort();
+        voices
+    }
+
+    pub fn missing_configured_voice_ids<I, S>(&self, available: I) -> Vec<String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let available = available
+            .into_iter()
+            .map(|voice| voice.as_ref().trim().to_string())
+            .collect::<HashSet<_>>();
+        self.configured_voice_ids()
+            .into_iter()
+            .filter(|voice| !available.contains(voice))
+            .collect()
+    }
+
+    pub fn voice_for_language(&self, language: &str) -> Option<String> {
+        let requested = normalize_audio_language_key(language);
+
+        if let Some(requested) = requested.as_deref() {
+            for (language, voice) in &self.voices {
+                let Some(configured) = normalize_audio_language_key(language) else {
+                    continue;
+                };
+                if configured == requested {
+                    let voice = voice.trim();
+                    if !voice.is_empty() {
+                        return Some(voice.to_string());
+                    }
+                }
+            }
+        }
+
+        let default_voice = self.default_voice.trim();
+        if default_voice.is_empty() {
+            None
+        } else {
+            Some(default_voice.to_string())
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,6 +269,7 @@ impl AppConfig {
 
         let raw = fs::read_to_string(path)?;
         let parsed: AppConfig = toml::from_str(&raw)?;
+        parsed.validate()?;
         Ok(parsed)
     }
 
@@ -238,6 +344,10 @@ impl AppConfig {
             .iter()
             .any(|entry| entry.eq_ignore_ascii_case(action))
     }
+
+    pub fn validate(&self) -> AppResult<()> {
+        self.providers.validate()
+    }
 }
 
 impl Default for GeneralConfig {
@@ -275,6 +385,17 @@ impl Default for InferConfig {
     }
 }
 
+impl Default for ProvidersConfig {
+    fn default() -> Self {
+        Self {
+            route_mode: default_provider_route_mode(),
+            sensitive_data_mode: default_sensitive_provider_mode(),
+            ollama_enabled: default_true(),
+            cloud_enabled: false,
+        }
+    }
+}
+
 impl Default for AudioConfig {
     fn default() -> Self {
         Self {
@@ -282,6 +403,7 @@ impl Default for AudioConfig {
             backend: default_audio_backend(),
             base_url: default_piper_base_url(),
             default_voice: String::new(),
+            voices: HashMap::new(),
             speak_actions: default_speak_actions(),
             player_command: default_player_command(),
             request_timeout_ms: default_tts_request_timeout_ms(),
@@ -398,6 +520,27 @@ fn default_context_window_tokens() -> u32 {
     8192
 }
 
+fn default_provider_route_mode() -> String {
+    "local_first".to_string()
+}
+
+fn default_sensitive_provider_mode() -> String {
+    "local_only".to_string()
+}
+
+fn normalize_provider_mode(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace('-', "_")
+}
+
+fn validate_provider_mode(field: &str, value: &str) -> AppResult<()> {
+    match normalize_provider_mode(value).as_str() {
+        "local_only" | "local_first" | "cloud_allowed" => Ok(()),
+        _ => Err(AppError::Config(format!(
+            "{field} must be one of local_only, local_first, cloud_allowed"
+        ))),
+    }
+}
+
 fn default_search_base_url() -> String {
     "https://www.google.com/search".to_string()
 }
@@ -424,6 +567,36 @@ fn default_rendered_ai_overview_poll_interval_ms() -> u64 {
 
 fn default_audio_backend() -> String {
     "piper_http".to_string()
+}
+
+fn normalize_audio_language_key(value: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    if normalized.is_empty() {
+        return None;
+    }
+    let compact = normalized
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-'))
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+
+    let canonical = match compact.as_str() {
+        "pt"
+        | "pt-br"
+        | "pt-brazil"
+        | "portuguese"
+        | "portuguese-brazil"
+        | "brazilian-portuguese" => "pt-BR",
+        "en" | "en-us" | "en-gb" | "english" => "en",
+        "es" | "es-es" | "es-mx" | "spanish" | "espanol" | "castellano" => "es",
+        "zh" | "zh-cn" | "zh-hans" | "chinese" | "mandarin" => "zh",
+        "ru" | "ru-ru" | "russian" => "ru",
+        "ja" | "ja-jp" | "jp" | "japanese" => "ja",
+        "ko" | "ko-kr" | "kr" | "korean" => "ko",
+        "hi" | "hi-in" | "hindi" | "indian" => "hi",
+        _ => return Some(compact),
+    };
+    Some(canonical.to_string())
 }
 
 fn default_voice_backend() -> String {
@@ -549,9 +722,14 @@ mod tests {
         assert!(cfg.infer.embedding_model.is_empty());
         assert!(cfg.infer.thinking_default.is_empty());
         assert_eq!(cfg.infer.context_window_tokens, 8192);
+        assert_eq!(cfg.providers.route_mode_normalized(), "local_first");
+        assert_eq!(cfg.providers.sensitive_data_mode_normalized(), "local_only");
+        assert!(cfg.providers.ollama_enabled);
+        assert!(!cfg.providers.cloud_enabled);
         assert!(cfg.audio.enabled);
         assert_eq!(cfg.audio.request_timeout_ms, 60_000);
         assert_eq!(cfg.audio.playback_timeout_ms, 120_000);
+        assert!(cfg.audio.voices.is_empty());
         assert!(!cfg.voice.enabled);
         assert_eq!(cfg.voice.backend, "auto");
         assert!(cfg.voice.overlay_enabled);
@@ -570,6 +748,93 @@ mod tests {
         assert!(cfg.action_should_speak("OpenUrl", true));
         assert!(!cfg.action_should_speak("CopyText", true));
         assert!(!cfg.action_should_speak("Explain", false));
+    }
+
+    #[test]
+    fn provider_config_rejects_invalid_route_mode() {
+        let mut cfg = AppConfig::default();
+        cfg.providers.route_mode = "wide_open".into();
+
+        let error = cfg.validate().unwrap_err();
+
+        assert!(error.to_string().contains("providers.route_mode"));
+    }
+
+    #[test]
+    fn provider_config_rejects_cloud_for_sensitive_data() {
+        let mut cfg = AppConfig::default();
+        cfg.providers.cloud_enabled = true;
+        cfg.providers.sensitive_data_mode = "cloud-allowed".into();
+
+        let error = cfg.validate().unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("sensitive_data_mode cannot be cloud_allowed"));
+    }
+
+    #[test]
+    fn audio_voice_lookup_accepts_language_aliases() {
+        let mut audio = AudioConfig {
+            default_voice: "pt_BR-fallback".into(),
+            ..AudioConfig::default()
+        };
+        audio
+            .voices
+            .insert("pt-BR".into(), "pt_BR-faber-medium".into());
+        audio
+            .voices
+            .insert("english".into(), "en_US-lessac-medium".into());
+        audio
+            .voices
+            .insert("zh_CN".into(), "zh_CN-huayan-medium".into());
+
+        assert_eq!(
+            audio.voice_for_language("Portuguese (Brazil)").as_deref(),
+            Some("pt_BR-faber-medium")
+        );
+        assert_eq!(
+            audio.voice_for_language("en-US").as_deref(),
+            Some("en_US-lessac-medium")
+        );
+        assert_eq!(
+            audio.voice_for_language("zh").as_deref(),
+            Some("zh_CN-huayan-medium")
+        );
+        assert_eq!(
+            audio.voice_for_language("klingon").as_deref(),
+            Some("pt_BR-fallback")
+        );
+    }
+
+    #[test]
+    fn audio_voice_inventory_is_deduplicated_and_reports_missing() {
+        let mut audio = AudioConfig {
+            default_voice: "pt_BR-faber-medium".into(),
+            ..AudioConfig::default()
+        };
+        audio
+            .voices
+            .insert("pt-BR".into(), "pt_BR-faber-medium".into());
+        audio
+            .voices
+            .insert("en".into(), "en_US-lessac-medium".into());
+        audio
+            .voices
+            .insert("zh".into(), "zh_CN-huayan-medium".into());
+
+        assert_eq!(
+            audio.configured_voice_ids(),
+            vec![
+                "en_US-lessac-medium".to_string(),
+                "pt_BR-faber-medium".to_string(),
+                "zh_CN-huayan-medium".to_string(),
+            ]
+        );
+        assert_eq!(
+            audio.missing_configured_voice_ids(["pt_BR-faber-medium", "zh_CN-huayan-medium"]),
+            vec!["en_US-lessac-medium".to_string()]
+        );
     }
 
     #[test]

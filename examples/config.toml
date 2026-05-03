@@ -19,6 +19,13 @@ temperature = 0.1
 thinking_default = ""
 context_window_tokens = 8192
 
+[providers]
+# O daemon registra somente Ollama nesta fase. Cloud fica desligado por padrao.
+route_mode = "local_first"
+sensitive_data_mode = "local_only"
+ollama_enabled = true
+cloud_enabled = false
+
 [search]
 enabled = true
 base_url = "https://www.google.com/search"
@@ -41,6 +48,17 @@ player_command = "pw-play"
 request_timeout_ms = 60000
 playback_timeout_ms = 120000
 
+[audio.voices]
+# Configure vozes Piper instaladas em tools/piper-voices para pronuncia natural por idioma.
+# O servidor Piper precisa iniciar com --data-dir/--download-dir apontando para esse diretorio.
+"pt-BR" = "pt_BR-faber-medium"
+# en = "en_US-lessac-medium"
+# es = "es_ES-sharvard-medium"
+# zh = "zh_CN-huayan-medium"
+# ru = "ru_RU-ruslan-medium"
+# hi = "hi_IN-pratham-medium"
+# ja/ko ficam em branco ate haver voz Piper compativel instalada ou outro provider TTS.
+
 [voice]
 enabled = false
 backend = "auto"
@@ -53,7 +71,7 @@ channels = 1
 record_command = ""
 # O comando de transcricao deve escrever o texto no stdout ou em {transcript_path}.
 # Placeholders: {wav_path}, {transcript_path}, {duration_ms}, {duration_s}, {sample_rate_hz}, {channels}
-transcribe_command = "venv/bin/python tools/stt/faster_whisper_transcribe.py {wav_path} --model base --language pt --cache-dir tools/stt-cache"
+transcribe_command = "venv/bin/python tools/stt/faster_whisper_transcribe.py {wav_path} --model base --language auto --beam-size 5 --vad-filter true --cache-dir tools/stt-cache"
 transcribe_timeout_ms = 60000
 
 [documents]

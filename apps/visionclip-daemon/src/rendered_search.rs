@@ -17,7 +17,7 @@ use visionclip_common::{
     likely_gnome_shell_screenshot_available, Action, CaptureBackendKind, SessionType,
 };
 use visionclip_infer::{
-    postprocess::sanitize_output, AiTask, ProviderRouteRequest, ProviderRouter,
+    postprocess::sanitize_output, AiTask, ProviderMode, ProviderRouteRequest, ProviderRouter,
     VisionRequest as ProviderVisionRequest,
 };
 use which::which;
@@ -31,6 +31,9 @@ pub struct RenderedSearchJob {
     pub query: String,
     pub search: SearchConfig,
     pub provider_router: Arc<ProviderRouter>,
+    pub sensitive_provider_mode: ProviderMode,
+    pub response_language: String,
+    pub tts_voice_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -131,7 +134,11 @@ pub async fn wait_for_rendered_ai_overview(
 
         let provider = match job
             .provider_router
-            .route(ProviderRouteRequest::sensitive(AiTask::Ocr))
+            .route(ProviderRouteRequest {
+                task: AiTask::Ocr,
+                mode: job.sensitive_provider_mode,
+                sensitive: true,
+            })
             .await
         {
             Ok(provider) => provider,

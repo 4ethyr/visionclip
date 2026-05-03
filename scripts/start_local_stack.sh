@@ -12,7 +12,16 @@ OLLAMA_URL="${VISIONCLIP_OLLAMA_URL:-http://127.0.0.1:11434}"
 MODEL_NAME="${VISIONCLIP_MODEL:-gemma4:e2b}"
 OCR_MODEL_NAME="${VISIONCLIP_OCR_MODEL:-$MODEL_NAME}"
 PIPER_VOICE="${VISIONCLIP_PIPER_VOICE:-pt_BR-faber-medium}"
+PIPER_VOICES="${VISIONCLIP_PIPER_VOICES:-$PIPER_VOICE}"
 PIPER_VOICE_DIR="${VISIONCLIP_PIPER_DIR:-$ROOT_DIR/tools/piper-voices}"
+TTS_VOICE_PT_BR="${VISIONCLIP_TTS_VOICE_PT_BR:-$PIPER_VOICE}"
+TTS_VOICE_EN="${VISIONCLIP_TTS_VOICE_EN:-}"
+TTS_VOICE_ES="${VISIONCLIP_TTS_VOICE_ES:-}"
+TTS_VOICE_ZH="${VISIONCLIP_TTS_VOICE_ZH:-}"
+TTS_VOICE_RU="${VISIONCLIP_TTS_VOICE_RU:-}"
+TTS_VOICE_JA="${VISIONCLIP_TTS_VOICE_JA:-}"
+TTS_VOICE_KO="${VISIONCLIP_TTS_VOICE_KO:-}"
+TTS_VOICE_HI="${VISIONCLIP_TTS_VOICE_HI:-}"
 PLAYER_COMMAND="${VISIONCLIP_PLAYER_COMMAND:-pw-play}"
 CAPTURE_TIMEOUT_MS="${VISIONCLIP_CAPTURE_TIMEOUT_MS:-60000}"
 VOICE_ENABLED="${VISIONCLIP_VOICE_ENABLED:-0}"
@@ -48,7 +57,16 @@ Variaveis uteis:
   VISIONCLIP_MODEL
   VISIONCLIP_OCR_MODEL
   VISIONCLIP_PIPER_VOICE
+  VISIONCLIP_PIPER_VOICES="pt_BR-faber-medium en_US-lessac-medium"
   VISIONCLIP_PIPER_DIR
+  VISIONCLIP_TTS_VOICE_PT_BR
+  VISIONCLIP_TTS_VOICE_EN
+  VISIONCLIP_TTS_VOICE_ES
+  VISIONCLIP_TTS_VOICE_ZH
+  VISIONCLIP_TTS_VOICE_RU
+  VISIONCLIP_TTS_VOICE_JA
+  VISIONCLIP_TTS_VOICE_KO
+  VISIONCLIP_TTS_VOICE_HI
   VISIONCLIP_PLAYER_COMMAND
   VISIONCLIP_CAPTURE_TIMEOUT_MS
   VISIONCLIP_VOICE_ENABLED=1
@@ -184,15 +202,28 @@ ensure_build() {
 }
 
 ensure_piper_voice() {
-    local model_path="$PIPER_VOICE_DIR/$PIPER_VOICE.onnx"
+    local voice="$1"
+    if [[ -z "$voice" ]]; then
+        return
+    fi
+
+    local model_path="$PIPER_VOICE_DIR/$voice.onnx"
     local config_path="$model_path.json"
 
     if [[ -f "$model_path" && -f "$config_path" ]]; then
         return
     fi
 
-    echo "Baixando voz Piper $PIPER_VOICE para $PIPER_VOICE_DIR..."
-    "$VENV_PYTHON" -m piper.download_voices "$PIPER_VOICE" --download_dir "$PIPER_VOICE_DIR"
+    echo "Baixando voz Piper $voice para $PIPER_VOICE_DIR..."
+    "$VENV_PYTHON" -m piper.download_voices "$voice" --download_dir "$PIPER_VOICE_DIR"
+}
+
+ensure_piper_voices() {
+    local voice
+    local normalized="${PIPER_VOICES//,/ } $TTS_VOICE_PT_BR $TTS_VOICE_EN $TTS_VOICE_ES $TTS_VOICE_ZH $TTS_VOICE_RU $TTS_VOICE_JA $TTS_VOICE_KO $TTS_VOICE_HI"
+    for voice in $normalized; do
+        ensure_piper_voice "$voice"
+    done
 }
 
 escape_toml_string() {
@@ -200,6 +231,18 @@ escape_toml_string() {
     value="${value//\\/\\\\}"
     value="${value//\"/\\\"}"
     printf '%s' "$value"
+}
+
+append_audio_voice() {
+    local language="$1"
+    local voice="$2"
+    if [[ -z "$voice" ]]; then
+        return
+    fi
+
+    local escaped_voice
+    escaped_voice="$(escape_toml_string "$voice")"
+    printf '"%s" = "%s"\n' "$language" "$escaped_voice" >>"$CONFIG_PATH"
 }
 
 write_config() {
@@ -280,6 +323,19 @@ transcribe_timeout_ms = $VOICE_TRANSCRIBE_TIMEOUT_MS
 overlay = "compact"
 show_notification = true
 EOF
+
+    cat >>"$CONFIG_PATH" <<EOF
+
+[audio.voices]
+EOF
+    append_audio_voice "pt-BR" "$TTS_VOICE_PT_BR"
+    append_audio_voice "en" "$TTS_VOICE_EN"
+    append_audio_voice "es" "$TTS_VOICE_ES"
+    append_audio_voice "zh" "$TTS_VOICE_ZH"
+    append_audio_voice "ru" "$TTS_VOICE_RU"
+    append_audio_voice "ja" "$TTS_VOICE_JA"
+    append_audio_voice "ko" "$TTS_VOICE_KO"
+    append_audio_voice "hi" "$TTS_VOICE_HI"
 }
 
 warm_model_if_enabled() {
@@ -301,7 +357,7 @@ require_file "$VENV_PYTHON" "Python do venv do Piper"
 ensure_build
 
 "$VENV_PYTHON" -c 'import flask, piper' >/dev/null
-ensure_piper_voice
+ensure_piper_voices
 write_config
 
 ensure_pid_not_running "$PIPER_PID_FILE"
@@ -314,6 +370,8 @@ if ! curl -fsS "http://$PIPER_HOST:$PIPER_PORT/voices" >/dev/null 2>&1; then
         "$PIPER_PID_FILE" \
         "$VENV_PYTHON" -m piper.http_server \
         -m "$PIPER_VOICE_DIR/$PIPER_VOICE.onnx" \
+        --data-dir "$PIPER_VOICE_DIR" \
+        --download-dir "$PIPER_VOICE_DIR" \
         --host "$PIPER_HOST" \
         --port "$PIPER_PORT"
     wait_for_http "http://$PIPER_HOST:$PIPER_PORT/voices" "Piper HTTP"
