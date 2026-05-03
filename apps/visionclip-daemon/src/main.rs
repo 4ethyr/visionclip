@@ -44,7 +44,8 @@ use visionclip_infer::{
     postprocess::{sanitize_for_speech, sanitize_output},
     AiProvider, AiTask, ChatRequest, ChatResponse, EmbedRequest, OllamaBackend, ProviderMode,
     ProviderRouteRequest, ProviderRouter, ProviderSelection, SearchAnswerRequest,
-    SearchAnswerResponse, TranslateRequest, VisionRequest as ProviderVisionRequest, VisionResponse,
+    SearchAnswerResponse, TranslateRequest, UnavailableCloudProvider,
+    VisionRequest as ProviderVisionRequest, VisionResponse,
 };
 use visionclip_output::{notify, open_search_query, open_url, ClipboardOwner};
 use visionclip_tts::PiperHttpClient;
@@ -148,20 +149,30 @@ fn build_provider_router(config: &AppConfig, infer: OllamaBackend) -> Result<Pro
     let mut router = ProviderRouter::new();
     let route_mode = provider_route_mode(config);
     let sensitive_mode = sensitive_provider_mode(config);
+    let mut available_provider_registered = false;
 
     if config.providers.ollama_enabled {
         let ollama_provider: Arc<dyn AiProvider> = Arc::new(infer);
         router.register("ollama", ollama_provider);
+        available_provider_registered = true;
     }
 
     if config.providers.cloud_enabled {
+        let stub_count = register_cloud_provider_stubs(&mut router);
         warn!(
-            "cloud providers are enabled in config but no cloud provider implementation is registered yet"
+            stub_count,
+            "cloud providers are enabled in config but only unavailable stubs are registered in this build"
         );
     }
 
     if router.is_empty() {
         anyhow::bail!("no AI providers are enabled; enable providers.ollama_enabled");
+    }
+
+    if !available_provider_registered {
+        anyhow::bail!(
+            "no available AI providers are registered; cloud providers are unavailable stubs in this build; enable providers.ollama_enabled"
+        );
     }
 
     info!(
@@ -173,6 +184,23 @@ fn build_provider_router(config: &AppConfig, infer: OllamaBackend) -> Result<Pro
     );
 
     Ok(router)
+}
+
+const CLOUD_PROVIDER_STUBS: &[(&str, &str)] = &[
+    ("openai", "OpenAI"),
+    ("gemini", "Gemini"),
+    ("anthropic", "Anthropic"),
+    ("mistral", "Mistral"),
+    ("openrouter", "OpenRouter"),
+];
+
+fn register_cloud_provider_stubs(router: &mut ProviderRouter) -> usize {
+    for (id, display_name) in CLOUD_PROVIDER_STUBS {
+        let provider: Arc<dyn AiProvider> =
+            Arc::new(UnavailableCloudProvider::cloud_stub(*id, *display_name));
+        router.register(*id, provider);
+    }
+    CLOUD_PROVIDER_STUBS.len()
 }
 
 fn provider_route_mode(config: &AppConfig) -> ProviderMode {
@@ -3375,6 +3403,31 @@ mod tests {
         assert_eq!(request.task, AiTask::Chat);
         assert_eq!(request.mode, ProviderMode::LocalFirst);
         assert!(request.sensitive);
+    }
+
+    #[test]
+    fn cloud_enabled_registers_unavailable_provider_stubs() {
+        let mut config = AppConfig::default();
+        config.providers.cloud_enabled = true;
+
+        let router = build_provider_router(&config, OllamaBackend::new(config.infer.clone()))
+            .expect("provider router");
+
+        assert_eq!(router.len(), 1 + CLOUD_PROVIDER_STUBS.len());
+    }
+
+    #[test]
+    fn cloud_only_stubs_do_not_count_as_available_provider() {
+        let mut config = AppConfig::default();
+        config.providers.ollama_enabled = false;
+        config.providers.cloud_enabled = true;
+
+        let error = match build_provider_router(&config, OllamaBackend::new(config.infer.clone())) {
+            Ok(_) => panic!("cloud stubs must not make the daemon runnable"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("unavailable stubs"));
     }
 
     #[test]

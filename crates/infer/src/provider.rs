@@ -247,6 +247,47 @@ pub trait AiProvider: Send + Sync {
     async fn health(&self) -> ProviderHealth;
 }
 
+#[derive(Debug, Clone)]
+pub struct UnavailableCloudProvider {
+    health: ProviderHealth,
+}
+
+impl UnavailableCloudProvider {
+    pub fn cloud_stub(id: impl Into<String>, display_name: impl Into<String>) -> Self {
+        Self {
+            health: ProviderHealth {
+                id: id.into(),
+                display_name: display_name.into(),
+                local: false,
+                available: false,
+                capabilities: vec![
+                    ProviderCapability::Chat,
+                    ProviderCapability::Vision,
+                    ProviderCapability::Ocr,
+                    ProviderCapability::Embeddings,
+                    ProviderCapability::DocumentTranslation,
+                    ProviderCapability::SpeechToText,
+                    ProviderCapability::TextToSpeech,
+                    ProviderCapability::WebSearch,
+                    ProviderCapability::ToolCalling,
+                    ProviderCapability::StructuredOutputs,
+                ],
+                message: Some(
+                    "cloud provider stub is configured but no implementation is registered"
+                        .to_string(),
+                ),
+            },
+        }
+    }
+}
+
+#[async_trait]
+impl AiProvider for UnavailableCloudProvider {
+    async fn health(&self) -> ProviderHealth {
+        self.health.clone()
+    }
+}
+
 #[derive(Clone)]
 pub struct ProviderSelection {
     pub id: String,
@@ -444,5 +485,38 @@ mod tests {
 
         assert_eq!(selected.id, "cloud");
         assert!(!selected.health.local);
+    }
+
+    #[tokio::test]
+    async fn router_ignores_unavailable_cloud_stub() {
+        let stub = Arc::new(UnavailableCloudProvider::cloud_stub("openai", "OpenAI"));
+        let router = ProviderRouter::new().with_provider("openai", stub);
+
+        let result = router
+            .route(ProviderRouteRequest {
+                task: AiTask::Chat,
+                mode: ProviderMode::CloudAllowed,
+                sensitive: false,
+            })
+            .await;
+        let error = match result {
+            Ok(selection) => panic!("unexpected provider selected: {}", selection.id),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("no provider available"));
+    }
+
+    #[tokio::test]
+    async fn cloud_stub_health_is_unavailable_and_remote() {
+        let stub = UnavailableCloudProvider::cloud_stub("gemini", "Gemini");
+        let health = stub.health().await;
+
+        assert_eq!(health.id, "gemini");
+        assert_eq!(health.display_name, "Gemini");
+        assert!(!health.local);
+        assert!(!health.available);
+        assert!(health.supports(ProviderCapability::Chat));
+        assert!(health.message.unwrap().contains("stub"));
     }
 }

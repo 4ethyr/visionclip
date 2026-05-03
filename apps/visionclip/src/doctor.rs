@@ -119,7 +119,7 @@ fn check_provider_policy(providers: &ProvidersConfig) -> DoctorCheck {
         DoctorCheck::warn(
             "providers",
             format!(
-                "cloud habilitado na config, mas dados sensiveis seguem {}; providers externos ainda nao sao registrados pelo daemon",
+                "cloud habilitado na config, mas dados sensiveis seguem {}; daemon registra apenas stubs cloud indisponiveis nesta fase",
                 providers.sensitive_data_mode_normalized()
             ),
         )

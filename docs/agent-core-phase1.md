@@ -51,12 +51,12 @@ Principais módulos atuais:
 - O daemon usa o `ProviderRouter` nos fluxos de documentos para `ask_document`, `summarize_document`, embeddings de ingestão/pergunta e tradução/leitura incremental; tudo segue sensível/local-first e roteia para Ollama local.
 - O fluxo principal de captura/OCR também passa pelo `ProviderRouter`: OCR dedicado usa `AiTask::Ocr`, raciocínio sobre texto OCR usa `AiTask::Chat` e fallback visual usa `AiTask::Vision`.
 - Busca enriquecida, OCR da busca renderizada e respostas do REPL também passam pelo `ProviderRouter`, preservando os prompts especializados de AI Overview e REPL.
-- `[providers]` define e aplica a política inicial de roteamento: `local_first` por padrão, `sensitive_data_mode = "local_only"`, Ollama habilitado e cloud desabilitada.
+- `[providers]` define e aplica a política inicial de roteamento: `local_first` por padrão, `sensitive_data_mode = "local_only"`, Ollama habilitado e cloud desabilitada. Quando `cloud_enabled = true`, o daemon registra apenas stubs indisponíveis para OpenAI/Gemini/Anthropic/Mistral/OpenRouter.
 
 ## Próximos passos
 
 1. Adicionar confirmação real via IPC/UI para tools que retornam `RequireConfirmation`.
-2. Adicionar stubs cloud desabilitados por padrão sobre a política `[providers]`, mantendo `OllamaBackend` como provider local padrão.
+2. Substituir os stubs cloud indisponíveis por implementações reais opt-in, mantendo `OllamaBackend` como provider local padrão.
 3. Extrair DesktopController para apps/URLs, volume, brilho e VPN com command runner mockável.
 4. Conectar voz e CLI ao `AgentOrchestrator` para substituir roteamento local duplicado.
 5. Expor controles de cache/progresso para a UI futura de leitura.
