@@ -607,6 +607,14 @@ impl ReadingProgressStore for DaemonReadingProgressStore {
         documents.persist()?;
         Ok(())
     }
+
+    async fn load_status(&self, session_id: &str) -> Result<Option<ReadingStatus>> {
+        let documents = self.documents.lock().await;
+        Ok(documents
+            .reading_sessions
+            .get(session_id)
+            .map(|session| session.status))
+    }
 }
 
 #[derive(Clone)]
@@ -1402,16 +1410,23 @@ async fn process_document_read(state: &AppState, job: DocumentReadJob) -> Result
             "document_id": document_id.as_str(),
             "reading_session_id": &summary.session_id,
             "chunks_played": summary.chunks_played,
+            "status": format!("{:?}", summary.status),
         }),
     );
+    let message = match summary.status {
+        ReadingStatus::Completed => format!("Leitura concluída: {title}."),
+        ReadingStatus::Stopped => format!("Leitura interrompida: {title}."),
+        ReadingStatus::Paused => format!("Leitura pausada: {title}."),
+        ReadingStatus::Reading | ReadingStatus::Idle => format!("Leitura iniciada: {title}."),
+    };
 
     Ok(JobResult::DocumentStatus {
         request_id,
         document_id: Some(document_id.as_str().to_string()),
         reading_session_id: Some(summary.session_id),
         chunks: Some(summary.chunks_played),
-        message: format!("Leitura concluída: {title}."),
-        spoken: true,
+        message,
+        spoken: summary.chunks_played > 0,
     })
 }
 
