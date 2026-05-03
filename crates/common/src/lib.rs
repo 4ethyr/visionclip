@@ -6,6 +6,7 @@ pub mod config;
 pub mod error;
 pub mod intent;
 pub mod ipc;
+pub mod language;
 pub mod portal;
 pub mod router;
 pub mod security;
@@ -29,10 +30,11 @@ pub use intent::{IntentDetection, IntentKind};
 pub use ipc::{
     decode_message_payload, encode_message_payload, read_message, read_message_payload,
     write_message, Action, ApplicationLaunchJob, CaptureJob, DocumentAskJob, DocumentControlJob,
-    DocumentControlKind, DocumentIngestJob, DocumentReadJob, DocumentSummarizeJob,
+    DocumentControlKind, DocumentIngestJob, DocumentOpenJob, DocumentReadJob, DocumentSummarizeJob,
     DocumentTranslateJob, HealthCheckJob, JobResult, SessionType, UrlOpenJob, VisionRequest,
     VoiceSearchJob,
 };
+pub use language::{normalize_latin_for_language, AssistantLanguage};
 pub use portal::{
     current_desktops, screenshot_portal_backends_for_current_desktop, summarize_portal_backends,
     PortalBackendDescriptor,

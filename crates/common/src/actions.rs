@@ -222,6 +222,32 @@ pub fn builtin_action_specs() -> Vec<ActionSpec> {
             5_000,
         ),
         ActionSpec::new(
+            "open_document",
+            "Busca e abre um documento local do usuario usando apenas launchers de desktop seguros.",
+            RiskLevel::Level2,
+            vec![ActionPermission::DesktopLaunch, ActionPermission::FileRead],
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "max_results": {"type": "integer", "minimum": 1, "maximum": 5, "default": 1}
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "success": {"type": "boolean"},
+                    "path": {"type": "string"},
+                    "message": {"type": "string"}
+                },
+                "required": ["success", "message"]
+            }),
+            8_000,
+        )
+        .with_confirmation(ConfirmationPolicy::OncePerResource),
+        ActionSpec::new(
             "capture_screen_context",
             "Captura texto visível por acessibilidade, DOM permitido, screenshot ou OCR local.",
             RiskLevel::Level2,
@@ -586,6 +612,15 @@ mod tests {
         assert!(!spec.requires_confirmation);
         assert!(spec.permissions.contains(&ActionPermission::DesktopLaunch));
         assert!(spec.permissions.contains(&ActionPermission::Network));
+    }
+
+    #[test]
+    fn open_document_reads_local_files_with_resource_confirmation() {
+        let spec = find_action_spec("open_document").expect("action spec");
+        assert_eq!(spec.risk_level, RiskLevel::Level2);
+        assert_eq!(spec.confirmation, ConfirmationPolicy::OncePerResource);
+        assert!(spec.permissions.contains(&ActionPermission::DesktopLaunch));
+        assert!(spec.permissions.contains(&ActionPermission::FileRead));
     }
 
     #[test]

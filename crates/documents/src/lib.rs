@@ -9,7 +9,11 @@ use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{
+    sync::mpsc,
+    task::JoinHandle,
+    time::{sleep, Duration},
+};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -1208,6 +1212,7 @@ pub struct TranslatedReadingConfig {
     pub chunk_buffer: usize,
     pub translation_buffer: usize,
     pub audio_buffer: usize,
+    pub control_poll_interval_ms: u64,
 }
 
 impl Default for TranslatedReadingConfig {
@@ -1216,6 +1221,7 @@ impl Default for TranslatedReadingConfig {
             chunk_buffer: 8,
             translation_buffer: 8,
             audio_buffer: 4,
+            control_poll_interval_ms: 200,
         }
     }
 }
@@ -1225,6 +1231,7 @@ pub struct TranslatedReadingSummary {
     pub session_id: String,
     pub chunks_played: usize,
     pub last_chunk_index: Option<usize>,
+    pub status: ReadingStatus,
 }
 
 #[async_trait]
@@ -1254,6 +1261,10 @@ pub trait AudioCacheStore: Send + Sync {
 #[async_trait]
 pub trait ReadingProgressStore: Send + Sync {
     async fn save_progress(&self, progress: ReadingProgress) -> Result<()>;
+
+    async fn load_status(&self, _session_id: &str) -> Result<Option<ReadingStatus>> {
+        Ok(None)
+    }
 }
 
 #[derive(Clone)]
@@ -1340,7 +1351,26 @@ where
 
         let mut chunks_played = 0;
         let mut last_chunk_index = None;
+        let mut interrupted_status = None;
+        let control_poll_interval =
+            Duration::from_millis(self.config.control_poll_interval_ms.max(1));
         while let Some(audio_chunk) = audio_rx.recv().await {
+            let control_status = wait_for_reading_control(
+                self.progress.as_ref(),
+                &session.id,
+                &document_id,
+                audio_chunk.chunk_index,
+                control_poll_interval,
+            )
+            .await?;
+            if matches!(
+                control_status,
+                ReadingStatus::Stopped | ReadingStatus::Completed
+            ) {
+                interrupted_status = Some(control_status);
+                break;
+            }
+
             self.audio.play(audio_chunk.clone()).await?;
             if !audio_chunk.cached {
                 if let Some(audio_cache) = &self.audio_cache {
@@ -1371,6 +1401,18 @@ where
                 .await?;
         }
 
+        if let Some(status) = interrupted_status {
+            producer.abort();
+            translator.abort();
+            tts.abort();
+            return Ok(TranslatedReadingSummary {
+                session_id,
+                chunks_played,
+                last_chunk_index,
+                status,
+            });
+        }
+
         producer
             .await
             .context("document chunk producer task failed")??;
@@ -1392,7 +1434,52 @@ where
             session_id,
             chunks_played,
             last_chunk_index,
+            status: ReadingStatus::Completed,
         })
+    }
+}
+
+async fn wait_for_reading_control<P>(
+    progress: &P,
+    session_id: &str,
+    document_id: &DocumentId,
+    current_chunk_index: usize,
+    poll_interval: Duration,
+) -> Result<ReadingStatus>
+where
+    P: ReadingProgressStore + ?Sized,
+{
+    loop {
+        match progress
+            .load_status(session_id)
+            .await?
+            .unwrap_or(ReadingStatus::Reading)
+        {
+            ReadingStatus::Idle | ReadingStatus::Reading => return Ok(ReadingStatus::Reading),
+            ReadingStatus::Paused => {
+                progress
+                    .save_progress(ReadingProgress {
+                        session_id: session_id.to_string(),
+                        document_id: document_id.clone(),
+                        current_chunk_index,
+                        status: ReadingStatus::Paused,
+                    })
+                    .await?;
+                sleep(poll_interval).await;
+            }
+            ReadingStatus::Stopped => {
+                progress
+                    .save_progress(ReadingProgress {
+                        session_id: session_id.to_string(),
+                        document_id: document_id.clone(),
+                        current_chunk_index,
+                        status: ReadingStatus::Stopped,
+                    })
+                    .await?;
+                return Ok(ReadingStatus::Stopped);
+            }
+            ReadingStatus::Completed => return Ok(ReadingStatus::Completed),
+        }
     }
 }
 
@@ -1514,6 +1601,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -1801,6 +1889,7 @@ mod tests {
 
         assert_eq!(summary.chunks_played, 3);
         assert_eq!(summary.last_chunk_index, Some(2));
+        assert_eq!(summary.status, ReadingStatus::Completed);
         assert_eq!(
             audio.played.lock().unwrap().as_slice(),
             &[
@@ -1896,6 +1985,102 @@ mod tests {
             &[(0, "cached audio text".to_string())]
         );
         assert!(cache.saved.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn translated_reading_pipeline_waits_while_paused() {
+        let document_id = DocumentId::new();
+        let chunks = (0..1)
+            .map(|index| DocumentChunk {
+                id: format!("chunk_{index}"),
+                document_id: document_id.clone(),
+                chunk_index: index,
+                page_start: None,
+                page_end: None,
+                section_title: None,
+                text: format!("source {index}"),
+                token_count: 2,
+            })
+            .collect::<Vec<_>>();
+        let session = ReadingSession::new(document_id.clone(), "pt-BR");
+        let audio = Arc::new(RecordingAudioSink::default());
+        let progress = Arc::new(ControlledProgressStore::new([
+            ReadingStatus::Paused,
+            ReadingStatus::Reading,
+        ]));
+        let pipeline = TranslatedReadingPipeline::new(
+            Arc::new(EchoTranslator),
+            Arc::new(TextBytesTts),
+            Arc::clone(&audio),
+            Arc::clone(&progress),
+        )
+        .with_config(TranslatedReadingConfig {
+            control_poll_interval_ms: 1,
+            ..TranslatedReadingConfig::default()
+        });
+
+        let summary = pipeline.run(document_id, session, chunks).await.unwrap();
+
+        assert_eq!(summary.status, ReadingStatus::Completed);
+        assert_eq!(
+            audio.played.lock().unwrap().as_slice(),
+            &[(0, "[pt-BR] source 0".to_string())]
+        );
+        assert!(progress
+            .saved
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|progress| progress.status == ReadingStatus::Paused));
+    }
+
+    #[tokio::test]
+    async fn translated_reading_pipeline_stops_before_next_chunk() {
+        let document_id = DocumentId::new();
+        let chunks = (0..2)
+            .map(|index| DocumentChunk {
+                id: format!("chunk_{index}"),
+                document_id: document_id.clone(),
+                chunk_index: index,
+                page_start: None,
+                page_end: None,
+                section_title: None,
+                text: format!("source {index}"),
+                token_count: 2,
+            })
+            .collect::<Vec<_>>();
+        let session = ReadingSession::new(document_id.clone(), "pt-BR");
+        let audio = Arc::new(RecordingAudioSink::default());
+        let progress = Arc::new(ControlledProgressStore::new([
+            ReadingStatus::Reading,
+            ReadingStatus::Stopped,
+        ]));
+        let pipeline = TranslatedReadingPipeline::new(
+            Arc::new(EchoTranslator),
+            Arc::new(TextBytesTts),
+            Arc::clone(&audio),
+            Arc::clone(&progress),
+        )
+        .with_config(TranslatedReadingConfig {
+            control_poll_interval_ms: 1,
+            chunk_buffer: 1,
+            translation_buffer: 1,
+            audio_buffer: 1,
+        });
+
+        let summary = pipeline.run(document_id, session, chunks).await.unwrap();
+
+        assert_eq!(summary.status, ReadingStatus::Stopped);
+        assert_eq!(summary.chunks_played, 1);
+        assert_eq!(summary.last_chunk_index, Some(0));
+        assert_eq!(
+            audio.played.lock().unwrap().as_slice(),
+            &[(0, "[pt-BR] source 0".to_string())]
+        );
+        assert_eq!(
+            progress.saved.lock().unwrap().last().unwrap().status,
+            ReadingStatus::Stopped
+        );
     }
 
     struct EchoTranslator;
@@ -1998,6 +2183,32 @@ mod tests {
         async fn save_progress(&self, progress: ReadingProgress) -> Result<()> {
             self.saved.lock().unwrap().push(progress);
             Ok(())
+        }
+    }
+
+    struct ControlledProgressStore {
+        saved: Mutex<Vec<ReadingProgress>>,
+        statuses: Mutex<VecDeque<ReadingStatus>>,
+    }
+
+    impl ControlledProgressStore {
+        fn new(statuses: impl IntoIterator<Item = ReadingStatus>) -> Self {
+            Self {
+                saved: Mutex::new(Vec::new()),
+                statuses: Mutex::new(statuses.into_iter().collect()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ReadingProgressStore for ControlledProgressStore {
+        async fn save_progress(&self, progress: ReadingProgress) -> Result<()> {
+            self.saved.lock().unwrap().push(progress);
+            Ok(())
+        }
+
+        async fn load_status(&self, _session_id: &str) -> Result<Option<ReadingStatus>> {
+            Ok(self.statuses.lock().unwrap().pop_front())
         }
     }
 

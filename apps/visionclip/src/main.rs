@@ -11,10 +11,10 @@ use tokio::net::UnixStream;
 use tracing::{info, warn};
 use uuid::Uuid;
 use visionclip_common::{
-    read_message, write_message, AppConfig, ApplicationLaunchJob, CaptureJob, DocumentAskJob,
-    DocumentControlJob, DocumentControlKind, DocumentIngestJob, DocumentReadJob,
-    DocumentSummarizeJob, DocumentTranslateJob, JobResult, SessionType, UrlOpenJob, VisionRequest,
-    VoiceSearchJob,
+    read_message, write_message, AppConfig, ApplicationLaunchJob, AssistantLanguage, CaptureJob,
+    DocumentAskJob, DocumentControlJob, DocumentControlKind, DocumentIngestJob, DocumentOpenJob,
+    DocumentReadJob, DocumentSummarizeJob, DocumentTranslateJob, JobResult, SessionType,
+    UrlOpenJob, VisionRequest, VoiceSearchJob,
 };
 
 #[derive(Debug, Parser)]
@@ -143,11 +143,11 @@ async fn main() -> Result<()> {
     }
 
     if let Some(app_name) = &cli.open_app {
-        return run_open_application(&config, cli.speak, app_name, None).await;
+        return run_open_application(&config, cli.speak, app_name, None, None).await;
     }
 
     if let Some(url) = &cli.open_url {
-        return run_open_url(&config, cli.speak, url, url, None).await;
+        return run_open_url(&config, cli.speak, url, url, None, None).await;
     }
 
     let resolved_voice_agent = if cli.action.is_none() && cli.open_app.is_none() && cli.voice_agent
@@ -164,20 +164,56 @@ async fn main() -> Result<()> {
         match command {
             voice::VoiceAgentCommand::OpenApplication {
                 transcript,
+                language,
                 app_name,
             } => {
-                return run_open_application(&config, cli.speak, app_name, Some(transcript)).await;
+                return run_open_application(
+                    &config,
+                    cli.speak,
+                    app_name,
+                    Some(transcript),
+                    Some(*language),
+                )
+                .await;
             }
             voice::VoiceAgentCommand::OpenUrl {
                 transcript,
+                language,
                 label,
                 url,
             } => {
-                return run_open_url(&config, cli.speak, label, url, Some(transcript)).await;
+                return run_open_url(
+                    &config,
+                    cli.speak,
+                    label,
+                    url,
+                    Some(transcript),
+                    Some(*language),
+                )
+                .await;
             }
-            voice::VoiceAgentCommand::SearchWeb { transcript, query } => {
+            voice::VoiceAgentCommand::OpenDocument {
+                transcript,
+                language,
+                query,
+            } => {
+                return run_open_document(
+                    &config,
+                    cli.speak,
+                    query,
+                    Some(transcript),
+                    Some(*language),
+                )
+                .await;
+            }
+            voice::VoiceAgentCommand::SearchWeb {
+                transcript,
+                language,
+                query,
+            } => {
                 let voice_search = voice::VoiceSearch {
                     transcript: transcript.clone(),
+                    language: *language,
                     query: query.clone(),
                 };
                 return run_voice_search(&config, cli.speak, &voice_search).await;
@@ -219,6 +255,7 @@ async fn main() -> Result<()> {
         info!(
             request_id = %request_id,
             transcript = %voice_request.transcript,
+            input_language = voice_request.language.tts_language_code(),
             resolved_action = voice_request.action.as_str(),
             "voice request resolved"
         );
@@ -270,6 +307,12 @@ async fn main() -> Result<()> {
     let job = CaptureJob {
         request_id,
         action,
+        transcript: resolved_voice_request
+            .as_ref()
+            .map(|voice_request| voice_request.transcript.clone()),
+        input_language: resolved_voice_request
+            .as_ref()
+            .map(|voice_request| voice_request.language),
         mime_type: "image/png".to_string(),
         image_bytes,
         session_type,
@@ -477,6 +520,7 @@ async fn run_open_application(
     speak: bool,
     app_name: &str,
     transcript: Option<&str>,
+    input_language: Option<AssistantLanguage>,
 ) -> Result<()> {
     let request_id = Uuid::new_v4();
     let total_started_at = Instant::now();
@@ -485,6 +529,7 @@ async fn run_open_application(
     info!(
         request_id = %request_id,
         transcript,
+        input_language = input_language.map(|language| language.tts_language_code()),
         app_name,
         speak,
         "open application request started"
@@ -509,6 +554,7 @@ async fn run_open_application(
     let request = VisionRequest::OpenApplication(ApplicationLaunchJob {
         request_id,
         transcript: transcript.map(str::to_string),
+        input_language: input_language.or_else(|| transcript.map(AssistantLanguage::detect)),
         app_name: app_name.to_string(),
         speak,
     });
@@ -550,6 +596,7 @@ async fn run_open_url(
     label: &str,
     url: &str,
     transcript: Option<&str>,
+    input_language: Option<AssistantLanguage>,
 ) -> Result<()> {
     let request_id = Uuid::new_v4();
     let total_started_at = Instant::now();
@@ -558,6 +605,7 @@ async fn run_open_url(
     info!(
         request_id = %request_id,
         transcript,
+        input_language = input_language.map(|language| language.tts_language_code()),
         label,
         url,
         speak,
@@ -583,6 +631,7 @@ async fn run_open_url(
     let request = VisionRequest::OpenUrl(UrlOpenJob {
         request_id,
         transcript: transcript.map(str::to_string),
+        input_language: input_language.or_else(|| transcript.map(AssistantLanguage::detect)),
         label: label.to_string(),
         url: url.to_string(),
         speak,
@@ -619,6 +668,81 @@ async fn run_open_url(
     Ok(())
 }
 
+async fn run_open_document(
+    config: &AppConfig,
+    speak: bool,
+    query: &str,
+    transcript: Option<&str>,
+    input_language: Option<AssistantLanguage>,
+) -> Result<()> {
+    let request_id = Uuid::new_v4();
+    let total_started_at = Instant::now();
+    let socket_path = config.socket_path()?;
+
+    info!(
+        request_id = %request_id,
+        query,
+        transcript = ?transcript,
+        input_language = input_language.map(|language| language.tts_language_code()),
+        speak,
+        "open document request started"
+    );
+
+    let connect_started_at = Instant::now();
+    let mut stream = UnixStream::connect(&socket_path).await.with_context(|| {
+        format!(
+            "failed to connect to daemon socket {}",
+            socket_path.display()
+        )
+    })?;
+    let connect_ms = elapsed_ms(connect_started_at);
+
+    info!(
+        request_id = %request_id,
+        connect_ms,
+        socket = %socket_path.display(),
+        "daemon socket connected"
+    );
+
+    let request = VisionRequest::OpenDocument(DocumentOpenJob {
+        request_id,
+        transcript: transcript.map(str::to_string),
+        input_language: input_language.or_else(|| transcript.map(AssistantLanguage::detect)),
+        query: query.to_string(),
+        speak,
+    });
+
+    let daemon_roundtrip_started_at = Instant::now();
+    write_message(&mut stream, &request).await?;
+    let response: JobResult = read_message(&mut stream).await?;
+    let daemon_roundtrip_ms = elapsed_ms(daemon_roundtrip_started_at);
+
+    match response {
+        JobResult::ActionStatus {
+            message, spoken, ..
+        } => {
+            info!(
+                request_id = %request_id,
+                spoken,
+                daemon_roundtrip_ms,
+                total_ms = elapsed_ms(total_started_at),
+                "open document response received"
+            );
+            println!("{}", message);
+        }
+        JobResult::Error { code, message, .. } => {
+            anyhow::bail!("daemon returned error {code}: {message}");
+        }
+        JobResult::ClipboardText { .. }
+        | JobResult::BrowserQuery { .. }
+        | JobResult::DocumentStatus { .. } => {
+            anyhow::bail!("daemon returned unexpected response for open document");
+        }
+    }
+
+    Ok(())
+}
+
 async fn run_voice_search(
     config: &AppConfig,
     speak: bool,
@@ -631,6 +755,7 @@ async fn run_voice_search(
     info!(
         request_id = %request_id,
         transcript = %voice_search.transcript,
+        input_language = voice_search.language.tts_language_code(),
         query = %voice_search.query,
         speak,
         "voice search request started"
@@ -655,6 +780,7 @@ async fn run_voice_search(
     let request = VisionRequest::VoiceSearch(VoiceSearchJob {
         request_id,
         transcript: voice_search.transcript.clone(),
+        input_language: Some(voice_search.language),
         query: voice_search.query.clone(),
         speak,
     });
@@ -678,9 +804,16 @@ async fn run_voice_search(
                 total_ms = elapsed_ms(total_started_at),
                 "voice browser query response received"
             );
-            println!("Consulta por voz aberta no navegador: {}", query);
+            println!(
+                "{}",
+                localized_voice_search_opened_message(voice_search.language, &query)
+            );
             if let Some(summary) = summary {
-                println!("\nResumo inicial da pesquisa:\n{}", summary);
+                println!(
+                    "\n{}:\n{}",
+                    localized_voice_search_summary_heading(voice_search.language),
+                    summary
+                );
             }
         }
         JobResult::Error { code, message, .. } => {
@@ -707,4 +840,53 @@ fn detect_session_type() -> SessionType {
 
 fn elapsed_ms(started_at: Instant) -> u64 {
     started_at.elapsed().as_millis() as u64
+}
+
+fn localized_voice_search_opened_message(language: AssistantLanguage, query: &str) -> String {
+    match language {
+        AssistantLanguage::PortugueseBrazil => {
+            format!("Consulta por voz aberta no navegador: {query}")
+        }
+        AssistantLanguage::English => format!("Voice search opened in the browser: {query}"),
+        AssistantLanguage::Chinese => format!("已在浏览器中打开语音搜索：{query}"),
+        AssistantLanguage::Spanish => format!("Búsqueda por voz abierta en el navegador: {query}"),
+        AssistantLanguage::Russian => format!("Голосовой поиск открыт в браузере: {query}"),
+        AssistantLanguage::Japanese => format!("音声検索をブラウザで開きました: {query}"),
+        AssistantLanguage::Korean => format!("음성 검색을 브라우저에서 열었습니다: {query}"),
+        AssistantLanguage::Hindi => format!("वॉइस खोज ब्राउज़र में खोल दी गई: {query}"),
+    }
+}
+
+fn localized_voice_search_summary_heading(language: AssistantLanguage) -> &'static str {
+    match language {
+        AssistantLanguage::PortugueseBrazil => "Resumo inicial da pesquisa",
+        AssistantLanguage::English => "Initial search summary",
+        AssistantLanguage::Chinese => "初始搜索摘要",
+        AssistantLanguage::Spanish => "Resumen inicial de la búsqueda",
+        AssistantLanguage::Russian => "Первичное резюме поиска",
+        AssistantLanguage::Japanese => "検索の初期要約",
+        AssistantLanguage::Korean => "초기 검색 요약",
+        AssistantLanguage::Hindi => "प्रारंभिक खोज सारांश",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn localizes_voice_search_cli_messages() {
+        assert_eq!(
+            localized_voice_search_opened_message(AssistantLanguage::English, "Rust async"),
+            "Voice search opened in the browser: Rust async"
+        );
+        assert_eq!(
+            localized_voice_search_summary_heading(AssistantLanguage::Chinese),
+            "初始搜索摘要"
+        );
+        assert_eq!(
+            localized_voice_search_opened_message(AssistantLanguage::PortugueseBrazil, "Rust"),
+            "Consulta por voz aberta no navegador: Rust"
+        );
+    }
 }

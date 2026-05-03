@@ -88,6 +88,7 @@ pub(crate) async fn run(config: &AppConfig) -> Result<bool> {
         command_available,
     ));
     checks.push(check_voice_recorder(&config.voice, command_available));
+    checks.push(check_voice_source(&config.voice, command_available));
     checks.push(check_voice_transcriber(&config.voice, command_available));
     checks.push(check_tts_player(&config.audio, command_available));
     checks.push(check_tts_endpoint(&config.audio).await);
@@ -403,6 +404,60 @@ fn check_voice_recorder(voice: &VoiceConfig, command_exists: impl Fn(&str) -> bo
             "recorder",
             "instale pw-record ou arecord, ou configure record_command",
         )
+    }
+}
+
+fn check_voice_source(voice: &VoiceConfig, command_exists: impl Fn(&str) -> bool) -> DoctorCheck {
+    if !voice.enabled {
+        return DoctorCheck::warn("mic-source", "entrada por voz desabilitada na configuracao");
+    }
+
+    if !command_exists("wpctl") {
+        return DoctorCheck::warn(
+            "mic-source",
+            "wpctl indisponivel; nao foi possivel verificar mute da fonte de microfone",
+        );
+    }
+
+    match Command::new("wpctl")
+        .args(["get-volume", "@DEFAULT_AUDIO_SOURCE@"])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let status = String::from_utf8_lossy(&output.stdout);
+            voice_source_volume_status(status.trim())
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let message = if stderr.is_empty() {
+                "wpctl nao conseguiu consultar @DEFAULT_AUDIO_SOURCE@".to_string()
+            } else {
+                format!("wpctl nao conseguiu consultar @DEFAULT_AUDIO_SOURCE@: {stderr}")
+            };
+            DoctorCheck::warn("mic-source", message)
+        }
+        Err(error) => DoctorCheck::warn(
+            "mic-source",
+            format!("falha ao executar wpctl para verificar microfone: {error}"),
+        ),
+    }
+}
+
+fn voice_source_volume_status(output: &str) -> DoctorCheck {
+    if output.contains("[MUTED]") {
+        return DoctorCheck::warn(
+            "mic-source",
+            "fonte padrao do microfone esta mutada; desmute nas configuracoes de som ou rode `wpctl set-mute @DEFAULT_AUDIO_SOURCE@ 0` antes de usar voz",
+        );
+    }
+
+    if output.is_empty() {
+        DoctorCheck::warn(
+            "mic-source",
+            "wpctl retornou volume vazio para @DEFAULT_AUDIO_SOURCE@",
+        )
+    } else {
+        DoctorCheck::ok("mic-source", format!("fonte padrao ativa ({output})"))
     }
 }
 
@@ -939,6 +994,21 @@ mod tests {
     fn recorder_auto_fails_without_native_recorder() {
         let check = check_voice_recorder(&voice_config(), |_| false);
         assert_eq!(check.status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn voice_source_warns_when_default_microphone_is_muted() {
+        let check = voice_source_volume_status("Volume: 0.62 [MUTED]");
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.message.contains("mutada"));
+    }
+
+    #[test]
+    fn voice_source_accepts_unmuted_default_microphone() {
+        let check = voice_source_volume_status("Volume: 1.00");
+
+        assert_eq!(check.status, CheckStatus::Ok);
     }
 
     #[test]

@@ -3,10 +3,12 @@ mod coddy_bridge;
 #[cfg(feature = "coddy-protocol")]
 mod coddy_contract;
 mod linux_apps;
+mod local_files;
 mod rendered_search;
 mod search;
 
 use crate::linux_apps::open_application;
+use crate::local_files::open_document_by_query;
 use crate::search::{GoogleSearchClient, SearchEnrichment};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -26,12 +28,13 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use visionclip_common::{
-    decode_message_payload, read_message_payload, redact_for_audit, write_message, Action,
-    AppConfig, ApplicationLaunchJob, AuditEvent, AuditLog, CaptureJob, DocumentAskJob,
-    DocumentControlJob, DocumentControlKind, DocumentIngestJob, DocumentReadJob,
-    DocumentSummarizeJob, DocumentTranslateJob, HealthCheckJob, JobResult, PermissionEngine,
-    PolicyDecision, PolicyInput, RiskContext, RiskLevel, SessionId, SessionManager, ToolCall,
-    ToolRegistry, UrlOpenJob, VisionRequest, VoiceSearchJob,
+    decode_message_payload, normalize_latin_for_language, read_message_payload, redact_for_audit,
+    write_message, Action, AppConfig, ApplicationLaunchJob, AssistantLanguage, AuditEvent,
+    AuditLog, CaptureJob, DocumentAskJob, DocumentControlJob, DocumentControlKind,
+    DocumentIngestJob, DocumentOpenJob, DocumentReadJob, DocumentSummarizeJob,
+    DocumentTranslateJob, HealthCheckJob, JobResult, PermissionEngine, PolicyDecision, PolicyInput,
+    RiskContext, RiskLevel, SessionId, SessionManager, ToolCall, ToolRegistry, UrlOpenJob,
+    VisionRequest, VoiceSearchJob,
 };
 use visionclip_documents::{
     AudioCacheEntry, AudioCacheLookup, AudioCacheStore, AudioChunk, AudioSink, ChunkerConfig,
@@ -145,49 +148,7 @@ struct AppState {
     repl: Mutex<coddy_bridge::ReplRuntimeState>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ResponseLanguage {
-    PortugueseBrazil,
-    English,
-    Chinese,
-    Spanish,
-    Russian,
-    Japanese,
-    Korean,
-    Hindi,
-}
-
-impl ResponseLanguage {
-    fn prompt_label(self) -> &'static str {
-        match self {
-            Self::PortugueseBrazil => "Portuguese (Brazil)",
-            Self::English => "English",
-            Self::Chinese => "Chinese",
-            Self::Spanish => "Spanish",
-            Self::Russian => "Russian",
-            Self::Japanese => "Japanese",
-            Self::Korean => "Korean",
-            Self::Hindi => "Hindi",
-        }
-    }
-
-    fn tts_language_code(self) -> &'static str {
-        match self {
-            Self::PortugueseBrazil => "pt-BR",
-            Self::English => "en",
-            Self::Chinese => "zh",
-            Self::Spanish => "es",
-            Self::Russian => "ru",
-            Self::Japanese => "ja",
-            Self::Korean => "ko",
-            Self::Hindi => "hi",
-        }
-    }
-
-    fn is_portuguese(self) -> bool {
-        matches!(self, Self::PortugueseBrazil)
-    }
-}
+type ResponseLanguage = AssistantLanguage;
 
 fn build_provider_router(config: &AppConfig, infer: OllamaBackend) -> Result<ProviderRouter> {
     let mut router = ProviderRouter::new();
@@ -649,6 +610,14 @@ impl ReadingProgressStore for DaemonReadingProgressStore {
         documents.persist()?;
         Ok(())
     }
+
+    async fn load_status(&self, session_id: &str) -> Result<Option<ReadingStatus>> {
+        let documents = self.documents.lock().await;
+        Ok(documents
+            .reading_sessions
+            .get(session_id)
+            .map(|session| session.status))
+    }
 }
 
 #[derive(Clone)]
@@ -825,6 +794,7 @@ async fn process_request(state: &AppState, request: VisionRequest) -> Result<Job
         VisionRequest::VoiceSearch(job) => process_voice_search(state, job).await,
         VisionRequest::OpenApplication(job) => process_open_application(state, job).await,
         VisionRequest::OpenUrl(job) => process_open_url(state, job).await,
+        VisionRequest::OpenDocument(job) => process_open_document(state, job).await,
         VisionRequest::HealthCheck(job) => process_health_check(job).await,
         VisionRequest::DocumentIngest(job) => process_document_ingest(state, job).await,
         VisionRequest::DocumentTranslate(job) => process_document_translate(state, job).await,
@@ -858,6 +828,7 @@ async fn process_open_application(
     info!(
         request_id = %request_id,
         transcript = ?job.transcript,
+        input_language = ?job.input_language.map(|language| language.tts_language_code()),
         app_name,
         speak_requested,
         "processing open application job"
@@ -887,7 +858,8 @@ async fn process_open_application(
             return Err(error);
         }
     };
-    let response_language = response_language_from_transcript(job.transcript.as_deref());
+    let response_language =
+        response_language_from_input(job.input_language, job.transcript.as_deref());
     let message = localized_open_application_message(
         response_language,
         app_name,
@@ -968,6 +940,7 @@ async fn process_open_url(state: &AppState, job: UrlOpenJob) -> Result<JobResult
     info!(
         request_id = %request_id,
         transcript = ?job.transcript,
+        input_language = ?job.input_language.map(|language| language.tts_language_code()),
         label,
         url,
         speak_requested,
@@ -984,7 +957,8 @@ async fn process_open_url(state: &AppState, job: UrlOpenJob) -> Result<JobResult
         );
         return Err(error);
     }
-    let response_language = response_language_from_transcript(job.transcript.as_deref());
+    let response_language =
+        response_language_from_input(job.input_language, job.transcript.as_deref());
     let message = localized_open_url_message(response_language, label);
     record_tool_executed(
         state,
@@ -1024,23 +998,108 @@ async fn process_open_url(state: &AppState, job: UrlOpenJob) -> Result<JobResult
     })
 }
 
+async fn process_open_document(state: &AppState, job: DocumentOpenJob) -> Result<JobResult> {
+    let request_id = job.request_id;
+    let total_started_at = Instant::now();
+    let query = job.query.trim();
+    let speak_requested = state.config.action_should_speak("OpenDocument", job.speak)
+        || state
+            .config
+            .action_should_speak("OpenApplication", job.speak);
+    let session_id = ensure_request_session(state, request_id).await;
+
+    info!(
+        request_id = %request_id,
+        transcript = ?job.transcript,
+        input_language = ?job.input_language.map(|language| language.tts_language_code()),
+        query,
+        speak_requested,
+        "processing open document job"
+    );
+
+    let authorized_tool = authorize_tool_call(
+        state,
+        &session_id,
+        ToolCall::new(
+            format!("{request_id}-open-document"),
+            "open_document",
+            json!({"query": query, "max_results": 1}),
+        ),
+        RiskContext::user_initiated(),
+    )?;
+
+    let result = match open_document_by_query(query) {
+        Ok(result) => result,
+        Err(error) => {
+            record_tool_failed(
+                state,
+                &session_id,
+                &authorized_tool.name,
+                authorized_tool.risk_level,
+                &error.to_string(),
+            );
+            return Err(error);
+        }
+    };
+    let response_language =
+        response_language_from_input(job.input_language, job.transcript.as_deref());
+    let message = localized_open_document_message(response_language, &result.title);
+    record_tool_executed(
+        state,
+        &session_id,
+        &authorized_tool,
+        json!({
+            "query": query,
+            "path": result.path.display().to_string(),
+            "title": result.title,
+            "message": message
+        }),
+    );
+    let (tts_enqueue_ms, spoken) = enqueue_tts(
+        state.piper.as_ref(),
+        &state.tts_gate,
+        TtsEnqueueRequest {
+            request_id,
+            action_name: "OpenDocument",
+            text: &message,
+            fallback_text: None,
+            voice_id: tts_voice_for_response_language(&state.config, response_language),
+            requested: speak_requested,
+        },
+    );
+
+    let _ = notify("VisionClip", &message);
+
+    info!(
+        request_id = %request_id,
+        query,
+        path = %result.path.display(),
+        spoken,
+        tts_enqueue_ms,
+        total_ms = elapsed_ms(total_started_at),
+        "open document job completed"
+    );
+
+    Ok(JobResult::ActionStatus {
+        request_id,
+        message,
+        spoken,
+    })
+}
+
 fn response_language_from_transcript(transcript: Option<&str>) -> ResponseLanguage {
-    transcript
-        .map(detect_response_language)
-        .unwrap_or(ResponseLanguage::PortugueseBrazil)
+    ResponseLanguage::from_transcript(transcript)
+}
+
+fn response_language_from_input(
+    input_language: Option<ResponseLanguage>,
+    transcript: Option<&str>,
+) -> ResponseLanguage {
+    input_language.unwrap_or_else(|| response_language_from_transcript(transcript))
 }
 
 fn response_language_from_document_target(target_language: &str) -> ResponseLanguage {
-    match target_language {
-        "en" => ResponseLanguage::English,
-        "es" => ResponseLanguage::Spanish,
-        "zh" => ResponseLanguage::Chinese,
-        "ru" => ResponseLanguage::Russian,
-        "ja" => ResponseLanguage::Japanese,
-        "ko" => ResponseLanguage::Korean,
-        "hi" => ResponseLanguage::Hindi,
-        _ => ResponseLanguage::PortugueseBrazil,
-    }
+    ResponseLanguage::from_language_code(target_language)
 }
 
 fn tts_voice_for_response_language(
@@ -1057,7 +1116,7 @@ fn tts_voice_for_language_code(config: &AppConfig, language_code: &str) -> Optio
 }
 
 fn tts_voice_for_text(config: &AppConfig, text: &str) -> Option<String> {
-    tts_voice_for_response_language(config, detect_response_language(text))
+    tts_voice_for_response_language(config, ResponseLanguage::detect(text))
 }
 
 fn tts_voice_for_action_output(config: &AppConfig, action: &Action, text: &str) -> Option<String> {
@@ -1067,124 +1126,6 @@ fn tts_voice_for_action_output(config: &AppConfig, action: &Action, text: &str) 
             tts_voice_for_text(config, text)
         }
     }
-}
-
-fn detect_response_language(input: &str) -> ResponseLanguage {
-    let mut has_han = false;
-    let mut has_hiragana_or_katakana = false;
-    let mut has_hangul = false;
-    let mut has_devanagari = false;
-    let mut has_cyrillic = false;
-
-    for ch in input.chars() {
-        let code = ch as u32;
-        if (0x4E00..=0x9FFF).contains(&code) || (0x3400..=0x4DBF).contains(&code) {
-            has_han = true;
-        } else if (0x3040..=0x30FF).contains(&code) {
-            has_hiragana_or_katakana = true;
-        } else if (0xAC00..=0xD7AF).contains(&code) || (0x1100..=0x11FF).contains(&code) {
-            has_hangul = true;
-        } else if (0x0900..=0x097F).contains(&code) {
-            has_devanagari = true;
-        } else if (0x0400..=0x04FF).contains(&code) {
-            has_cyrillic = true;
-        }
-    }
-
-    if has_hiragana_or_katakana {
-        ResponseLanguage::Japanese
-    } else if has_hangul {
-        ResponseLanguage::Korean
-    } else if has_han {
-        ResponseLanguage::Chinese
-    } else if has_devanagari {
-        ResponseLanguage::Hindi
-    } else if has_cyrillic {
-        ResponseLanguage::Russian
-    } else {
-        detect_latin_response_language(input)
-    }
-}
-
-fn detect_latin_response_language(input: &str) -> ResponseLanguage {
-    let normalized = normalize_latin_for_language(input);
-    let padded = format!(" {normalized} ");
-
-    if [
-        " abra ",
-        " abre o ",
-        " abre a ",
-        " abrir o ",
-        " abrir a ",
-        " pesquise ",
-        " pesquisar ",
-        " busque ",
-        " buscar ",
-        " explique ",
-        " traduza ",
-        " o que ",
-        " quem ",
-    ]
-    .iter()
-    .any(|pattern| padded.contains(pattern))
-    {
-        return ResponseLanguage::PortugueseBrazil;
-    }
-
-    if [
-        " open ", " launch ", " start ", " search ", " what ", " who ", " where ", " when ",
-        " why ", " how ",
-    ]
-    .iter()
-    .any(|pattern| padded.contains(pattern))
-    {
-        return ResponseLanguage::English;
-    }
-
-    if [
-        " abre ",
-        " abrir ",
-        " busca ",
-        " buscar ",
-        " traduce ",
-        " traducir ",
-        " explica ",
-        " que es ",
-    ]
-    .iter()
-    .any(|pattern| padded.contains(pattern))
-        || input.contains('¿')
-    {
-        return ResponseLanguage::Spanish;
-    }
-
-    ResponseLanguage::PortugueseBrazil
-}
-
-fn normalize_latin_for_language(input: &str) -> String {
-    input
-        .chars()
-        .map(|ch| match ch {
-            'á' | 'à' | 'ã' | 'â' | 'ä' | 'Á' | 'À' | 'Ã' | 'Â' | 'Ä' => 'a',
-            'é' | 'è' | 'ê' | 'ë' | 'É' | 'È' | 'Ê' | 'Ë' => 'e',
-            'í' | 'ì' | 'î' | 'ï' | 'Í' | 'Ì' | 'Î' | 'Ï' => 'i',
-            'ó' | 'ò' | 'õ' | 'ô' | 'ö' | 'Ó' | 'Ò' | 'Õ' | 'Ô' | 'Ö' => 'o',
-            'ú' | 'ù' | 'û' | 'ü' | 'Ú' | 'Ù' | 'Û' | 'Ü' => 'u',
-            'ç' | 'Ç' => 'c',
-            'ñ' | 'Ñ' => 'n',
-            other => other.to_ascii_lowercase(),
-        })
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch.is_ascii_whitespace() {
-                ch
-            } else {
-                ' '
-            }
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn localized_open_application_message(
@@ -1225,6 +1166,35 @@ fn localized_open_url_message(language: ResponseLanguage, label: &str) -> String
                 format!("Abrindo {target}.")
             }
         }
+        ResponseLanguage::English => format!("Opening {target}."),
+        ResponseLanguage::Chinese => format!("正在打开{target}。"),
+        ResponseLanguage::Spanish => format!("Abriendo {target}."),
+        ResponseLanguage::Russian => format!("Открываю {target}."),
+        ResponseLanguage::Japanese => format!("{target}を開いています。"),
+        ResponseLanguage::Korean => format!("{target} 여는 중입니다."),
+        ResponseLanguage::Hindi => format!("{target} खोल रहा हूँ।"),
+    }
+}
+
+fn localized_open_document_message(language: ResponseLanguage, title: &str) -> String {
+    let target = if title.trim().is_empty() {
+        match language {
+            ResponseLanguage::PortugueseBrazil => "o documento",
+            ResponseLanguage::English => "the document",
+            ResponseLanguage::Chinese => "文档",
+            ResponseLanguage::Spanish => "el documento",
+            ResponseLanguage::Russian => "документ",
+            ResponseLanguage::Japanese => "ドキュメント",
+            ResponseLanguage::Korean => "문서",
+            ResponseLanguage::Hindi => "दस्तावेज़",
+        }
+        .to_string()
+    } else {
+        title.trim().to_string()
+    };
+
+    match language {
+        ResponseLanguage::PortugueseBrazil => format!("Abrindo {target}."),
         ResponseLanguage::English => format!("Opening {target}."),
         ResponseLanguage::Chinese => format!("正在打开{target}。"),
         ResponseLanguage::Spanish => format!("Abriendo {target}."),
@@ -1562,16 +1532,23 @@ async fn process_document_read(state: &AppState, job: DocumentReadJob) -> Result
             "document_id": document_id.as_str(),
             "reading_session_id": &summary.session_id,
             "chunks_played": summary.chunks_played,
+            "status": format!("{:?}", summary.status),
         }),
     );
+    let message = match summary.status {
+        ReadingStatus::Completed => format!("Leitura concluída: {title}."),
+        ReadingStatus::Stopped => format!("Leitura interrompida: {title}."),
+        ReadingStatus::Paused => format!("Leitura pausada: {title}."),
+        ReadingStatus::Reading | ReadingStatus::Idle => format!("Leitura iniciada: {title}."),
+    };
 
     Ok(JobResult::DocumentStatus {
         request_id,
         document_id: Some(document_id.as_str().to_string()),
         reading_session_id: Some(summary.session_id),
         chunks: Some(summary.chunks_played),
-        message: format!("Leitura concluída: {title}."),
-        spoken: true,
+        message,
+        spoken: summary.chunks_played > 0,
     })
 }
 
@@ -1689,6 +1666,7 @@ async fn process_document_ask(state: &AppState, job: DocumentAskJob) -> Result<J
             request_id: format!("{request_id}-document-ask"),
             action: Action::Explain,
             source_app: Some("document".to_string()),
+            response_language: None,
             text: prompt,
         })
         .await?;
@@ -1790,6 +1768,7 @@ async fn process_document_summarize(
             request_id: format!("{request_id}-document-summary"),
             action: Action::Explain,
             source_app: Some("document".to_string()),
+            response_language: None,
             text: prompt,
         })
         .await?;
@@ -2293,7 +2272,7 @@ impl coddy_bridge::ReplNativeServices for DaemonReplNativeServices {
     ) -> coddy_bridge::ReplJobFuture<'a> {
         Box::pin(async move {
             let session_id = ensure_request_session(state, request_id).await;
-            let response_language = detect_response_language(&command_text);
+            let response_language = ResponseLanguage::detect(&command_text);
             let provider = route_sensitive_local_provider(
                 state,
                 Some(&session_id),
@@ -2378,6 +2357,7 @@ impl coddy_bridge::ReplNativeServices for DaemonReplNativeServices {
                 state,
                 ApplicationLaunchJob {
                     request_id,
+                    input_language: Some(ResponseLanguage::detect(&transcript)),
                     transcript: Some(transcript),
                     app_name,
                     speak,
@@ -2401,6 +2381,7 @@ impl coddy_bridge::ReplNativeServices for DaemonReplNativeServices {
                 state,
                 UrlOpenJob {
                     request_id,
+                    input_language: Some(ResponseLanguage::detect(&transcript)),
                     transcript: Some(transcript),
                     label,
                     url,
@@ -2424,6 +2405,7 @@ impl coddy_bridge::ReplNativeServices for DaemonReplNativeServices {
                 state,
                 VoiceSearchJob {
                     request_id,
+                    input_language: Some(ResponseLanguage::detect(&transcript)),
                     transcript,
                     query,
                     speak,
@@ -2537,29 +2519,36 @@ fn record_provider_selected(
 async fn run_provider_chat(
     state: &AppState,
     session_id: &SessionId,
-    request_id: String,
-    action: Action,
-    source_app: Option<String>,
-    text: String,
     operation: &str,
+    job: ProviderChatJob,
 ) -> Result<ChatResponse> {
     let provider =
         route_sensitive_local_provider(state, Some(session_id), AiTask::Chat, operation).await?;
     provider
         .provider
         .chat(ChatRequest {
-            request_id,
-            action,
-            source_app,
-            text,
+            request_id: job.request_id,
+            action: job.action,
+            source_app: job.source_app,
+            response_language: job.response_language,
+            text: job.text,
         })
         .await
+}
+
+struct ProviderChatJob {
+    request_id: String,
+    action: Action,
+    source_app: Option<String>,
+    response_language: Option<String>,
+    text: String,
 }
 
 struct ProviderVisionJob {
     request_id: String,
     action: Action,
     source_app: Option<String>,
+    response_language: Option<String>,
     image_bytes: Vec<u8>,
     mime_type: String,
 }
@@ -2576,6 +2565,7 @@ async fn run_provider_vision(
         request_id: job.request_id,
         action: job.action,
         source_app: job.source_app,
+        response_language: job.response_language,
         image_bytes: job.image_bytes,
         mime_type: job.mime_type,
     };
@@ -2648,20 +2638,23 @@ fn search_answer_request(
     enrichment: &SearchEnrichment,
     source_label: &str,
 ) -> Result<SearchAnswerRequest> {
-    let overview = enrichment
+    let supporting_sources = supporting_sources_text(enrichment);
+    let context_text = enrichment
         .ai_overview
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .context("search enrichment does not include AI overview text")?;
+        .map(str::to_string)
+        .or_else(|| (!supporting_sources.trim().is_empty()).then(|| supporting_sources.clone()))
+        .context("search enrichment does not include usable answer context")?;
 
     Ok(SearchAnswerRequest {
         request_id,
         query: query.to_string(),
         response_language: response_language.to_string(),
         source_label: source_label.to_string(),
-        ai_overview_text: overview.to_string(),
-        supporting_sources: supporting_sources_text(enrichment),
+        ai_overview_text: context_text,
+        supporting_sources,
     })
 }
 
@@ -2805,9 +2798,15 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
     let request_id = job.request_id;
     let action_name = job.action.as_str();
     let total_started_at = Instant::now();
+    let response_language =
+        response_language_from_input(job.input_language, job.transcript.as_deref());
+    let response_language_label = response_language.prompt_label().to_string();
     info!(
         request_id = %request_id,
         action = action_name,
+        transcript = ?job.transcript,
+        input_language = ?job.input_language.map(|language| language.tts_language_code()),
+        response_language = response_language.tts_language_code(),
         image_bytes = job.image_bytes.len(),
         speak_requested = job.speak,
         "processing capture job"
@@ -2844,6 +2843,7 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                 request_id: request_id.to_string(),
                 action: ocr_action,
                 source_app: job.source_app.clone(),
+                response_language: None,
                 image_bytes: job.image_bytes.clone(),
                 mime_type: job.mime_type.clone(),
             },
@@ -2887,6 +2887,7 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                         request_id: request_id.to_string(),
                         action: job.action.clone(),
                         source_app: job.source_app.clone(),
+                        response_language: Some(response_language_label.clone()),
                         image_bytes: job.image_bytes.clone(),
                         mime_type: job.mime_type.clone(),
                     },
@@ -2901,11 +2902,14 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                 match run_provider_chat(
                     state,
                     &session_id,
-                    request_id.to_string(),
-                    job.action.clone(),
-                    job.source_app.clone(),
-                    text,
                     "capture.ocr_text_to_reasoning",
+                    ProviderChatJob {
+                        request_id: request_id.to_string(),
+                        action: job.action.clone(),
+                        source_app: job.source_app.clone(),
+                        response_language: Some(response_language_label.clone()),
+                        text,
+                    },
                 )
                 .await
                 {
@@ -2928,6 +2932,7 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                                 request_id: request_id.to_string(),
                                 action: job.action.clone(),
                                 source_app: job.source_app.clone(),
+                                response_language: Some(response_language_label.clone()),
                                 image_bytes: job.image_bytes.clone(),
                                 mime_type: job.mime_type.clone(),
                             },
@@ -2952,6 +2957,7 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                                 request_id: request_id.to_string(),
                                 action: job.action.clone(),
                                 source_app: job.source_app.clone(),
+                                response_language: Some(response_language_label.clone()),
                                 image_bytes: job.image_bytes.clone(),
                                 mime_type: job.mime_type.clone(),
                             },
@@ -2970,6 +2976,7 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                         request_id: request_id.to_string(),
                         action: job.action.clone(),
                         source_app: job.source_app.clone(),
+                        response_language: Some(response_language_label.clone()),
                         image_bytes: job.image_bytes.clone(),
                         mime_type: job.mime_type.clone(),
                     },
@@ -2995,7 +3002,7 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                 state,
                 request_id,
                 &cleaned,
-                ResponseLanguage::PortugueseBrazil,
+                response_language,
                 speak_requested,
                 total_started_at,
             )
@@ -3110,13 +3117,15 @@ async fn process_voice_search(state: &AppState, job: VoiceSearchJob) -> Result<J
         request_id = %request_id,
         action = action_name,
         transcript = %job.transcript,
+        input_language = ?job.input_language.map(|language| language.tts_language_code()),
         query = %cleaned,
         speak_requested = job.speak,
         "processing voice search job"
     );
 
     let speak_requested = state.config.action_should_speak(action_name, job.speak);
-    let response_language = detect_response_language(&job.transcript);
+    let response_language =
+        response_language_from_input(job.input_language, Some(job.transcript.as_str()));
     let search_result = execute_search_query(
         state,
         request_id,
@@ -3207,23 +3216,29 @@ async fn execute_search_query(
                     .as_ref()
                     .map(|value| value.chars().count())
                     .unwrap_or_default();
-                if let Some(answer) = generate_google_ai_overview_answer(
-                    state,
-                    &session_id,
-                    request_id,
-                    query,
-                    response_language,
-                    &enrichment,
-                    "Visão Geral por IA extraída do Google Search",
-                )
-                .await
-                {
+                let should_generate_grounded_answer =
+                    enrichment.ai_overview.is_some() || !response_language.is_portuguese();
+                let grounded_answer = if should_generate_grounded_answer {
+                    generate_google_ai_overview_answer(
+                        state,
+                        &session_id,
+                        request_id,
+                        query,
+                        response_language,
+                        &enrichment,
+                        search_answer_source_label(&enrichment),
+                    )
+                    .await
+                } else {
+                    None
+                };
+                if let Some(answer) = grounded_answer {
                     search_spoken_text = Some(answer.clone());
-                    search_summary = Some(clipboard_text_for_google_ai_answer(
+                    search_summary = Some(clipboard_text_for_grounded_search_answer(
                         query,
                         &answer,
                         &enrichment,
-                        "Visão Geral por IA extraída do Google Search",
+                        search_answer_source_label(&enrichment),
                     ));
                 } else {
                     search_spoken_text = if response_language.is_portuguese() {
@@ -3388,7 +3403,7 @@ fn spawn_rendered_ai_overview_listener(
                 .await;
 
                 let summary = if let Some(answer) = grounded_answer.as_ref() {
-                    Some(clipboard_text_for_google_ai_answer(
+                    Some(clipboard_text_for_grounded_search_answer(
                         &job.query,
                         answer,
                         &result.enrichment,
@@ -3554,18 +3569,20 @@ fn sanitized_search_answer(
     }
 }
 
-fn clipboard_text_for_google_ai_answer(
+fn clipboard_text_for_grounded_search_answer(
     query: &str,
     answer: &str,
     enrichment: &SearchEnrichment,
     source_label: &str,
 ) -> String {
+    let answer_heading = if enrichment.ai_overview.is_some() {
+        "Resposta baseada na Visão Geral por IA do Google"
+    } else {
+        "Resposta baseada nos resultados iniciais"
+    };
     let mut sections = vec![
         format!("Pesquisa: {query}"),
-        format!(
-            "Resposta baseada na Visão Geral por IA do Google:\n{}",
-            answer.trim()
-        ),
+        format!("{answer_heading}:\n{}", answer.trim()),
     ];
 
     if let Some(overview) = enrichment.ai_overview.as_ref() {
@@ -3581,6 +3598,14 @@ fn clipboard_text_for_google_ai_answer(
     }
 
     sections.join("\n\n")
+}
+
+fn search_answer_source_label(enrichment: &SearchEnrichment) -> &'static str {
+    if enrichment.ai_overview.is_some() {
+        "Visão Geral por IA extraída do Google Search"
+    } else {
+        "Resultados orgânicos extraídos do Google Search"
+    }
 }
 
 fn supporting_sources_text(enrichment: &SearchEnrichment) -> String {
@@ -3864,20 +3889,35 @@ mod tests {
     #[test]
     fn detects_response_language_from_voice_transcript() {
         assert_eq!(
-            detect_response_language("open the terminal"),
+            ResponseLanguage::detect("open the terminal"),
             ResponseLanguage::English
         );
         assert_eq!(
-            detect_response_language("abra o terminal"),
+            ResponseLanguage::detect("abra o terminal"),
             ResponseLanguage::PortugueseBrazil
         );
         assert_eq!(
-            detect_response_language("打开终端"),
+            ResponseLanguage::detect("打开终端"),
             ResponseLanguage::Chinese
         );
         assert_eq!(
-            detect_response_language("открой терминал"),
+            ResponseLanguage::detect("открой терминал"),
             ResponseLanguage::Russian
+        );
+    }
+
+    #[test]
+    fn input_language_metadata_overrides_transcript_detection() {
+        assert_eq!(
+            response_language_from_input(
+                Some(ResponseLanguage::Chinese),
+                Some("open the terminal")
+            ),
+            ResponseLanguage::Chinese
+        );
+        assert_eq!(
+            response_language_from_input(None, Some("open the terminal")),
+            ResponseLanguage::English
         );
     }
 
@@ -3905,6 +3945,10 @@ mod tests {
             localized_open_url_message(ResponseLanguage::English, "YouTube"),
             "Opening YouTube."
         );
+        assert_eq!(
+            localized_open_document_message(ResponseLanguage::English, "Programming TypeScript"),
+            "Opening Programming TypeScript."
+        );
     }
 
     #[test]
@@ -3917,6 +3961,63 @@ mod tests {
             search_browser_fallback_speech("Rust async", false, ResponseLanguage::Chinese),
             "我已在浏览器中搜索Rust async。请查看打开的标签页获取更多信息。"
         );
+    }
+
+    #[test]
+    fn search_answer_request_uses_organic_sources_without_ai_overview() {
+        let enrichment = SearchEnrichment {
+            ai_overview: None,
+            snippets: vec![crate::search::SearchSnippet {
+                title: "Apple Inc. - History".into(),
+                url: "https://www.apple.com/".into(),
+                domain: "apple.com".into(),
+                snippet: "Apple was founded on April 1, 1976, by Steve Jobs, Steve Wozniak, and Ronald Wayne.".into(),
+            }],
+            related_questions: Vec::new(),
+            related_searches: Vec::new(),
+        };
+
+        let request = search_answer_request(
+            "req-search-answer-organic".into(),
+            "When was Apple founded?",
+            "English",
+            &enrichment,
+            search_answer_source_label(&enrichment),
+        )
+        .unwrap();
+
+        assert_eq!(
+            request.source_label,
+            "Resultados orgânicos extraídos do Google Search"
+        );
+        assert!(request.ai_overview_text.contains("Apple was founded"));
+        assert!(request.supporting_sources.contains("apple.com"));
+    }
+
+    #[test]
+    fn grounded_search_clipboard_labels_organic_answers() {
+        let enrichment = SearchEnrichment {
+            ai_overview: None,
+            snippets: vec![crate::search::SearchSnippet {
+                title: "Rust Async".into(),
+                url: "https://example.com/rust-async".into(),
+                domain: "example.com".into(),
+                snippet: "Rust async allows tasks to make progress without blocking a thread."
+                    .into(),
+            }],
+            related_questions: Vec::new(),
+            related_searches: Vec::new(),
+        };
+
+        let text = clipboard_text_for_grounded_search_answer(
+            "Rust async",
+            "Rust async lets concurrent tasks progress without blocking a thread.",
+            &enrichment,
+            search_answer_source_label(&enrichment),
+        );
+
+        assert!(text.contains("Resposta baseada nos resultados iniciais"));
+        assert!(text.contains("Fontes orgânicas complementares"));
     }
 
     #[test]

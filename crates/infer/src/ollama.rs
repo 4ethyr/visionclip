@@ -63,6 +63,7 @@ impl OllamaBackend {
             request_id,
             action,
             source_app: None,
+            response_language: None,
             image_bytes,
             mime_type,
         };
@@ -80,10 +81,17 @@ impl OllamaBackend {
         request_id: String,
         action: visionclip_common::ipc::Action,
         source_app: Option<String>,
+        response_language: Option<String>,
         ocr_text: String,
     ) -> Result<InferenceOutput> {
         let model = self.config.model.as_str();
-        let payload = self.text_chat_payload(model, &action, source_app.as_deref(), &ocr_text);
+        let payload = self.text_chat_payload(
+            model,
+            &action,
+            source_app.as_deref(),
+            response_language.as_deref(),
+            &ocr_text,
+        );
         self.send_chat_request(&request_id, &action, model, "text", payload)
             .await
     }
@@ -184,7 +192,11 @@ impl OllamaBackend {
                 },
                 {
                     "role": "user",
-                    "content": user_prompt(&input.action, input.source_app.as_deref()),
+                    "content": user_prompt(
+                        &input.action,
+                        input.source_app.as_deref(),
+                        input.response_language.as_deref()
+                    ),
                     "images": [image_b64]
                 }
             ]
@@ -196,6 +208,7 @@ impl OllamaBackend {
         model: &str,
         action: &visionclip_common::ipc::Action,
         source_app: Option<&str>,
+        response_language: Option<&str>,
         ocr_text: &str,
     ) -> serde_json::Value {
         let policy = policy_for_action(action);
@@ -215,7 +228,7 @@ impl OllamaBackend {
                 },
                 {
                     "role": "user",
-                    "content": user_prompt_from_text(action, source_app, ocr_text)
+                    "content": user_prompt_from_text(action, source_app, response_language, ocr_text)
                 }
             ]
         })
@@ -552,9 +565,15 @@ impl EmbeddingBackend for OllamaBackend {
 #[async_trait]
 impl AiProvider for OllamaBackend {
     async fn chat(&self, req: ChatRequest) -> Result<ChatResponse> {
-        self.infer_from_text(req.request_id, req.action, req.source_app, req.text)
-            .await
-            .map(ChatResponse::from)
+        self.infer_from_text(
+            req.request_id,
+            req.action,
+            req.source_app,
+            req.response_language,
+            req.text,
+        )
+        .await
+        .map(ChatResponse::from)
     }
 
     async fn vision(&self, req: VisionRequest) -> Result<VisionResponse> {
@@ -562,6 +581,7 @@ impl AiProvider for OllamaBackend {
             request_id: req.request_id,
             action: req.action,
             source_app: req.source_app,
+            response_language: req.response_language,
             image_bytes: req.image_bytes,
             mime_type: req.mime_type,
         };
@@ -844,6 +864,7 @@ mod tests {
                 request_id: "req-1".into(),
                 action: Action::Explain,
                 source_app: None,
+                response_language: None,
                 image_bytes: b"PNG".to_vec(),
                 mime_type: "image/png".into(),
             })
@@ -889,6 +910,7 @@ mod tests {
                 request_id: "req-2".into(),
                 action: Action::Explain,
                 source_app: None,
+                response_language: None,
                 image_bytes: b"PNG".to_vec(),
                 mime_type: "image/png".into(),
             })
@@ -922,6 +944,7 @@ mod tests {
                 request_id: "req-3".into(),
                 action: Action::TranslatePtBr,
                 source_app: None,
+                response_language: None,
                 image_bytes: b"PNG".to_vec(),
                 mime_type: "image/png".into(),
             })
@@ -1041,6 +1064,7 @@ mod tests {
                 request_id: "req-provider-chat".into(),
                 action: Action::Explain,
                 source_app: Some("terminal".into()),
+                response_language: Some("English".into()),
                 text: "explique esse erro".into(),
             },
         )
@@ -1056,6 +1080,10 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("explique esse erro"));
+        assert!(json["messages"][1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Idioma da resposta: English"));
     }
 
     #[tokio::test]
@@ -1075,6 +1103,7 @@ mod tests {
                 request_id: "req-provider-vision".into(),
                 action: Action::Explain,
                 source_app: Some("screen".into()),
+                response_language: Some("English".into()),
                 image_bytes: b"PNG".to_vec(),
                 mime_type: "image/png".into(),
             },
@@ -1087,6 +1116,10 @@ mod tests {
         assert_eq!(output.text, "visao primaria");
         assert_eq!(json["model"], "primary-vision:test");
         assert_eq!(json["messages"][1]["images"][0], "UE5H");
+        assert!(json["messages"][1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Idioma da resposta: English"));
     }
 
     #[tokio::test]
@@ -1106,6 +1139,7 @@ mod tests {
                 request_id: "req-provider-ocr".into(),
                 action: Action::CopyText,
                 source_app: Some("screen".into()),
+                response_language: None,
                 image_bytes: b"PNG".to_vec(),
                 mime_type: "image/png".into(),
             },
@@ -1157,7 +1191,7 @@ mod tests {
         assert!(json["messages"][1]["content"]
             .as_str()
             .unwrap()
-            .contains("GOOGLE_AI_OVERVIEW"));
+            .contains("SEARCH_CONTEXT"));
     }
 
     #[tokio::test]
@@ -1260,12 +1294,13 @@ mod tests {
                 request_id: "req-3".into(),
                 action: Action::SearchWeb,
                 source_app: None,
+                response_language: None,
                 image_bytes: b"PNG".to_vec(),
                 mime_type: "image/png".into(),
             },
         );
         let text_payload =
-            backend.text_chat_payload("gemma4:e2b", &Action::Explain, None, "erro ao abrir");
+            backend.text_chat_payload("gemma4:e2b", &Action::Explain, None, None, "erro ao abrir");
 
         assert_eq!(image_payload["options"]["num_predict"], json!(32));
         assert_eq!(text_payload["options"]["num_predict"], json!(360));
@@ -1315,7 +1350,7 @@ mod tests {
         assert!(json["messages"][1]["content"]
             .as_str()
             .unwrap()
-            .contains("GOOGLE_AI_OVERVIEW"));
+            .contains("SEARCH_CONTEXT"));
     }
 
     #[tokio::test]

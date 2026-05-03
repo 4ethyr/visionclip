@@ -5,7 +5,7 @@ use std::{
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{Output, Stdio},
 };
 use tokio::{
     process::Command,
@@ -13,18 +13,20 @@ use tokio::{
 };
 use tracing::{info, warn};
 use uuid::Uuid;
-use visionclip_common::{config::VoiceConfig, Action};
+use visionclip_common::{config::VoiceConfig, Action, AssistantLanguage};
 use which::which;
 
 #[derive(Debug, Clone)]
 pub struct VoiceRequest {
     pub transcript: String,
+    pub language: AssistantLanguage,
     pub action: Action,
 }
 
 #[derive(Debug, Clone)]
 pub struct VoiceSearch {
     pub transcript: String,
+    pub language: AssistantLanguage,
     pub query: String,
 }
 
@@ -32,15 +34,23 @@ pub struct VoiceSearch {
 pub enum VoiceAgentCommand {
     OpenApplication {
         transcript: String,
+        language: AssistantLanguage,
         app_name: String,
+    },
+    OpenDocument {
+        transcript: String,
+        language: AssistantLanguage,
+        query: String,
     },
     OpenUrl {
         transcript: String,
+        language: AssistantLanguage,
         label: String,
         url: String,
     },
     SearchWeb {
         transcript: String,
+        language: AssistantLanguage,
         query: String,
     },
 }
@@ -57,7 +67,12 @@ pub async fn resolve_voice_request(
         };
 
     let action = resolve_action_from_transcript(&transcript)?;
-    Ok(VoiceRequest { transcript, action })
+    let language = AssistantLanguage::detect(&transcript);
+    Ok(VoiceRequest {
+        transcript,
+        language,
+        action,
+    })
 }
 
 pub async fn resolve_voice_search(
@@ -70,8 +85,13 @@ pub async fn resolve_voice_search(
         } else {
             capture_and_transcribe(config).await?
         };
+    let language = AssistantLanguage::detect(&transcript);
     let query = resolve_search_query_from_transcript(&transcript)?;
-    Ok(VoiceSearch { transcript, query })
+    Ok(VoiceSearch {
+        transcript,
+        language,
+        query,
+    })
 }
 
 pub async fn resolve_voice_agent_command(
@@ -84,15 +104,26 @@ pub async fn resolve_voice_agent_command(
         } else {
             capture_and_transcribe(config).await?
         };
+    let language = AssistantLanguage::detect(&transcript);
+
+    if let Some(query) = resolve_open_document_query_from_transcript(&transcript) {
+        return Ok(VoiceAgentCommand::OpenDocument {
+            transcript,
+            language,
+            query,
+        });
+    }
 
     if let Some(target) = resolve_open_target_from_transcript(&transcript) {
         return match target {
             VoiceOpenTarget::Application(app_name) => Ok(VoiceAgentCommand::OpenApplication {
                 transcript,
+                language,
                 app_name,
             }),
             VoiceOpenTarget::Url { label, url } => Ok(VoiceAgentCommand::OpenUrl {
                 transcript,
+                language,
                 label,
                 url,
             }),
@@ -100,7 +131,11 @@ pub async fn resolve_voice_agent_command(
     }
 
     let query = resolve_search_query_from_transcript(&transcript)?;
-    Ok(VoiceAgentCommand::SearchWeb { transcript, query })
+    Ok(VoiceAgentCommand::SearchWeb {
+        transcript,
+        language,
+        query,
+    })
 }
 
 async fn capture_and_transcribe(config: &VoiceConfig) -> Result<String> {
@@ -316,14 +351,61 @@ async fn transcribe_voice_sample(
         "voice transcription command",
     )
     .await?;
+    if let Some(transcript) = transcript_from_output_or_file(&output, transcript_path)? {
+        return Ok(transcript);
+    }
 
+    let mut diagnostics = vec![TranscriptionDiagnostic::new("primary", &output)];
+    if let Some(retry_command) = transcription_command_without_vad_filter(&rendered) {
+        let primary_stderr = diagnostics
+            .last()
+            .map(|diagnostic| diagnostic.stderr.as_str())
+            .unwrap_or_default();
+        warn!(
+            stderr = %truncate_diagnostic(primary_stderr),
+            "voice transcription returned an empty transcript; retrying without VAD"
+        );
+        let retry_output = run_shell_command(
+            &retry_command,
+            config.transcribe_timeout_ms,
+            "voice transcription command without VAD",
+        )
+        .await?;
+        if let Some(transcript) = transcript_from_output_or_file(&retry_output, transcript_path)? {
+            return Ok(transcript);
+        }
+        diagnostics.push(TranscriptionDiagnostic::new("without_vad", &retry_output));
+    }
+
+    anyhow::bail!("{}", empty_transcript_message(&diagnostics));
+}
+
+#[derive(Debug, Clone)]
+struct TranscriptionDiagnostic {
+    attempt: &'static str,
+    stderr: String,
+}
+
+impl TranscriptionDiagnostic {
+    fn new(attempt: &'static str, output: &Output) -> Self {
+        Self {
+            attempt,
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        }
+    }
+}
+
+fn transcript_from_output_or_file(
+    output: &Output,
+    transcript_path: &Path,
+) -> Result<Option<String>> {
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if !stdout.is_empty() {
         info!(
             chars = stdout.chars().count(),
             "voice transcript received from stdout"
         );
-        return Ok(stdout);
+        return Ok(Some(stdout));
     }
 
     if transcript_path.exists() {
@@ -337,13 +419,61 @@ async fn transcribe_voice_sample(
                 chars = transcript.chars().count(),
                 "voice transcript received from file"
             );
-            return Ok(transcript);
+            return Ok(Some(transcript));
         }
     }
 
-    anyhow::bail!(
+    Ok(None)
+}
+
+fn transcription_command_without_vad_filter(command: &str) -> Option<String> {
+    [
+        ("--vad-filter true", "--vad-filter false"),
+        ("--vad-filter=true", "--vad-filter=false"),
+        ("--vad_filter true", "--vad_filter false"),
+        ("--vad_filter=true", "--vad_filter=false"),
+    ]
+    .into_iter()
+    .find_map(|(from, to)| {
+        command
+            .contains(from)
+            .then(|| command.replacen(from, to, 1))
+    })
+}
+
+fn empty_transcript_message(diagnostics: &[TranscriptionDiagnostic]) -> String {
+    let mut message =
         "voice transcription command produced no transcript on stdout and no usable transcript file"
-    );
+            .to_string();
+    let details = diagnostics
+        .iter()
+        .filter_map(|diagnostic| {
+            let stderr = truncate_diagnostic(&diagnostic.stderr);
+            (!stderr.is_empty()).then(|| format!("{} stderr: {}", diagnostic.attempt, stderr))
+        })
+        .collect::<Vec<_>>();
+    if !details.is_empty() {
+        message.push_str("; ");
+        message.push_str(&details.join("; "));
+    }
+    message
+}
+
+fn truncate_diagnostic(value: &str) -> String {
+    const MAX_CHARS: usize = 1_200;
+    let normalized = value
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let mut chars = normalized.chars();
+    let truncated = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
 }
 
 fn resolve_action_from_transcript(transcript: &str) -> Result<Action> {
@@ -494,6 +624,442 @@ fn resolve_search_query_from_transcript(transcript: &str) -> Result<String> {
     Ok(query)
 }
 
+fn resolve_open_document_query_from_transcript(transcript: &str) -> Option<String> {
+    let raw = transcript.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let normalized = normalize_transcript(raw);
+    if normalized.is_empty() {
+        return None;
+    }
+
+    extract_document_subject_from_specific_prefix(raw, &normalized)
+        .or_else(|| extract_document_subject_from_generic_open(raw, &normalized))
+        .or_else(|| extract_document_subject_from_non_latin_command(raw, &normalized))
+        .and_then(|query| clean_document_query(&query))
+}
+
+#[cfg(test)]
+fn resolve_open_document_from_transcript(transcript: &str) -> Option<String> {
+    resolve_open_document_query_from_transcript(transcript)
+}
+
+fn extract_document_subject_from_specific_prefix(raw: &str, normalized: &str) -> Option<String> {
+    let prefixes = [
+        "por favor abra o livro",
+        "por favor abra o ebook",
+        "por favor abra o pdf",
+        "por favor abra o documento",
+        "por favor abra o arquivo",
+        "por favor abra meu livro",
+        "por favor abra minha apostila",
+        "abra o livro",
+        "abra o ebook",
+        "abra o pdf",
+        "abra o epub",
+        "abra o mobi",
+        "abra o documento",
+        "abra o arquivo",
+        "abra meu livro",
+        "abra minha apostila",
+        "abra livro",
+        "abra ebook",
+        "abra pdf",
+        "abra epub",
+        "abra documento",
+        "abra arquivo",
+        "abrir o livro",
+        "abrir o pdf",
+        "abrir o documento",
+        "abre o livro",
+        "abre o pdf",
+        "abre o documento",
+        "abru livru",
+        "abru o livru",
+        "abri o livro",
+        "abri livro",
+        "open the book",
+        "open my book",
+        "open this book",
+        "open book",
+        "open the ebook",
+        "open my ebook",
+        "open ebook",
+        "open the pdf",
+        "open my pdf",
+        "open pdf",
+        "open the epub",
+        "open epub",
+        "open the document",
+        "open my document",
+        "open document",
+        "open the file",
+        "open my file",
+        "open file",
+        "open de boek",
+        "open boek",
+        "open the boke",
+        "open boke",
+        "open the bokeh",
+        "open bokeh",
+        "find and open the book",
+        "find and open the document",
+        "locate and open the book",
+        "abre el libro",
+        "abre libro",
+        "abrir el libro",
+        "abre el documento",
+        "abre documento",
+        "abrir el documento",
+        "открой книгу",
+        "открой документ",
+        "открой файл",
+        "запусти книгу",
+        "खोलो किताब",
+        "किताब खोलो",
+        "दस्तावेज खोलो",
+    ];
+
+    for prefix in prefixes {
+        if normalized == prefix {
+            return Some(String::new());
+        }
+        if normalized_prefix_match(normalized, prefix) {
+            return Some(raw_suffix_after_normalized_prefix(raw, prefix));
+        }
+    }
+
+    None
+}
+
+fn extract_document_subject_from_generic_open(raw: &str, normalized: &str) -> Option<String> {
+    for prefix in [
+        "open the",
+        "open",
+        "abra o",
+        "abra a",
+        "abra",
+        "abre o",
+        "abre a",
+        "abre",
+        "abrir o",
+        "abrir a",
+        "abrir",
+        "abre el",
+        "abre la",
+        "abrir el",
+        "abrir la",
+        "открой",
+    ] {
+        if normalized_prefix_match(normalized, prefix) {
+            let subject = raw_suffix_after_normalized_prefix(raw, prefix);
+            if document_query_has_marker(&normalize_transcript(&subject)) {
+                return Some(subject);
+            }
+        }
+    }
+    None
+}
+
+fn extract_document_subject_from_non_latin_command(raw: &str, normalized: &str) -> Option<String> {
+    let has_open_marker = [
+        "打开",
+        "打開",
+        "开启",
+        "開啟",
+        "開いて",
+        "開く",
+        "열어",
+        "열기",
+        "खोलो",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker));
+    if !has_open_marker || !document_query_has_marker(normalized) {
+        return None;
+    }
+
+    let mut value = raw.to_string();
+    for marker in [
+        "请打开",
+        "請打開",
+        "打开",
+        "打開",
+        "开启",
+        "開啟",
+        "这本书",
+        "這本書",
+        "本书",
+        "本書",
+        "书籍",
+        "書籍",
+        "电子书",
+        "電子書",
+        "文档",
+        "文件",
+        "書類",
+        "ドキュメント",
+        "を開いて",
+        "開いて",
+        "開く",
+        "열어줘",
+        "열어",
+        "열기",
+        "책",
+        "문서",
+        "파일",
+        "किताब",
+        "पुस्तक",
+        "दस्तावेज",
+        "फ़ाइल",
+        "फाइल",
+        "खोलो",
+    ] {
+        value = value.replace(marker, " ");
+    }
+    Some(value)
+}
+
+fn raw_suffix_after_normalized_prefix(raw: &str, prefix: &str) -> String {
+    let prefix_len = prefix.chars().count();
+    let start = raw
+        .char_indices()
+        .nth(prefix_len)
+        .map(|(index, _)| index)
+        .unwrap_or(raw.len());
+    raw[start..].to_string()
+}
+
+fn document_query_has_marker(normalized: &str) -> bool {
+    let tokens = normalized.split_whitespace().collect::<Vec<_>>();
+    if tokens.iter().any(|token| {
+        matches!(
+            *token,
+            "book"
+                | "boke"
+                | "bokeh"
+                | "boek"
+                | "ebook"
+                | "pdf"
+                | "epub"
+                | "mobi"
+                | "azw"
+                | "azw3"
+                | "document"
+                | "file"
+                | "livro"
+                | "livru"
+                | "documento"
+                | "arquivo"
+                | "libro"
+                | "archivo"
+                | "книга"
+                | "книгу"
+                | "документ"
+                | "файл"
+                | "책"
+                | "문서"
+                | "파일"
+                | "किताब"
+                | "पुस्तक"
+                | "दस्तावेज"
+                | "फाइल"
+                | "फ़ाइल"
+        )
+    }) {
+        return true;
+    }
+
+    let compact = compact_normalized(normalized);
+    [
+        "书",
+        "書",
+        "书籍",
+        "書籍",
+        "文档",
+        "文件",
+        "本",
+        "ドキュメント",
+        "書類",
+    ]
+    .iter()
+    .any(|marker| compact.contains(marker))
+}
+
+fn clean_document_query(subject: &str) -> Option<String> {
+    let mut value = subject
+        .trim()
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '.' | ',' | ';' | ':'))
+        .to_string();
+    if value.is_empty() {
+        return None;
+    }
+
+    loop {
+        let mut changed = false;
+        for qualifier in leading_document_query_qualifiers() {
+            let normalized = normalize_transcript(&value);
+            if normalized == *qualifier {
+                return None;
+            }
+            if normalized
+                .strip_prefix(*qualifier)
+                .is_some_and(|rest| rest.starts_with(' '))
+            {
+                value = value_after_normalized_prefix(&value, qualifier);
+                changed = true;
+                break;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    loop {
+        let mut changed = false;
+        for qualifier in trailing_document_query_qualifiers() {
+            let normalized = normalize_transcript(&value);
+            if normalized
+                .strip_suffix(*qualifier)
+                .is_some_and(|rest| rest.ends_with(' '))
+            {
+                let keep_chars = normalized.chars().count() - qualifier.chars().count();
+                let end = value
+                    .char_indices()
+                    .nth(keep_chars)
+                    .map(|(index, _)| index)
+                    .unwrap_or(value.len());
+                value = value[..end].trim_end().to_string();
+                changed = true;
+                break;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let value = value
+        .trim()
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '.' | ',' | ';' | ':'))
+        .to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn leading_document_query_qualifiers() -> &'static [&'static str] {
+    &[
+        "the book",
+        "the ebook",
+        "the document",
+        "the file",
+        "the pdf",
+        "the epub",
+        "my book",
+        "my ebook",
+        "my document",
+        "my file",
+        "my pdf",
+        "this book",
+        "this document",
+        "called",
+        "named",
+        "titled",
+        "book called",
+        "book named",
+        "ebook called",
+        "pdf called",
+        "book",
+        "boke",
+        "bokeh",
+        "boek",
+        "ebook",
+        "document",
+        "file",
+        "pdf",
+        "epub",
+        "mobi",
+        "azw",
+        "azw3",
+        "o livro",
+        "o ebook",
+        "o documento",
+        "o arquivo",
+        "o pdf",
+        "meu livro",
+        "minha apostila",
+        "meu documento",
+        "meu arquivo",
+        "chamado",
+        "chamada",
+        "intitulado",
+        "intitulada",
+        "livro chamado",
+        "livru",
+        "livro",
+        "documento",
+        "arquivo",
+        "apostila",
+        "el libro",
+        "el documento",
+        "el archivo",
+        "mi libro",
+        "mi documento",
+        "llamado",
+        "llamada",
+        "libro",
+        "documento",
+        "archivo",
+        "книгу",
+        "книга",
+        "документ",
+        "файл",
+    ]
+}
+
+fn trailing_document_query_qualifiers() -> &'static [&'static str] {
+    &[
+        "the book",
+        "the ebook",
+        "the document",
+        "the file",
+        "book",
+        "boke",
+        "bokeh",
+        "boek",
+        "ebook",
+        "document",
+        "file",
+        "pdf",
+        "epub",
+        "mobi",
+        "azw",
+        "azw3",
+        "livru",
+        "livro",
+        "documento",
+        "arquivo",
+        "apostila",
+        "libro",
+        "archivo",
+        "книгу",
+        "книга",
+        "документ",
+        "файл",
+    ]
+}
+
+fn value_after_normalized_prefix(value: &str, prefix: &str) -> String {
+    let prefix_len = prefix.chars().count();
+    let start = value
+        .char_indices()
+        .nth(prefix_len)
+        .map(|(index, _)| index)
+        .unwrap_or(value.len());
+    value[start..].trim_start().to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum VoiceOpenTarget {
     Application(String),
@@ -570,6 +1136,9 @@ fn extract_open_subject(raw: &str, normalized: &str) -> Option<String> {
         "abra o",
         "abra a",
         "abra",
+        "abro o",
+        "abro a",
+        "abro",
         "abre o aplicativo",
         "abre a aplicacao",
         "abre o programa",
@@ -1135,6 +1704,22 @@ fn render_command(program: &str, args: &[String]) -> String {
 mod tests {
     use super::*;
 
+    fn test_voice_config(transcribe_command: &str) -> VoiceConfig {
+        VoiceConfig {
+            enabled: true,
+            backend: "auto".into(),
+            target: String::new(),
+            overlay_enabled: true,
+            shortcut: "<Super>F12".into(),
+            record_duration_ms: 4_000,
+            sample_rate_hz: 16_000,
+            channels: 1,
+            record_command: String::new(),
+            transcribe_command: transcribe_command.to_string(),
+            transcribe_timeout_ms: 5_000,
+        }
+    }
+
     #[test]
     fn resolves_translate_from_ptbr_voice_request() {
         let action = resolve_action_from_transcript("Traduza isso para português").unwrap();
@@ -1203,6 +1788,67 @@ mod tests {
     }
 
     #[test]
+    fn renders_vad_disabled_retry_command() {
+        assert_eq!(
+            transcription_command_without_vad_filter(
+                "tool audio.wav --vad-filter true --model base"
+            )
+            .as_deref(),
+            Some("tool audio.wav --vad-filter false --model base")
+        );
+        assert_eq!(
+            transcription_command_without_vad_filter("tool audio.wav --vad-filter=true").as_deref(),
+            Some("tool audio.wav --vad-filter=false")
+        );
+        assert!(transcription_command_without_vad_filter("tool audio.wav").is_none());
+    }
+
+    #[test]
+    fn empty_transcript_message_includes_stderr_diagnostics() {
+        let message = empty_transcript_message(&[TranscriptionDiagnostic {
+            attempt: "primary",
+            stderr: "audio=/tmp/sample.wav duration=4.00s\nno speech recognized".to_string(),
+        }]);
+
+        assert!(message.contains("primary stderr"));
+        assert!(message.contains("no speech recognized"));
+    }
+
+    #[tokio::test]
+    async fn transcribe_voice_sample_reports_empty_stderr() {
+        let config = test_voice_config(
+            "printf 'audio=/tmp/sample.wav duration=4.00s\\nno speech recognized\\n' >&2",
+        );
+        let wav_path = temp_voice_path("wav");
+        let transcript_path = temp_voice_path("txt");
+
+        let error = transcribe_voice_sample(&config, &wav_path, &transcript_path)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("no speech recognized"));
+        let _ = fs::remove_file(wav_path);
+        let _ = fs::remove_file(transcript_path);
+    }
+
+    #[tokio::test]
+    async fn transcribe_voice_sample_retries_without_vad_on_empty_transcript() {
+        let config = test_voice_config(
+            r#"if [ "--vad-filter true" = "--vad-filter true" ]; then printf 'no speech recognized\n' >&2; else printf 'fallback transcript\n'; fi"#,
+        );
+        let wav_path = temp_voice_path("wav");
+        let transcript_path = temp_voice_path("txt");
+
+        let transcript = transcribe_voice_sample(&config, &wav_path, &transcript_path)
+            .await
+            .unwrap();
+
+        assert_eq!(transcript, "fallback transcript");
+        let _ = fs::remove_file(wav_path);
+        let _ = fs::remove_file(transcript_path);
+    }
+
+    #[test]
     fn strips_search_prefix_from_voice_transcript() {
         let query =
             resolve_search_query_from_transcript("Pesquise por clima em Sao Paulo hoje").unwrap();
@@ -1237,6 +1883,8 @@ mod tests {
     fn resolves_standalone_known_app_from_voice_transcript() {
         let cases = [
             ("terminal", "terminal"),
+            ("terminau", "terminal"),
+            ("termnal", "terminal"),
             ("vscode", "VS Code"),
             ("configurações", "configurações"),
             ("BurpSuite", "BurpSuite"),
@@ -1256,6 +1904,7 @@ mod tests {
         let cases = [
             ("abra o navegador", "navegador"),
             ("abre o terminal", "terminal"),
+            ("abro terminal", "terminal"),
             ("abra o terminau", "terminal"),
             ("abra o termnal", "terminal"),
             ("open the terminal", "terminal"),
@@ -1270,6 +1919,88 @@ mod tests {
         for (transcript, expected_app) in cases {
             let app_name = resolve_open_application_from_transcript(transcript).unwrap();
             assert_eq!(app_name, expected_app);
+        }
+    }
+
+    #[test]
+    fn resolves_open_document_phrases() {
+        let cases = [
+            (
+                "abra o livro Programming TypeScript",
+                "Programming TypeScript",
+            ),
+            ("abra o pdf Grey Hat Python", "Grey Hat Python"),
+            ("abra meu livro chamado Grey Hat Python", "Grey Hat Python"),
+            ("abru lívru Grey Hat Python", "Grey Hat Python"),
+            (
+                "Open the book Programming TypeScript",
+                "Programming TypeScript",
+            ),
+            ("open my book Grey Hat Python", "Grey Hat Python"),
+            ("open Programming TypeScript book", "Programming TypeScript"),
+            (
+                "Open de boek, Computer Security Fundamentals",
+                "Computer Security Fundamentals",
+            ),
+            (
+                "Open the bokeh Metasploit for beginners",
+                "Metasploit for beginners",
+            ),
+            (
+                "abre el libro Programming TypeScript",
+                "Programming TypeScript",
+            ),
+            (
+                "открой книгу Programming TypeScript",
+                "Programming TypeScript",
+            ),
+            (
+                "打开 Programming TypeScript 这本书",
+                "Programming TypeScript",
+            ),
+            ("Programming TypeScript 책 열어줘", "Programming TypeScript"),
+        ];
+
+        for (transcript, expected_query) in cases {
+            let query = resolve_open_document_from_transcript(transcript).unwrap();
+            assert_eq!(query, expected_query);
+        }
+    }
+
+    #[test]
+    fn open_document_detection_does_not_steal_websites_or_apps() {
+        assert!(resolve_open_document_from_transcript("open facebook").is_none());
+        assert!(resolve_open_document_from_transcript("open the terminal").is_none());
+    }
+
+    #[tokio::test]
+    async fn voice_agent_prefers_open_document_intent() {
+        let config = VoiceConfig {
+            enabled: false,
+            backend: "auto".into(),
+            target: String::new(),
+            overlay_enabled: true,
+            shortcut: "<Super>F12".into(),
+            record_duration_ms: 4_000,
+            sample_rate_hz: 16_000,
+            channels: 1,
+            record_command: String::new(),
+            transcribe_command: String::new(),
+            transcribe_timeout_ms: 60_000,
+        };
+
+        let command =
+            resolve_voice_agent_command(&config, Some("Open the book Programming TypeScript"))
+                .await
+                .unwrap();
+        match command {
+            VoiceAgentCommand::OpenDocument {
+                query, language, ..
+            } => {
+                assert_eq!(query, "Programming TypeScript");
+                assert_eq!(language, AssistantLanguage::English);
+            }
+            other => panic!("unexpected voice agent command: {other:?}"),
         }
     }
 

@@ -40,7 +40,7 @@ Within the daemon source, Coddy protocol handling is intentionally confined to `
 
 `coddy_bridge.rs` also owns the Coddy REPL runtime state, event stream, event construction, command dispatch, Ask/VoiceTurn orchestration, intent event mapping, voice-turn intent adaptation, local REPL commands and policy-only screen-assist lifecycle. The daemon entrypoint no longer owns the Coddy turn pipeline and must stay limited to adapting native VisionClip services such as inference, search, TTS, app launching and URL opening through `ReplNativeServices`. This keeps the Coddy protocol surface behind the bridge while allowing the native VisionClip runtime to remain private to the daemon.
 
-`visionclip-common` and the `visionclip` CLI must stay free of Coddy crates. Their IPC surface is limited to native VisionClip operations: capture, voice search, open application, open URL and healthcheck.
+`visionclip-common` and the `visionclip` CLI must stay free of Coddy crates. Their IPC surface is limited to native VisionClip operations: capture, voice search, open application, open URL, open local document and healthcheck.
 
 This is an integration boundary, not ownership of the Coddy project. The Coddy app, Electron UI, REPL docs and prompt pack should not be reintroduced into the VisionClip workspace.
 

@@ -287,6 +287,7 @@ mod tests {
         for name in [
             "open_application",
             "open_url",
+            "open_document",
             "search_web",
             "capture_screen_context",
             "speak_text",
