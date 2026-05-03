@@ -284,6 +284,31 @@ playback_timeout_ms = 120000
 
 O daemon serializa a reprodução de áudio: se outra ação com `--speak` terminar enquanto uma fala ainda está tocando, a nova resposta aguarda a anterior terminar em vez de abrir outro player por cima.
 
+Para pronúncia natural multilíngue, configure vozes Piper por idioma. O daemon usa o idioma detectado do comando de voz para `OpenApplication`, `OpenUrl` e `SearchWeb`, e usa o idioma alvo em leitura/tradução de documentos:
+
+```toml
+[audio.voices]
+"pt-BR" = "pt_BR-faber-medium"
+en = "en_US-lessac-medium"
+zh = "zh_CN-huayan-medium"
+es = "es_ES-sharvard-medium"
+ru = "ru_RU-ruslan-medium"
+hi = "hi_IN-pratham-medium"
+```
+
+Para japonês e coreano, deixe `ja`/`ko` sem configuração até instalar uma voz Piper compatível ou plugar outro provider TTS local; sem uma voz do idioma, o fallback continuará usando a voz padrão.
+
+O `piper.http_server` precisa iniciar com o diretório de vozes como `--data-dir`/`--download-dir`, pois o servidor carrega a voz solicitada no payload `voice` sob demanda:
+
+```bash
+python3 -m piper.http_server \
+  -m tools/piper-voices/pt_BR-faber-medium.onnx \
+  --data-dir tools/piper-voices \
+  --download-dir tools/piper-voices \
+  --host 127.0.0.1 \
+  --port 5000
+```
+
 ## Busca enriquecida
 
 O VisionClip tenta enriquecer `SearchWeb` com uma leitura inicial dos resultados do Google. Esse scrape e best-effort: quando houver bloco util equivalente a AI Overview/Visão geral criada por IA ou snippets organicos iniciais, o daemon monta contexto para clipboard e TTS.
@@ -306,12 +331,6 @@ open_browser = true
 rendered_ai_overview_listener = true
 rendered_ai_overview_wait_ms = 12000
 rendered_ai_overview_poll_interval_ms = 3000
-```
-
-Exemplo de inicialização do Piper HTTP:
-
-```bash
-python3 -m piper.http_server -m <VOICE_NAME> --host 127.0.0.1 --port 5000
 ```
 
 ## systemd de usuário

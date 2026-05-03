@@ -43,6 +43,12 @@ if [[ -z "\$PIPER_PYTHON" ]]; then
 fi
 
 if [[ -z "\$VOICE_PATH" ]]; then
+  if [[ -f "\$VOICE_DIR/pt_BR-faber-medium.onnx" ]]; then
+    VOICE_PATH="\$VOICE_DIR/pt_BR-faber-medium.onnx"
+  fi
+fi
+
+if [[ -z "\$VOICE_PATH" ]]; then
   if [[ -d "\$VOICE_DIR" ]]; then
     mapfile -t voices < <(find "\$VOICE_DIR" -maxdepth 1 -type f -name '*.onnx' | sort)
     if [[ "\${#voices[@]}" -gt 0 ]]; then
@@ -56,7 +62,12 @@ if [[ -z "\$VOICE_PATH" ]]; then
   exit 1
 fi
 
-exec "\$PIPER_PYTHON" -m piper.http_server -m "\$VOICE_PATH" --host 127.0.0.1 --port "\$PIPER_PORT"
+exec "\$PIPER_PYTHON" -m piper.http_server \
+  -m "\$VOICE_PATH" \
+  --data-dir "\$VOICE_DIR" \
+  --download-dir "\$VOICE_DIR" \
+  --host 127.0.0.1 \
+  --port "\$PIPER_PORT"
 EOF
 chmod +x "$BIN_DIR/visionclip-piper-http"
 

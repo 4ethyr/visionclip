@@ -171,6 +171,19 @@ impl ResponseLanguage {
         }
     }
 
+    fn tts_language_code(self) -> &'static str {
+        match self {
+            Self::PortugueseBrazil => "pt-BR",
+            Self::English => "en",
+            Self::Chinese => "zh",
+            Self::Spanish => "es",
+            Self::Russian => "ru",
+            Self::Japanese => "ja",
+            Self::Korean => "ko",
+            Self::Hindi => "hi",
+        }
+    }
+
     fn is_portuguese(self) -> bool {
         matches!(self, Self::PortugueseBrazil)
     }
@@ -890,11 +903,14 @@ async fn process_open_application(
     let (tts_enqueue_ms, spoken) = enqueue_tts(
         state.piper.as_ref(),
         &state.tts_gate,
-        request_id,
-        "OpenApplication",
-        &message,
-        None,
-        speak_requested,
+        TtsEnqueueRequest {
+            request_id,
+            action_name: "OpenApplication",
+            text: &message,
+            fallback_text: None,
+            voice_id: tts_voice_for_response_language(&state.config, response_language),
+            requested: speak_requested,
+        },
     );
 
     let _ = notify("VisionClip", &message);
@@ -979,11 +995,14 @@ async fn process_open_url(state: &AppState, job: UrlOpenJob) -> Result<JobResult
     let (tts_enqueue_ms, spoken) = enqueue_tts(
         state.piper.as_ref(),
         &state.tts_gate,
-        request_id,
-        "OpenUrl",
-        &message,
-        None,
-        speak_requested,
+        TtsEnqueueRequest {
+            request_id,
+            action_name: "OpenUrl",
+            text: &message,
+            fallback_text: None,
+            voice_id: tts_voice_for_response_language(&state.config, response_language),
+            requested: speak_requested,
+        },
     );
 
     let _ = notify("VisionClip", &message);
@@ -1009,6 +1028,45 @@ fn response_language_from_transcript(transcript: Option<&str>) -> ResponseLangua
     transcript
         .map(detect_response_language)
         .unwrap_or(ResponseLanguage::PortugueseBrazil)
+}
+
+fn response_language_from_document_target(target_language: &str) -> ResponseLanguage {
+    match target_language {
+        "en" => ResponseLanguage::English,
+        "es" => ResponseLanguage::Spanish,
+        "zh" => ResponseLanguage::Chinese,
+        "ru" => ResponseLanguage::Russian,
+        "ja" => ResponseLanguage::Japanese,
+        "ko" => ResponseLanguage::Korean,
+        "hi" => ResponseLanguage::Hindi,
+        _ => ResponseLanguage::PortugueseBrazil,
+    }
+}
+
+fn tts_voice_for_response_language(
+    config: &AppConfig,
+    language: ResponseLanguage,
+) -> Option<String> {
+    config
+        .audio
+        .voice_for_language(language.tts_language_code())
+}
+
+fn tts_voice_for_language_code(config: &AppConfig, language_code: &str) -> Option<String> {
+    config.audio.voice_for_language(language_code)
+}
+
+fn tts_voice_for_text(config: &AppConfig, text: &str) -> Option<String> {
+    tts_voice_for_response_language(config, detect_response_language(text))
+}
+
+fn tts_voice_for_action_output(config: &AppConfig, action: &Action, text: &str) -> Option<String> {
+    match action {
+        Action::TranslatePtBr => tts_voice_for_language_code(config, "pt-BR"),
+        Action::SearchWeb | Action::Explain | Action::CopyText | Action::ExtractCode => {
+            tts_voice_for_text(config, text)
+        }
+    }
 }
 
 fn detect_response_language(input: &str) -> ResponseLanguage {
@@ -1484,7 +1542,7 @@ async fn process_document_read(state: &AppState, job: DocumentReadJob) -> Result
             documents: Arc::clone(&state.documents),
         }),
     )
-    .with_voice_id(default_document_voice_id(&state.config));
+    .with_voice_id(document_voice_id(&state.config, &target_language));
 
     if state.config.documents.cache_audio {
         pipeline = pipeline.with_audio_cache(Arc::new(DaemonAudioCacheStore {
@@ -1645,11 +1703,14 @@ async fn process_document_ask(state: &AppState, job: DocumentAskJob) -> Result<J
     let (tts_enqueue_ms, spoken) = enqueue_tts(
         state.piper.as_ref(),
         &state.tts_gate,
-        request_id,
-        "AskDocument",
-        &speech_text,
-        None,
-        job.speak,
+        TtsEnqueueRequest {
+            request_id,
+            action_name: "AskDocument",
+            text: &speech_text,
+            fallback_text: None,
+            voice_id: tts_voice_for_language_code(&state.config, "pt-BR"),
+            requested: job.speak,
+        },
     );
 
     record_tool_executed(
@@ -1740,11 +1801,14 @@ async fn process_document_summarize(
     let (tts_enqueue_ms, spoken) = enqueue_tts(
         state.piper.as_ref(),
         &state.tts_gate,
-        request_id,
-        "SummarizeDocument",
-        &speech_text,
-        None,
-        job.speak,
+        TtsEnqueueRequest {
+            request_id,
+            action_name: "SummarizeDocument",
+            text: &speech_text,
+            fallback_text: None,
+            voice_id: tts_voice_for_language_code(&state.config, "pt-BR"),
+            requested: job.speak,
+        },
     );
 
     record_tool_executed(
@@ -1834,13 +1898,9 @@ fn document_audio_cache_dir() -> Result<PathBuf> {
     Ok(AppConfig::data_dir()?.join("document-audio-cache"))
 }
 
-fn default_document_voice_id(config: &AppConfig) -> Option<String> {
-    let voice = config.audio.default_voice.trim();
-    if voice.is_empty() {
-        None
-    } else {
-        Some(voice.to_string())
-    }
+fn document_voice_id(config: &AppConfig, target_language: &str) -> Option<String> {
+    let response_language = response_language_from_document_target(target_language);
+    tts_voice_for_response_language(config, response_language)
 }
 
 fn normalized_audio_cache_voice_id(voice_id: Option<&str>) -> String {
@@ -2233,6 +2293,7 @@ impl coddy_bridge::ReplNativeServices for DaemonReplNativeServices {
     ) -> coddy_bridge::ReplJobFuture<'a> {
         Box::pin(async move {
             let session_id = ensure_request_session(state, request_id).await;
+            let response_language = detect_response_language(&command_text);
             let provider = route_sensitive_local_provider(
                 state,
                 Some(&session_id),
@@ -2255,11 +2316,14 @@ impl coddy_bridge::ReplNativeServices for DaemonReplNativeServices {
             let (_, spoken) = enqueue_tts(
                 state.piper.as_ref(),
                 &state.tts_gate,
-                request_id,
-                Action::Explain.as_str(),
-                &speech_text,
-                None,
-                speak_requested,
+                TtsEnqueueRequest {
+                    request_id,
+                    action_name: Action::Explain.as_str(),
+                    text: &speech_text,
+                    fallback_text: None,
+                    voice_id: tts_voice_for_response_language(&state.config, response_language),
+                    requested: speak_requested,
+                },
             );
 
             Ok(JobResult::ClipboardText {
@@ -2994,11 +3058,14 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
             let (tts_enqueue_ms, spoken) = enqueue_tts(
                 state.piper.as_ref(),
                 &state.tts_gate,
-                request_id,
-                action_name,
-                &speech_text,
-                Some(tts_fallback_message(&job.action)),
-                speak_requested,
+                TtsEnqueueRequest {
+                    request_id,
+                    action_name,
+                    text: &speech_text,
+                    fallback_text: Some(tts_fallback_message(&job.action)),
+                    voice_id: tts_voice_for_action_output(&state.config, &job.action, &speech_text),
+                    requested: speak_requested,
+                },
             );
 
             info!(
@@ -3239,11 +3306,14 @@ async fn execute_search_query(
     let (tts_enqueue_ms, spoken) = enqueue_tts(
         state.piper.as_ref(),
         &state.tts_gate,
-        request_id,
-        Action::SearchWeb.as_str(),
-        &tts_text,
-        None,
-        speak_requested,
+        TtsEnqueueRequest {
+            request_id,
+            action_name: Action::SearchWeb.as_str(),
+            text: &tts_text,
+            fallback_text: None,
+            voice_id: tts_voice_for_response_language(&state.config, response_language),
+            requested: speak_requested,
+        },
     );
 
     info!(
@@ -3297,6 +3367,7 @@ fn spawn_rendered_ai_overview_listener(
         provider_router: Arc::clone(&state.provider_router),
         sensitive_provider_mode: sensitive_provider_mode(&state.config),
         response_language: response_language.prompt_label().to_string(),
+        tts_voice_id: tts_voice_for_response_language(&state.config, response_language),
     };
     let piper = state.piper.clone();
     let tts_gate = state.tts_gate.clone();
@@ -3346,11 +3417,14 @@ fn spawn_rendered_ai_overview_listener(
                 let (tts_enqueue_ms, spoken) = enqueue_tts(
                     piper.as_ref(),
                     &tts_gate,
-                    job.request_id,
-                    "SearchWebRenderedOverview",
-                    &speech_text,
-                    None,
-                    speak_requested,
+                    TtsEnqueueRequest {
+                        request_id: job.request_id,
+                        action_name: "SearchWebRenderedOverview",
+                        text: &speech_text,
+                        fallback_text: None,
+                        voice_id: job.tts_voice_id.clone(),
+                        requested: speak_requested,
+                    },
                 );
                 let _ = notify(
                     "VisionClip",
@@ -3625,16 +3699,21 @@ fn localized_search_opened_speech(
     }
 }
 
+struct TtsEnqueueRequest<'a> {
+    request_id: uuid::Uuid,
+    action_name: &'a str,
+    text: &'a str,
+    fallback_text: Option<&'a str>,
+    voice_id: Option<String>,
+    requested: bool,
+}
+
 fn enqueue_tts(
     piper: Option<&PiperHttpClient>,
     tts_gate: &TtsPlaybackGate,
-    request_id: uuid::Uuid,
-    action_name: &str,
-    text: &str,
-    fallback_text: Option<&str>,
-    requested: bool,
+    request: TtsEnqueueRequest<'_>,
 ) -> (u64, bool) {
-    if !requested {
+    if !request.requested {
         return (0, false);
     }
 
@@ -3642,25 +3721,30 @@ fn enqueue_tts(
         return (0, false);
     };
 
-    let text = if text.trim().is_empty() {
-        let Some(fallback) = fallback_text.filter(|value| !value.trim().is_empty()) else {
-            warn!(request_id = %request_id, action = %action_name, "skipping TTS for empty text");
+    let text = if request.text.trim().is_empty() {
+        let Some(fallback) = request
+            .fallback_text
+            .filter(|value| !value.trim().is_empty())
+        else {
+            warn!(request_id = %request.request_id, action = %request.action_name, "skipping TTS for empty text");
             return (0, false);
         };
         fallback.trim().to_string()
     } else {
-        text.trim().to_string()
+        request.text.trim().to_string()
     };
 
     let enqueue_started_at = Instant::now();
-    let action_name = action_name.to_string();
+    let request_id = request.request_id;
+    let action_name = request.action_name.to_string();
+    let voice_id = request.voice_id.filter(|voice| !voice.trim().is_empty());
     let tts_gate = tts_gate.clone();
 
     tokio::spawn(async move {
         tts_gate
             .run(async move {
                 let tts_started_at = Instant::now();
-                match piper.synthesize(&text, None).await {
+                match piper.synthesize(&text, voice_id.as_deref()).await {
                     Ok(wav) => {
                         let tts_synthesize_ms = elapsed_ms(tts_started_at);
                         let playback_started_at = Instant::now();
@@ -3672,6 +3756,7 @@ fn enqueue_tts(
                                 info!(
                                     request_id = %request_id,
                                     action = %action_name,
+                                    voice_id = ?voice_id,
                                     output_chars = text.chars().count(),
                                     tts_synthesize_ms,
                                     tts_playback_ms = elapsed_ms(playback_started_at),
@@ -3831,6 +3916,46 @@ mod tests {
         assert_eq!(
             search_browser_fallback_speech("Rust async", false, ResponseLanguage::Chinese),
             "我已在浏览器中搜索Rust async。请查看打开的标签页获取更多信息。"
+        );
+    }
+
+    #[test]
+    fn selects_tts_voice_for_response_and_document_languages() {
+        let mut config = AppConfig {
+            audio: visionclip_common::config::AudioConfig {
+                default_voice: "pt_BR-fallback".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        config
+            .audio
+            .voices
+            .insert("en".into(), "en_US-lessac-medium".into());
+        config
+            .audio
+            .voices
+            .insert("zh-CN".into(), "zh_CN-huayan-medium".into());
+        config
+            .audio
+            .voices
+            .insert("pt-BR".into(), "pt_BR-faber-medium".into());
+
+        assert_eq!(
+            tts_voice_for_response_language(&config, ResponseLanguage::English).as_deref(),
+            Some("en_US-lessac-medium")
+        );
+        assert_eq!(
+            tts_voice_for_response_language(&config, ResponseLanguage::Chinese).as_deref(),
+            Some("zh_CN-huayan-medium")
+        );
+        assert_eq!(
+            document_voice_id(&config, "pt-BR").as_deref(),
+            Some("pt_BR-faber-medium")
+        );
+        assert_eq!(
+            document_voice_id(&config, "ru").as_deref(),
+            Some("pt_BR-fallback")
         );
     }
 

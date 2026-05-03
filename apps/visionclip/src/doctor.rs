@@ -825,6 +825,7 @@ mod tests {
             backend: "piper_http".into(),
             base_url: "http://127.0.0.1:5000".into(),
             default_voice: String::new(),
+            voices: Default::default(),
             speak_actions: vec!["SearchWeb".into()],
             player_command: "pw-play".into(),
             request_timeout_ms: 60_000,

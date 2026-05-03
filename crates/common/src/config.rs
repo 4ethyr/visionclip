@@ -1,7 +1,7 @@
 use crate::error::{AppError, AppResult};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
-use std::{env, fs, path::PathBuf};
+use std::{collections::HashMap, env, fs, path::PathBuf};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -140,6 +140,8 @@ pub struct AudioConfig {
     pub base_url: String,
     #[serde(default)]
     pub default_voice: String,
+    #[serde(default)]
+    pub voices: HashMap<String, String>,
     #[serde(default = "default_speak_actions")]
     pub speak_actions: Vec<String>,
     #[serde(default = "default_player_command")]
@@ -148,6 +150,33 @@ pub struct AudioConfig {
     pub request_timeout_ms: u64,
     #[serde(default = "default_tts_playback_timeout_ms")]
     pub playback_timeout_ms: u64,
+}
+
+impl AudioConfig {
+    pub fn voice_for_language(&self, language: &str) -> Option<String> {
+        let requested = normalize_audio_language_key(language);
+
+        if let Some(requested) = requested.as_deref() {
+            for (language, voice) in &self.voices {
+                let Some(configured) = normalize_audio_language_key(language) else {
+                    continue;
+                };
+                if configured == requested {
+                    let voice = voice.trim();
+                    if !voice.is_empty() {
+                        return Some(voice.to_string());
+                    }
+                }
+            }
+        }
+
+        let default_voice = self.default_voice.trim();
+        if default_voice.is_empty() {
+            None
+        } else {
+            Some(default_voice.to_string())
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -341,6 +370,7 @@ impl Default for AudioConfig {
             backend: default_audio_backend(),
             base_url: default_piper_base_url(),
             default_voice: String::new(),
+            voices: HashMap::new(),
             speak_actions: default_speak_actions(),
             player_command: default_player_command(),
             request_timeout_ms: default_tts_request_timeout_ms(),
@@ -506,6 +536,36 @@ fn default_audio_backend() -> String {
     "piper_http".to_string()
 }
 
+fn normalize_audio_language_key(value: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    if normalized.is_empty() {
+        return None;
+    }
+    let compact = normalized
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-'))
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+
+    let canonical = match compact.as_str() {
+        "pt"
+        | "pt-br"
+        | "pt-brazil"
+        | "portuguese"
+        | "portuguese-brazil"
+        | "brazilian-portuguese" => "pt-BR",
+        "en" | "en-us" | "en-gb" | "english" => "en",
+        "es" | "es-es" | "es-mx" | "spanish" | "espanol" | "castellano" => "es",
+        "zh" | "zh-cn" | "zh-hans" | "chinese" | "mandarin" => "zh",
+        "ru" | "ru-ru" | "russian" => "ru",
+        "ja" | "ja-jp" | "jp" | "japanese" => "ja",
+        "ko" | "ko-kr" | "kr" | "korean" => "ko",
+        "hi" | "hi-in" | "hindi" | "indian" => "hi",
+        _ => return Some(compact),
+    };
+    Some(canonical.to_string())
+}
+
 fn default_voice_backend() -> String {
     "auto".to_string()
 }
@@ -636,6 +696,7 @@ mod tests {
         assert!(cfg.audio.enabled);
         assert_eq!(cfg.audio.request_timeout_ms, 60_000);
         assert_eq!(cfg.audio.playback_timeout_ms, 120_000);
+        assert!(cfg.audio.voices.is_empty());
         assert!(!cfg.voice.enabled);
         assert_eq!(cfg.voice.backend, "auto");
         assert!(cfg.voice.overlay_enabled);
@@ -677,6 +738,40 @@ mod tests {
         assert!(error
             .to_string()
             .contains("sensitive_data_mode cannot be cloud_allowed"));
+    }
+
+    #[test]
+    fn audio_voice_lookup_accepts_language_aliases() {
+        let mut audio = AudioConfig {
+            default_voice: "pt_BR-fallback".into(),
+            ..AudioConfig::default()
+        };
+        audio
+            .voices
+            .insert("pt-BR".into(), "pt_BR-faber-medium".into());
+        audio
+            .voices
+            .insert("english".into(), "en_US-lessac-medium".into());
+        audio
+            .voices
+            .insert("zh_CN".into(), "zh_CN-huayan-medium".into());
+
+        assert_eq!(
+            audio.voice_for_language("Portuguese (Brazil)").as_deref(),
+            Some("pt_BR-faber-medium")
+        );
+        assert_eq!(
+            audio.voice_for_language("en-US").as_deref(),
+            Some("en_US-lessac-medium")
+        );
+        assert_eq!(
+            audio.voice_for_language("zh").as_deref(),
+            Some("zh_CN-huayan-medium")
+        );
+        assert_eq!(
+            audio.voice_for_language("klingon").as_deref(),
+            Some("pt_BR-fallback")
+        );
     }
 
     #[test]

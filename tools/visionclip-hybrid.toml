@@ -47,6 +47,9 @@ player_command = "pw-play"
 request_timeout_ms = 60000
 playback_timeout_ms = 120000
 
+[audio.voices]
+"pt-BR" = "pt_BR-faber-medium"
+
 [voice]
 enabled = true
 backend = "auto"
@@ -57,7 +60,7 @@ record_duration_ms = 4000
 sample_rate_hz = 16000
 channels = 1
 record_command = ""
-transcribe_command = "/home/aethyr/Documents/visionclip/venv/bin/python /home/aethyr/Documents/visionclip/tools/stt/faster_whisper_transcribe.py {wav_path} --model base --language pt --cache-dir /home/aethyr/Documents/visionclip/tools/stt-cache"
+transcribe_command = "/home/aethyr/Documents/visionclip/venv/bin/python /home/aethyr/Documents/visionclip/tools/stt/faster_whisper_transcribe.py {wav_path} --model base --language auto --beam-size 5 --vad-filter true --cache-dir /home/aethyr/Documents/visionclip/tools/stt-cache"
 transcribe_timeout_ms = 120000
 
 [documents]

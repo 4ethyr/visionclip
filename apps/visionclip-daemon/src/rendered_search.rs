@@ -33,6 +33,7 @@ pub struct RenderedSearchJob {
     pub provider_router: Arc<ProviderRouter>,
     pub sensitive_provider_mode: ProviderMode,
     pub response_language: String,
+    pub tts_voice_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
