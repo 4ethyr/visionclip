@@ -245,7 +245,7 @@ Em desktops Wayland via portal, a captura pode depender de uma confirmação exp
 
 ## Providers e privacidade
 
-O daemon usa `ProviderRouter` para escolher o provider de inferência por tarefa. Nesta etapa, somente o provider local Ollama é registrado; stubs e provedores cloud ainda não executam chamadas externas. A configuração fixa e aplica a política de roteamento antes de adicionar integrações externas.
+O daemon usa `ProviderRouter` para escolher o provider de inferência por tarefa. Nesta etapa, somente o provider local Ollama executa chamadas. Quando `cloud_enabled = true`, o daemon registra stubs indisponíveis para OpenAI, Gemini, Anthropic, Mistral e OpenRouter, mas eles não podem ser selecionados nem fazem chamadas externas.
 
 Configuração padrão:
 
@@ -262,7 +262,7 @@ Significado:
 - `route_mode = "local_first"`: tarefas comuns preferem providers locais.
 - `sensitive_data_mode = "local_only"`: documentos, OCR de tela, busca renderizada e contexto de REPL são roteados como sensíveis e não devem sair da máquina.
 - `ollama_enabled = true`: registra o provider local Ollama no daemon.
-- `cloud_enabled = false`: mantém provedores externos desligados. Mesmo que isso seja alterado futuramente, dados sensíveis continuam bloqueados pela política.
+- `cloud_enabled = false`: mantém provedores externos desligados. Mesmo quando habilitado nesta fase, cloud registra apenas stubs indisponíveis; dados sensíveis continuam bloqueados pela política.
 
 Modos válidos são `local_only`, `local_first` e `cloud_allowed`. A configuração rejeita `sensitive_data_mode = "cloud_allowed"` quando `cloud_enabled = true`, porque esse caminho violaria a política local-first para dados sensíveis.
 
@@ -330,8 +330,8 @@ systemctl --user enable --now visionclip-daemon.service
 - A qualidade do OCR ainda depende da captura e do modelo configurado; se a captura vier ruidosa, erros pequenos como `170 -> 17` ainda podem acontecer
 - O fluxo de áudio real depende de um Piper HTTP ativo no host
 - Documentos já suportam TXT/Markdown/PDF textual; EPUB e OCR de documento escaneado continuam pendentes
-- O `ProviderRouter` já cobre documentos, captura/OCR, busca enriquecida, OCR de busca renderizada e REPL, mas ainda há somente o provider local Ollama registrado no daemon
-- Cloud providers externos ainda não estão implementados; a seção `[providers]` prepara a política para essa evolução sem habilitar rede externa por padrão
+- O `ProviderRouter` já cobre documentos, captura/OCR, busca enriquecida, OCR de busca renderizada e REPL, mas ainda há somente o provider local Ollama disponível para execução
+- Cloud providers externos ainda não estão implementados; a seção `[providers]` registra apenas stubs indisponíveis quando cloud é habilitado, sem habilitar rede externa por padrão
 - SQLite já está integrado como persistência local/migração, mas busca vetorial com `sqlite-vec` ainda não foi ligada
 - Pause/resume/stop de leitura persistem estado, mas o pipeline de áudio ainda precisa de um `AudioRuntime` controlável para interrupção em tempo real
 

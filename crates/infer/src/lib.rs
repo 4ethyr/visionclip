@@ -15,5 +15,5 @@ pub use provider::{
     AiProvider, AiTask, ChatRequest, ChatResponse, EmbedRequest, EmbedResponse, ProviderCapability,
     ProviderHealth, ProviderMode, ProviderRouteRequest, ProviderRouter, ProviderSelection,
     ReplRequest, ReplResponse, SearchAnswerRequest, SearchAnswerResponse, TranslateRequest,
-    Translation, VisionRequest, VisionResponse,
+    Translation, UnavailableCloudProvider, VisionRequest, VisionResponse,
 };
