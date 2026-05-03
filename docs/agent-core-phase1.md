@@ -51,7 +51,7 @@ Principais módulos atuais:
 - O daemon usa o `ProviderRouter` nos fluxos de documentos para `ask_document`, `summarize_document`, embeddings de ingestão/pergunta e tradução/leitura incremental; tudo segue sensível/local-first e roteia para Ollama local.
 - O fluxo principal de captura/OCR também passa pelo `ProviderRouter`: OCR dedicado usa `AiTask::Ocr`, raciocínio sobre texto OCR usa `AiTask::Chat` e fallback visual usa `AiTask::Vision`.
 - Busca enriquecida, OCR da busca renderizada e respostas do REPL também passam pelo `ProviderRouter`, preservando os prompts especializados de AI Overview e REPL.
-- `[providers]` define a política inicial de roteamento: `local_first` por padrão, `sensitive_data_mode = "local_only"`, Ollama habilitado e cloud desabilitada.
+- `[providers]` define e aplica a política inicial de roteamento: `local_first` por padrão, `sensitive_data_mode = "local_only"`, Ollama habilitado e cloud desabilitada.
 
 ## Próximos passos
 

@@ -245,7 +245,7 @@ Em desktops Wayland via portal, a captura pode depender de uma confirmação exp
 
 ## Providers e privacidade
 
-O daemon usa `ProviderRouter` para escolher o provider de inferência por tarefa. Nesta etapa, somente o provider local Ollama é registrado; stubs e provedores cloud ainda não executam chamadas externas. A configuração existe para fixar a política antes de adicionar integrações externas.
+O daemon usa `ProviderRouter` para escolher o provider de inferência por tarefa. Nesta etapa, somente o provider local Ollama é registrado; stubs e provedores cloud ainda não executam chamadas externas. A configuração fixa e aplica a política de roteamento antes de adicionar integrações externas.
 
 Configuração padrão:
 
@@ -260,7 +260,7 @@ cloud_enabled = false
 Significado:
 
 - `route_mode = "local_first"`: tarefas comuns preferem providers locais.
-- `sensitive_data_mode = "local_only"`: documentos, OCR de tela, busca renderizada e contexto de REPL não devem sair da máquina.
+- `sensitive_data_mode = "local_only"`: documentos, OCR de tela, busca renderizada e contexto de REPL são roteados como sensíveis e não devem sair da máquina.
 - `ollama_enabled = true`: registra o provider local Ollama no daemon.
 - `cloud_enabled = false`: mantém provedores externos desligados. Mesmo que isso seja alterado futuramente, dados sensíveis continuam bloqueados pela política.
 

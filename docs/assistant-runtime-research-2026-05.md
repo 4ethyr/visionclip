@@ -65,7 +65,7 @@ plus current upstream documentation.
    `AiProvider`/`ProviderRouter` foundation. Daemon document flows, main
    capture/OCR, enriched search answers, rendered-search OCR, and REPL answers
    already route through the local-first router; provider configuration is now
-   explicit and keeps sensitive data `local_only`.
+   explicit, applied by the daemon, and keeps sensitive data `local_only`.
 2. Make SQLite the single document store after the JSON compatibility window and
    add optional `sqlite-vec` vector search.
 3. Add OCR fallback for scanned PDFs behind explicit consent and local-only
