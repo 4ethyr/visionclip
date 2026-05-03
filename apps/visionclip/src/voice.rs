@@ -5,7 +5,7 @@ use std::{
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{Output, Stdio},
 };
 use tokio::{
     process::Command,
@@ -338,14 +338,61 @@ async fn transcribe_voice_sample(
         "voice transcription command",
     )
     .await?;
+    if let Some(transcript) = transcript_from_output_or_file(&output, transcript_path)? {
+        return Ok(transcript);
+    }
 
+    let mut diagnostics = vec![TranscriptionDiagnostic::new("primary", &output)];
+    if let Some(retry_command) = transcription_command_without_vad_filter(&rendered) {
+        let primary_stderr = diagnostics
+            .last()
+            .map(|diagnostic| diagnostic.stderr.as_str())
+            .unwrap_or_default();
+        warn!(
+            stderr = %truncate_diagnostic(primary_stderr),
+            "voice transcription returned an empty transcript; retrying without VAD"
+        );
+        let retry_output = run_shell_command(
+            &retry_command,
+            config.transcribe_timeout_ms,
+            "voice transcription command without VAD",
+        )
+        .await?;
+        if let Some(transcript) = transcript_from_output_or_file(&retry_output, transcript_path)? {
+            return Ok(transcript);
+        }
+        diagnostics.push(TranscriptionDiagnostic::new("without_vad", &retry_output));
+    }
+
+    anyhow::bail!("{}", empty_transcript_message(&diagnostics));
+}
+
+#[derive(Debug, Clone)]
+struct TranscriptionDiagnostic {
+    attempt: &'static str,
+    stderr: String,
+}
+
+impl TranscriptionDiagnostic {
+    fn new(attempt: &'static str, output: &Output) -> Self {
+        Self {
+            attempt,
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        }
+    }
+}
+
+fn transcript_from_output_or_file(
+    output: &Output,
+    transcript_path: &Path,
+) -> Result<Option<String>> {
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if !stdout.is_empty() {
         info!(
             chars = stdout.chars().count(),
             "voice transcript received from stdout"
         );
-        return Ok(stdout);
+        return Ok(Some(stdout));
     }
 
     if transcript_path.exists() {
@@ -359,13 +406,61 @@ async fn transcribe_voice_sample(
                 chars = transcript.chars().count(),
                 "voice transcript received from file"
             );
-            return Ok(transcript);
+            return Ok(Some(transcript));
         }
     }
 
-    anyhow::bail!(
+    Ok(None)
+}
+
+fn transcription_command_without_vad_filter(command: &str) -> Option<String> {
+    [
+        ("--vad-filter true", "--vad-filter false"),
+        ("--vad-filter=true", "--vad-filter=false"),
+        ("--vad_filter true", "--vad_filter false"),
+        ("--vad_filter=true", "--vad_filter=false"),
+    ]
+    .into_iter()
+    .find_map(|(from, to)| {
+        command
+            .contains(from)
+            .then(|| command.replacen(from, to, 1))
+    })
+}
+
+fn empty_transcript_message(diagnostics: &[TranscriptionDiagnostic]) -> String {
+    let mut message =
         "voice transcription command produced no transcript on stdout and no usable transcript file"
-    );
+            .to_string();
+    let details = diagnostics
+        .iter()
+        .filter_map(|diagnostic| {
+            let stderr = truncate_diagnostic(&diagnostic.stderr);
+            (!stderr.is_empty()).then(|| format!("{} stderr: {}", diagnostic.attempt, stderr))
+        })
+        .collect::<Vec<_>>();
+    if !details.is_empty() {
+        message.push_str("; ");
+        message.push_str(&details.join("; "));
+    }
+    message
+}
+
+fn truncate_diagnostic(value: &str) -> String {
+    const MAX_CHARS: usize = 1_200;
+    let normalized = value
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let mut chars = normalized.chars();
+    let truncated = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
 }
 
 fn resolve_action_from_transcript(transcript: &str) -> Result<Action> {
@@ -592,6 +687,9 @@ fn extract_open_subject(raw: &str, normalized: &str) -> Option<String> {
         "abra o",
         "abra a",
         "abra",
+        "abro o",
+        "abro a",
+        "abro",
         "abre o aplicativo",
         "abre a aplicacao",
         "abre o programa",
@@ -1157,6 +1255,22 @@ fn render_command(program: &str, args: &[String]) -> String {
 mod tests {
     use super::*;
 
+    fn test_voice_config(transcribe_command: &str) -> VoiceConfig {
+        VoiceConfig {
+            enabled: true,
+            backend: "auto".into(),
+            target: String::new(),
+            overlay_enabled: true,
+            shortcut: "<Super>F12".into(),
+            record_duration_ms: 4_000,
+            sample_rate_hz: 16_000,
+            channels: 1,
+            record_command: String::new(),
+            transcribe_command: transcribe_command.to_string(),
+            transcribe_timeout_ms: 5_000,
+        }
+    }
+
     #[test]
     fn resolves_translate_from_ptbr_voice_request() {
         let action = resolve_action_from_transcript("Traduza isso para português").unwrap();
@@ -1225,6 +1339,67 @@ mod tests {
     }
 
     #[test]
+    fn renders_vad_disabled_retry_command() {
+        assert_eq!(
+            transcription_command_without_vad_filter(
+                "tool audio.wav --vad-filter true --model base"
+            )
+            .as_deref(),
+            Some("tool audio.wav --vad-filter false --model base")
+        );
+        assert_eq!(
+            transcription_command_without_vad_filter("tool audio.wav --vad-filter=true").as_deref(),
+            Some("tool audio.wav --vad-filter=false")
+        );
+        assert!(transcription_command_without_vad_filter("tool audio.wav").is_none());
+    }
+
+    #[test]
+    fn empty_transcript_message_includes_stderr_diagnostics() {
+        let message = empty_transcript_message(&[TranscriptionDiagnostic {
+            attempt: "primary",
+            stderr: "audio=/tmp/sample.wav duration=4.00s\nno speech recognized".to_string(),
+        }]);
+
+        assert!(message.contains("primary stderr"));
+        assert!(message.contains("no speech recognized"));
+    }
+
+    #[tokio::test]
+    async fn transcribe_voice_sample_reports_empty_stderr() {
+        let config = test_voice_config(
+            "printf 'audio=/tmp/sample.wav duration=4.00s\\nno speech recognized\\n' >&2",
+        );
+        let wav_path = temp_voice_path("wav");
+        let transcript_path = temp_voice_path("txt");
+
+        let error = transcribe_voice_sample(&config, &wav_path, &transcript_path)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("no speech recognized"));
+        let _ = fs::remove_file(wav_path);
+        let _ = fs::remove_file(transcript_path);
+    }
+
+    #[tokio::test]
+    async fn transcribe_voice_sample_retries_without_vad_on_empty_transcript() {
+        let config = test_voice_config(
+            r#"if [ "--vad-filter true" = "--vad-filter true" ]; then printf 'no speech recognized\n' >&2; else printf 'fallback transcript\n'; fi"#,
+        );
+        let wav_path = temp_voice_path("wav");
+        let transcript_path = temp_voice_path("txt");
+
+        let transcript = transcribe_voice_sample(&config, &wav_path, &transcript_path)
+            .await
+            .unwrap();
+
+        assert_eq!(transcript, "fallback transcript");
+        let _ = fs::remove_file(wav_path);
+        let _ = fs::remove_file(transcript_path);
+    }
+
+    #[test]
     fn strips_search_prefix_from_voice_transcript() {
         let query =
             resolve_search_query_from_transcript("Pesquise por clima em Sao Paulo hoje").unwrap();
@@ -1259,6 +1434,8 @@ mod tests {
     fn resolves_standalone_known_app_from_voice_transcript() {
         let cases = [
             ("terminal", "terminal"),
+            ("terminau", "terminal"),
+            ("termnal", "terminal"),
             ("vscode", "VS Code"),
             ("configurações", "configurações"),
             ("BurpSuite", "BurpSuite"),
@@ -1278,6 +1455,7 @@ mod tests {
         let cases = [
             ("abra o navegador", "navegador"),
             ("abre o terminal", "terminal"),
+            ("abro terminal", "terminal"),
             ("abra o terminau", "terminal"),
             ("abra o termnal", "terminal"),
             ("open the terminal", "terminal"),
