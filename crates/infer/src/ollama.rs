@@ -560,13 +560,12 @@ impl AiProvider for OllamaBackend {
             image_bytes: req.image_bytes,
             mime_type: req.mime_type,
         };
-        let model = if self.has_ocr_model() {
-            self.config.ocr_model.as_str()
-        } else {
-            self.config.model.as_str()
-        };
 
-        self.infer_image_with_model(&input, model)
+        self.infer(input).await.map(VisionResponse::from)
+    }
+
+    async fn ocr(&self, req: VisionRequest) -> Result<VisionResponse> {
+        self.infer_with_ocr_model(req.request_id, req.action, req.image_bytes, req.mime_type)
             .await
             .map(VisionResponse::from)
     }
@@ -1033,6 +1032,68 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("explique esse erro"));
+    }
+
+    #[tokio::test]
+    async fn ai_provider_vision_uses_primary_model() {
+        let server = TestServer::spawn(r#"{"message":{"content":"visao primaria"}}"#);
+        let backend = OllamaBackend::new(InferConfig {
+            base_url: server.base_url.clone(),
+            model: "primary-vision:test".into(),
+            ocr_model: "ocr-only:test".into(),
+            keep_alive: "5m".into(),
+            ..InferConfig::default()
+        });
+
+        let output = <OllamaBackend as AiProvider>::vision(
+            &backend,
+            VisionRequest {
+                request_id: "req-provider-vision".into(),
+                action: Action::Explain,
+                source_app: Some("screen".into()),
+                image_bytes: b"PNG".to_vec(),
+                mime_type: "image/png".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let requests = server.finish();
+        let json: serde_json::Value = serde_json::from_str(&requests[0].1).unwrap();
+        assert_eq!(output.text, "visao primaria");
+        assert_eq!(json["model"], "primary-vision:test");
+        assert_eq!(json["messages"][1]["images"][0], "UE5H");
+    }
+
+    #[tokio::test]
+    async fn ai_provider_ocr_uses_configured_ocr_model() {
+        let server = TestServer::spawn(r#"{"message":{"content":"texto extraido"}}"#);
+        let backend = OllamaBackend::new(InferConfig {
+            base_url: server.base_url.clone(),
+            model: "primary-vision:test".into(),
+            ocr_model: "ocr-only:test".into(),
+            keep_alive: "5m".into(),
+            ..InferConfig::default()
+        });
+
+        let output = <OllamaBackend as AiProvider>::ocr(
+            &backend,
+            VisionRequest {
+                request_id: "req-provider-ocr".into(),
+                action: Action::CopyText,
+                source_app: Some("screen".into()),
+                image_bytes: b"PNG".to_vec(),
+                mime_type: "image/png".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let requests = server.finish();
+        let json: serde_json::Value = serde_json::from_str(&requests[0].1).unwrap();
+        assert_eq!(output.text, "texto extraido");
+        assert_eq!(json["model"], "ocr-only:test");
+        assert_eq!(json["messages"][1]["images"][0], "UE5H");
     }
 
     #[tokio::test]

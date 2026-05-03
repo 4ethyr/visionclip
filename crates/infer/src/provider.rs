@@ -187,6 +187,10 @@ pub trait AiProvider: Send + Sync {
         Err(anyhow!("provider does not support vision"))
     }
 
+    async fn ocr(&self, _req: VisionRequest) -> Result<VisionResponse> {
+        Err(anyhow!("provider does not support OCR"))
+    }
+
     async fn embed(&self, _req: EmbedRequest) -> Result<EmbedResponse> {
         Err(anyhow!("provider does not support embeddings"))
     }

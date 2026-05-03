@@ -42,8 +42,9 @@ use visionclip_documents::{
 };
 use visionclip_infer::{
     postprocess::{sanitize_for_speech, sanitize_output},
-    AiProvider, AiTask, ChatRequest, EmbedRequest, InferenceBackend, InferenceInput, OllamaBackend,
-    ProviderMode, ProviderRouteRequest, ProviderRouter, ProviderSelection, TranslateRequest,
+    AiProvider, AiTask, ChatRequest, ChatResponse, EmbedRequest, OllamaBackend, ProviderMode,
+    ProviderRouteRequest, ProviderRouter, ProviderSelection, TranslateRequest,
+    VisionRequest as ProviderVisionRequest, VisionResponse,
 };
 use visionclip_output::{notify, open_search_query, open_url, ClipboardOwner};
 use visionclip_tts::PiperHttpClient;
@@ -2087,6 +2088,59 @@ fn record_provider_selected(
     persist_audit_event(state, &event);
 }
 
+async fn run_provider_chat(
+    state: &AppState,
+    session_id: &SessionId,
+    request_id: String,
+    action: Action,
+    source_app: Option<String>,
+    text: String,
+    operation: &str,
+) -> Result<ChatResponse> {
+    let provider =
+        route_sensitive_local_provider(state, Some(session_id), AiTask::Chat, operation).await?;
+    provider
+        .provider
+        .chat(ChatRequest {
+            request_id,
+            action,
+            source_app,
+            text,
+        })
+        .await
+}
+
+struct ProviderVisionJob {
+    request_id: String,
+    action: Action,
+    source_app: Option<String>,
+    image_bytes: Vec<u8>,
+    mime_type: String,
+}
+
+async fn run_provider_vision(
+    state: &AppState,
+    session_id: &SessionId,
+    task: AiTask,
+    operation: &str,
+    job: ProviderVisionJob,
+) -> Result<VisionResponse> {
+    let provider = route_sensitive_local_provider(state, Some(session_id), task, operation).await?;
+    let request = ProviderVisionRequest {
+        request_id: job.request_id,
+        action: job.action,
+        source_app: job.source_app,
+        image_bytes: job.image_bytes,
+        mime_type: job.mime_type,
+    };
+
+    match task {
+        AiTask::Ocr => provider.provider.ocr(request).await,
+        AiTask::Vision => provider.provider.vision(request).await,
+        _ => anyhow::bail!("unsupported vision provider task {task:?}"),
+    }
+}
+
 fn stored_audit_event_from_event(event: &AuditEvent) -> Result<StoredAuditEvent> {
     Ok(StoredAuditEvent {
         id: event.id.clone(),
@@ -2257,15 +2311,20 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
             _ => Action::CopyText,
         };
 
-        match state
-            .infer
-            .infer_with_ocr_model(
-                request_id.to_string(),
-                ocr_action,
-                job.image_bytes.clone(),
-                job.mime_type.clone(),
-            )
-            .await
+        match run_provider_vision(
+            state,
+            &session_id,
+            AiTask::Ocr,
+            "capture.ocr",
+            ProviderVisionJob {
+                request_id: request_id.to_string(),
+                action: ocr_action,
+                source_app: job.source_app.clone(),
+                image_bytes: job.image_bytes.clone(),
+                mime_type: job.mime_type.clone(),
+            },
+        )
+        .await
         {
             Ok(output) => {
                 ocr_ms = elapsed_ms(ocr_started_at);
@@ -2295,32 +2354,40 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                 inference_mode = "ocr_only";
                 visionclip_infer::backend::InferenceOutput { text }
             } else {
-                state
-                    .infer
-                    .infer(InferenceInput {
+                let output = run_provider_vision(
+                    state,
+                    &session_id,
+                    AiTask::Vision,
+                    "capture.primary_image",
+                    ProviderVisionJob {
                         request_id: request_id.to_string(),
                         action: job.action.clone(),
                         source_app: job.source_app.clone(),
                         image_bytes: job.image_bytes.clone(),
                         mime_type: job.mime_type.clone(),
-                    })
-                    .await?
+                    },
+                )
+                .await?;
+                visionclip_infer::backend::InferenceOutput { text: output.text }
             }
         }
         _ => {
             if let Some(text) = ocr_text.clone().filter(|value| value.chars().count() >= 12) {
                 inference_mode = "ocr_text_to_reasoning";
-                match state
-                    .infer
-                    .infer_from_text(
-                        request_id.to_string(),
-                        job.action.clone(),
-                        job.source_app.clone(),
-                        text,
-                    )
-                    .await
+                match run_provider_chat(
+                    state,
+                    &session_id,
+                    request_id.to_string(),
+                    job.action.clone(),
+                    job.source_app.clone(),
+                    text,
+                    "capture.ocr_text_to_reasoning",
+                )
+                .await
                 {
-                    Ok(output) if !output.text.trim().is_empty() => output,
+                    Ok(output) if !output.text.trim().is_empty() => {
+                        visionclip_infer::backend::InferenceOutput { text: output.text }
+                    }
                     Ok(_) => {
                         warn!(
                             request_id = %request_id,
@@ -2328,16 +2395,21 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                             "OCR text to reasoning returned empty content; falling back to primary image inference"
                         );
                         inference_mode = "primary_image_fallback";
-                        state
-                            .infer
-                            .infer(InferenceInput {
+                        let output = run_provider_vision(
+                            state,
+                            &session_id,
+                            AiTask::Vision,
+                            "capture.primary_image_fallback",
+                            ProviderVisionJob {
                                 request_id: request_id.to_string(),
                                 action: job.action.clone(),
                                 source_app: job.source_app.clone(),
                                 image_bytes: job.image_bytes.clone(),
                                 mime_type: job.mime_type.clone(),
-                            })
-                            .await?
+                            },
+                        )
+                        .await?;
+                        visionclip_infer::backend::InferenceOutput { text: output.text }
                     }
                     Err(error) => {
                         warn!(
@@ -2347,29 +2419,39 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                             "OCR text to reasoning failed; falling back to primary image inference"
                         );
                         inference_mode = "primary_image_fallback";
-                        state
-                            .infer
-                            .infer(InferenceInput {
+                        let output = run_provider_vision(
+                            state,
+                            &session_id,
+                            AiTask::Vision,
+                            "capture.primary_image_fallback",
+                            ProviderVisionJob {
                                 request_id: request_id.to_string(),
                                 action: job.action.clone(),
                                 source_app: job.source_app.clone(),
                                 image_bytes: job.image_bytes.clone(),
                                 mime_type: job.mime_type.clone(),
-                            })
-                            .await?
+                            },
+                        )
+                        .await?;
+                        visionclip_infer::backend::InferenceOutput { text: output.text }
                     }
                 }
             } else {
-                state
-                    .infer
-                    .infer(InferenceInput {
+                let output = run_provider_vision(
+                    state,
+                    &session_id,
+                    AiTask::Vision,
+                    "capture.primary_image",
+                    ProviderVisionJob {
                         request_id: request_id.to_string(),
                         action: job.action.clone(),
                         source_app: job.source_app.clone(),
                         image_bytes: job.image_bytes.clone(),
                         mime_type: job.mime_type.clone(),
-                    })
-                    .await?
+                    },
+                )
+                .await?;
+                visionclip_infer::backend::InferenceOutput { text: output.text }
             }
         }
     };
