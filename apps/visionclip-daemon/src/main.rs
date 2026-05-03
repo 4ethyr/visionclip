@@ -42,7 +42,8 @@ use visionclip_documents::{
 };
 use visionclip_infer::{
     postprocess::{sanitize_for_speech, sanitize_output},
-    InferenceBackend, InferenceInput, OllamaBackend,
+    AiProvider, AiTask, ChatRequest, EmbedRequest, InferenceBackend, InferenceInput, OllamaBackend,
+    ProviderMode, ProviderRouteRequest, ProviderRouter, ProviderSelection, TranslateRequest,
 };
 use visionclip_output::{notify, open_search_query, open_url, ClipboardOwner};
 use visionclip_tts::PiperHttpClient;
@@ -84,10 +85,16 @@ async fn main() -> Result<()> {
         }
     };
 
+    let infer = OllamaBackend::new(config.infer.clone());
+    let ollama_provider: Arc<dyn AiProvider> = Arc::new(infer.clone());
+    let provider_router =
+        Arc::new(ProviderRouter::new().with_provider("ollama", Arc::clone(&ollama_provider)));
+
     let state = Arc::new(AppState {
         config: config.clone(),
         clipboard: ClipboardOwner::new().context("failed to initialize clipboard owner")?,
-        infer: OllamaBackend::new(config.infer.clone()),
+        infer,
+        provider_router,
         search: if config.search.enabled {
             Some(GoogleSearchClient::new(config.search.clone())?)
         } else {
@@ -124,6 +131,7 @@ struct AppState {
     config: AppConfig,
     clipboard: ClipboardOwner,
     infer: OllamaBackend,
+    provider_router: Arc<ProviderRouter>,
     search: Option<GoogleSearchClient>,
     piper: Option<PiperHttpClient>,
     tts_gate: TtsPlaybackGate,
@@ -419,26 +427,31 @@ impl DocumentStore {
 }
 
 #[derive(Clone)]
-struct OllamaDocumentTranslator {
-    infer: OllamaBackend,
+struct RoutedDocumentTranslator {
+    provider_router: Arc<ProviderRouter>,
     request_id: uuid::Uuid,
 }
 
 #[async_trait]
-impl TranslationProvider for OllamaDocumentTranslator {
+impl TranslationProvider for RoutedDocumentTranslator {
     async fn translate(&self, request: TranslationRequest) -> Result<String> {
         ensure_supported_document_target_language(&request.target_language)?;
         let target_language_label = document_target_language_label(&request.target_language);
-        let output = self
-            .infer
-            .translate_document_text(
-                format!(
+        let selection = self
+            .provider_router
+            .route(ProviderRouteRequest::sensitive(AiTask::DocumentTranslation))
+            .await
+            .context("failed to route local document translation provider")?;
+        let output = selection
+            .provider
+            .translate(TranslateRequest {
+                request_id: format!(
                     "{}-document-translate-{}",
                     self.request_id, request.chunk_index
                 ),
-                target_language_label,
-                &request.source_text,
-            )
+                target_language: target_language_label.to_string(),
+                text: request.source_text,
+            })
             .await?;
         Ok(sanitize_output(&Action::TranslatePtBr, &output.text))
     }
@@ -972,8 +985,8 @@ async fn process_document_translate(
         )
     };
 
-    let translator = OllamaDocumentTranslator {
-        infer: state.infer.clone(),
+    let translator = RoutedDocumentTranslator {
+        provider_router: Arc::clone(&state.provider_router),
         request_id,
     };
     let translation_session_id = format!("{request_id}-translate");
@@ -1092,8 +1105,8 @@ async fn process_document_read(state: &AppState, job: DocumentReadJob) -> Result
     );
 
     let mut pipeline = TranslatedReadingPipeline::new(
-        Arc::new(OllamaDocumentTranslator {
-            infer: state.infer.clone(),
+        Arc::new(RoutedDocumentTranslator {
+            provider_router: Arc::clone(&state.provider_router),
             request_id,
         }),
         Arc::new(PiperDocumentTts {
@@ -1245,14 +1258,17 @@ async fn process_document_ask(state: &AppState, job: DocumentAskJob) -> Result<J
     .await;
     let context = document_context_text(&selected_chunks);
     let prompt = document_question_prompt(&title, question, &context);
-    let output = state
-        .infer
-        .infer_from_text(
-            format!("{request_id}-document-ask"),
-            Action::Explain,
-            Some("document".to_string()),
-            prompt,
-        )
+    let provider =
+        route_sensitive_local_provider(state, Some(&session_id), AiTask::Chat, "document.ask")
+            .await?;
+    let output = provider
+        .provider
+        .chat(ChatRequest {
+            request_id: format!("{request_id}-document-ask"),
+            action: Action::Explain,
+            source_app: Some("document".to_string()),
+            text: prompt,
+        })
         .await?;
     let answer = sanitize_output(&Action::Explain, &output.text);
     let result_text = format!(
@@ -1340,14 +1356,17 @@ async fn process_document_summarize(
     };
     let context = document_context_text(&selected_chunks);
     let prompt = document_summary_prompt(&title, &context, total_chunks);
-    let output = state
-        .infer
-        .infer_from_text(
-            format!("{request_id}-document-summary"),
-            Action::Explain,
-            Some("document".to_string()),
-            prompt,
-        )
+    let provider =
+        route_sensitive_local_provider(state, Some(&session_id), AiTask::Chat, "document.summary")
+            .await?;
+    let output = provider
+        .provider
+        .chat(ChatRequest {
+            request_id: format!("{request_id}-document-summary"),
+            action: Action::Explain,
+            source_app: Some("document".to_string()),
+            text: prompt,
+        })
         .await?;
     let summary = sanitize_output(&Action::Explain, &output.text);
     let result_text = format!("Documento: {title}\n\nResumo:\n{}", summary.trim());
@@ -1510,9 +1529,14 @@ async fn generate_document_embeddings(
     document_id: &str,
     chunks: &[DocumentChunk],
 ) -> Option<Vec<DocumentChunkEmbedding>> {
-    if !state.infer.has_embedding_model() || chunks.is_empty() {
+    if chunks.is_empty() {
         return None;
     }
+    let provider = state
+        .provider_router
+        .route(ProviderRouteRequest::sensitive(AiTask::Embeddings))
+        .await
+        .ok()?;
 
     let mut embeddings = Vec::with_capacity(chunks.len());
     for (batch_index, batch) in chunks.chunks(16).enumerate() {
@@ -1520,9 +1544,12 @@ async fn generate_document_embeddings(
             .iter()
             .map(|chunk| chunk.text.clone())
             .collect::<Vec<_>>();
-        let output = match state
-            .infer
-            .embed_texts(format!("{request_id}-document-embed-{batch_index}"), texts)
+        let output = match provider
+            .provider
+            .embed(EmbedRequest {
+                request_id: format!("{request_id}-document-embed-{batch_index}"),
+                texts,
+            })
             .await
         {
             Ok(output) => output,
@@ -1575,14 +1602,18 @@ async fn select_document_context_with_optional_embeddings(
     query: &str,
     limits: DocumentContextLimits,
 ) -> Vec<DocumentChunk> {
-    if state.infer.has_embedding_model() {
-        if let Some(embeddings) = embeddings {
-            match state
-                .infer
-                .embed_texts(
-                    format!("{request_id}-document-query-embed"),
-                    vec![query.to_string()],
-                )
+    if let Some(embeddings) = embeddings {
+        if let Ok(provider) = state
+            .provider_router
+            .route(ProviderRouteRequest::sensitive(AiTask::Embeddings))
+            .await
+        {
+            match provider
+                .provider
+                .embed(EmbedRequest {
+                    request_id: format!("{request_id}-document-query-embed"),
+                    texts: vec![query.to_string()],
+                })
                 .await
             {
                 Ok(output) => {
@@ -2013,6 +2044,47 @@ fn persist_audit_event(state: &AppState, event: &AuditEvent) {
             "failed to persist audit event to SQLite"
         );
     }
+}
+
+async fn route_sensitive_local_provider(
+    state: &AppState,
+    session_id: Option<&SessionId>,
+    task: AiTask,
+    operation: &str,
+) -> Result<ProviderSelection> {
+    let selection = state
+        .provider_router
+        .route(ProviderRouteRequest {
+            task,
+            mode: ProviderMode::LocalFirst,
+            sensitive: true,
+        })
+        .await
+        .with_context(|| format!("failed to route local AI provider for {operation}"))?;
+
+    record_provider_selected(state, session_id.cloned(), &selection, task, operation);
+    Ok(selection)
+}
+
+fn record_provider_selected(
+    state: &AppState,
+    session_id: Option<SessionId>,
+    selection: &ProviderSelection,
+    task: AiTask,
+    operation: &str,
+) {
+    let mut event = AuditEvent::new("provider.selected");
+    event.session_id = session_id;
+    event.provider = Some(selection.id.clone());
+    event.decision = Some("selected".to_string());
+    event.data = redact_for_audit(&json!({
+        "task": format!("{task:?}"),
+        "operation": operation,
+        "local": selection.health.local,
+        "display_name": selection.health.display_name.clone(),
+    }));
+    state.audit_log.record(event.clone());
+    persist_audit_event(state, &event);
 }
 
 fn stored_audit_event_from_event(event: &AuditEvent) -> Result<StoredAuditEvent> {

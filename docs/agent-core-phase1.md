@@ -48,11 +48,12 @@ Principais módulos atuais:
 - Eventos de auditoria de tools/security continuam em memória para uso imediato e agora também são persistidos no SQLite com payload redigido.
 - A leitura traduzida grava WAVs gerados no cache local quando `documents.cache_audio` está habilitado, registra os metadados no SQLite e consulta o cache antes de chamar TTS novamente.
 - `visionclip-infer` agora expoe `AiProvider`, `ProviderRouter`, capabilities e requests tipados para chat, visão, embeddings e tradução de documento; `OllamaBackend` implementa essa trait sem alterar o comportamento local atual.
+- O daemon usa o `ProviderRouter` nos fluxos de documentos para `ask_document`, `summarize_document`, embeddings de ingestão/pergunta e tradução/leitura incremental; tudo segue sensível/local-first e roteia para Ollama local.
 
 ## Próximos passos
 
 1. Adicionar confirmação real via IPC/UI para tools que retornam `RequireConfirmation`.
-2. Conectar os fluxos do daemon ao `ProviderRouter` em etapas, começando por documentos e busca, mantendo `OllamaBackend` como provider local padrão.
+2. Conectar captura/OCR, busca e REPL ao `ProviderRouter`, mantendo `OllamaBackend` como provider local padrão.
 3. Extrair DesktopController para apps/URLs, volume, brilho e VPN com command runner mockável.
 4. Conectar voz e CLI ao `AgentOrchestrator` para substituir roteamento local duplicado.
 5. Expor controles de cache/progresso para a UI futura de leitura.

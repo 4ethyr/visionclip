@@ -61,8 +61,9 @@ plus current upstream documentation.
 
 ## Current Gap Priority
 
-1. Connect daemon inference flows to the new `AiProvider`/`ProviderRouter`
-   foundation while keeping Ollama local-first and cloud disabled by default.
+1. Continue daemon migration to `AiProvider`/`ProviderRouter` for capture/OCR,
+   search, and REPL while keeping Ollama local-first and cloud disabled by
+   default. Document chat, embeddings, and translation already use the router.
 2. Make SQLite the single document store after the JSON compatibility window and
    add optional `sqlite-vec` vector search.
 3. Add OCR fallback for scanned PDFs behind explicit consent and local-only
