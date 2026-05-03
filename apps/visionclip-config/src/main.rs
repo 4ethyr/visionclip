@@ -162,6 +162,7 @@ async fn run_doctor() -> Result<()> {
     println!("Desktop integration:");
     for tool in [
         "ollama",
+        "pdftotext",
         "notify-send",
         "xdg-open",
         "gsettings",

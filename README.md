@@ -9,14 +9,15 @@ VisionClip é um serviço local para Linux que transforma seus modelos locais em
 - `visionclip-config`: utilitário de bootstrap, diagnóstico do host e listagem de modelos locais.
 - Suporte a ações de `CopyText`, `ExtractCode`, `TranslatePtBr`, `Explain` e `SearchWeb`.
 - Núcleo agentic inicial com `ToolRegistry`, `PermissionEngine`, `SessionManager` e `AuditLog` básicos para validar ferramentas antes da execução.
+- Base inicial de `AiProvider`/`ProviderRouter` no crate de inferência, com roteamento local-first/local-only para documentos, captura/OCR, busca enriquecida e REPL.
 - Pipeline padrão com `gemma4:e2b` para OCR e raciocínio textual no mesmo stack local.
 - `SearchWeb` agora gera a query, tenta enriquecer a resposta com scrape best-effort do Google e pode copiar um resumo inicial para o clipboard antes de abrir o navegador.
 - Integração com Ollama via `/api/chat`, com retry automático quando o modelo não suporta `think`.
 - Embeddings locais opcionais via Ollama `/api/embed`, ativados por `infer.embedding_model`.
 - Integração com Piper HTTP, com fallback de playback entre `paplay`, `pw-play` e `aplay`.
 - Captura automática com resolução de backend via config: portal com `gdbus`, GNOME Shell Screenshot via D-Bus, `gnome-screenshot`, `grim` e `maim`.
-- Runtime inicial de documentos com ingestão TXT/Markdown, perguntas, resumo, tradução, leitura em voz alta e controles de pausa/retomada/parada.
-- Persistência local de documentos em snapshot JSON de compatibilidade e SQLite (`documents.sqlite3`) com documentos, chunks, sessões, progresso, traduções e embeddings.
+- Runtime inicial de documentos com ingestão TXT/Markdown/PDF textual, perguntas, resumo, tradução, leitura em voz alta e controles de pausa/retomada/parada.
+- Persistência local de documentos em snapshot JSON de compatibilidade e SQLite (`documents.sqlite3`) com documentos, chunks, sessões, progresso, traduções, embeddings, metadados de cache de áudio e eventos de auditoria.
 - Configuração local em `~/.config/visionclip/config.toml`.
 
 ## Arquitetura resumida
@@ -25,8 +26,9 @@ VisionClip é um serviço local para Linux que transforma seus modelos locais em
 2. A requisição é enviada por socket Unix ao `visionclip-daemon`.
 3. O daemon valida a ferramenta no registry e aplica política de risco/permissão antes de executar efeitos colaterais.
 4. Para screenshots, o daemon extrai texto com `infer.ocr_model` e envia esse texto para o modelo principal configurado no Ollama. No default atual, `gemma4:e2b` faz as duas etapas.
-5. Para documentos, o daemon usa chunks locais, embeddings opcionais e prompts locais para responder, resumir, traduzir ou narrar.
-6. A saída é enviada para clipboard, navegador ou TTS, e eventos relevantes são auditados.
+5. A inferência local está preparada atrás de `AiProvider`/`ProviderRouter`; documentos, captura/OCR, busca enriquecida e REPL já usam esse caminho e cloud providers continuam desabilitados por padrão.
+6. Para documentos, o daemon usa chunks locais, embeddings opcionais e prompts locais para responder, resumir, traduzir ou narrar.
+7. A saída é enviada para clipboard, navegador ou TTS, e eventos relevantes são auditados em memória e no SQLite local.
 
 ## Projeto Coddy
 
@@ -49,6 +51,7 @@ Nesta etapa, o projeto passa a validar o fluxo principal com `gemma4:e2b` tanto 
 - Modelo de embeddings Ollama opcional, configurado em `infer.embedding_model`, para melhorar `visionclip document ask`
 - Piper HTTP para áudio real, se você quiser TTS fora dos mocks de teste
 - SQLite é embutido via `rusqlite`/`libsqlite3-sys`; não exige serviço externo
+- `pdftotext`/`poppler-utils` opcional para ingestão de PDFs textuais
 - Ferramentas nativas de desktop como `xdg-open`, `notify-send` e algum player de áudio suportado
 - Para captura automática: `gdbus` com portal/serviço nativo do desktop, ou ferramentas como `gnome-screenshot`, `grim` ou `maim`
 - Para observar a AI Overview renderizada no navegador em GNOME/Kali: GNOME Shell Screenshot via D-Bus, `gnome-screenshot`, `grim` ou `maim`
@@ -78,13 +81,14 @@ VISIONCLIP_CONFIG=/home/aethyr/Documents/visionclip/tools/visionclip-hybrid.toml
 
 ## Documentos, RAG local e audiobook
 
-O runtime de documentos atual é local-first e suporta TXT/Markdown. PDFs ainda são rejeitados com erro explícito até existir um extrator/OCR seguro.
+O runtime de documentos atual é local-first e suporta TXT, Markdown e PDFs textuais via `pdftotext`. PDFs escaneados ainda exigem OCR futuro e retornam erro se a extração textual vier vazia.
 
 Fluxos disponíveis:
 
 ```bash
 # Ingerir documento local
 visionclip document ingest /caminho/livro.md
+visionclip document ingest /caminho/livro.pdf
 
 # Perguntar sobre o documento ingerido
 visionclip document ask <document_id> 'Qual é a ideia principal deste capítulo?'
@@ -92,10 +96,11 @@ visionclip document ask <document_id> 'Qual é a ideia principal deste capítulo
 # Resumir trechos iniciais do documento
 visionclip document summarize <document_id>
 
-# Traduzir o documento para PT-BR e copiar para o clipboard
+# Traduzir o documento e copiar para o clipboard
 visionclip document translate <document_id> --target-lang pt-BR
+visionclip document translate <document_id> --target-lang es
 
-# Ler o documento em voz alta com tradução incremental para PT-BR
+# Ler o documento em voz alta com tradução incremental
 visionclip document read <document_id> --target-lang pt-BR
 
 # Controlar uma sessão de leitura
@@ -104,14 +109,17 @@ visionclip document resume <reading_session_id>
 visionclip document stop <reading_session_id>
 ```
 
+`document translate` e `document read` aceitam alvos explícitos `pt-BR`, `en`, `es`, `zh`, `ru`, `ja`, `ko` e `hi`, com aliases comuns como `english`, `español`, `chinês`, `japonês`, `coreano` e `hindi`.
+
 Quando `infer.embedding_model` está configurado, a ingestão tenta gerar embeddings locais via Ollama para cada chunk. `document ask` usa ranking semântico quando há vetores persistidos e volta para busca lexical se o modelo não estiver configurado, falhar ou retornar vetores inválidos.
 
 Persistência:
 
 - `documents-store.json`: snapshot de compatibilidade durante a janela de migração.
-- `documents.sqlite3`: store SQLite local com documentos, chunks, sessões, progresso, traduções e embeddings.
+- `documents.sqlite3`: store SQLite local com documentos, chunks, sessões, progresso, traduções, embeddings, cache de áudio e eventos de auditoria.
+- `document-audio-cache/`: arquivos WAV gerados pela leitura/tradução incremental quando `documents.cache_audio = true`.
 
-O SQLite já é espelhado pelo daemon e pode ser usado para recarregar documentos quando o snapshot JSON não existe. O próximo passo planejado é tornar SQLite o store único e adicionar `sqlite-vec`.
+O SQLite já é espelhado pelo daemon e pode ser usado para recarregar documentos quando o snapshot JSON não existe. O cache de áudio é gravado localmente, referenciado no SQLite e consultado antes de chamar TTS novamente. O próximo passo planejado é tornar SQLite o store único e adicionar `sqlite-vec`.
 
 ## Scripts locais
 
@@ -213,6 +221,7 @@ Use `visionclip-config doctor` para verificar:
 - modelo de embeddings configurado, quando houver
 - probe real de carregamento do modelo configurado
 - reachability do Piper HTTP
+- disponibilidade opcional de `pdftotext` para PDFs textuais
 - ferramentas nativas do host usadas pelo fluxo
 
 Use `visionclip --doctor` para validar especificamente o fluxo operacional do cliente de voz:
@@ -222,6 +231,7 @@ Use `visionclip --doctor` para validar especificamente o fluxo operacional do cl
 - gravador nativo de microfone
 - comando STT configurado
 - player de TTS
+- `pdftotext` opcional para ingestão local de PDFs textuais
 - wrapper `~/.local/bin/visionclip-voice-search`
 - bindings GNOME `Super+F12` e `Super+Shift+F12`
 
@@ -294,7 +304,8 @@ systemctl --user enable --now visionclip-daemon.service
 - A overlay compacta já existe, mas ainda precisa de validação visual ampla em diferentes compositores e escalas de tela
 - A qualidade do OCR ainda depende da captura e do modelo configurado; se a captura vier ruidosa, erros pequenos como `170 -> 17` ainda podem acontecer
 - O fluxo de áudio real depende de um Piper HTTP ativo no host
-- Documentos ainda suportam TXT/Markdown; PDF, EPUB e OCR de documento escaneado continuam pendentes
+- Documentos já suportam TXT/Markdown/PDF textual; EPUB e OCR de documento escaneado continuam pendentes
+- O `ProviderRouter` já cobre documentos, captura/OCR, busca enriquecida, OCR de busca renderizada e REPL, mas ainda há somente o provider local Ollama registrado no daemon
 - SQLite já está integrado como persistência local/migração, mas busca vetorial com `sqlite-vec` ainda não foi ligada
 - Pause/resume/stop de leitura persistem estado, mas o pipeline de áudio ainda precisa de um `AudioRuntime` controlável para interrupção em tempo real
 

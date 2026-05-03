@@ -19,7 +19,7 @@ use std::{
     fs,
     future::Future,
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
     time::Instant,
 };
 use tokio::net::{UnixListener, UnixStream};
@@ -27,21 +27,24 @@ use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use visionclip_common::{
     decode_message_payload, read_message_payload, redact_for_audit, write_message, Action,
-    AppConfig, ApplicationLaunchJob, AuditLog, CaptureJob, DocumentAskJob, DocumentControlJob,
-    DocumentControlKind, DocumentIngestJob, DocumentReadJob, DocumentSummarizeJob,
-    DocumentTranslateJob, HealthCheckJob, JobResult, PermissionEngine, PolicyDecision, PolicyInput,
-    RiskContext, RiskLevel, SessionId, SessionManager, ToolCall, ToolRegistry, UrlOpenJob,
-    VisionRequest, VoiceSearchJob,
+    AppConfig, ApplicationLaunchJob, AuditEvent, AuditLog, CaptureJob, DocumentAskJob,
+    DocumentControlJob, DocumentControlKind, DocumentIngestJob, DocumentReadJob,
+    DocumentSummarizeJob, DocumentTranslateJob, HealthCheckJob, JobResult, PermissionEngine,
+    PolicyDecision, PolicyInput, RiskContext, RiskLevel, SessionId, SessionManager, ToolCall,
+    ToolRegistry, UrlOpenJob, VisionRequest, VoiceSearchJob,
 };
 use visionclip_documents::{
-    AudioChunk, AudioSink, ChunkerConfig, DocumentChunk, DocumentRuntime, IngestedDocument,
-    ReadingProgress, ReadingProgressStore, ReadingSession, ReadingStatus, SqliteDocumentStore,
+    AudioCacheEntry, AudioCacheLookup, AudioCacheStore, AudioChunk, AudioSink, ChunkerConfig,
+    DocumentChunk, DocumentRuntime, IngestedDocument, ReadingProgress, ReadingProgressStore,
+    ReadingSession, ReadingStatus, SqliteDocumentStore, StoredAudioChunk, StoredAuditEvent,
     StoredChunkEmbedding, TranslatedReadingPipeline, TranslatedUnit, TranslationProvider,
     TranslationRequest, TtsProvider, TtsRequest,
 };
 use visionclip_infer::{
     postprocess::{sanitize_for_speech, sanitize_output},
-    InferenceBackend, InferenceInput, OllamaBackend,
+    AiProvider, AiTask, ChatRequest, ChatResponse, EmbedRequest, OllamaBackend, ProviderMode,
+    ProviderRouteRequest, ProviderRouter, ProviderSelection, SearchAnswerRequest,
+    SearchAnswerResponse, TranslateRequest, VisionRequest as ProviderVisionRequest, VisionResponse,
 };
 use visionclip_output::{notify, open_search_query, open_url, ClipboardOwner};
 use visionclip_tts::PiperHttpClient;
@@ -72,11 +75,27 @@ async fn main() -> Result<()> {
             DocumentStore::new(&config)?
         }
     };
+    let audit_store = match SqliteDocumentStore::open(config.documents_sqlite_path()?) {
+        Ok(store) => Some(store),
+        Err(error) => {
+            warn!(
+                ?error,
+                "failed to open persistent audit store; in-memory audit log remains available"
+            );
+            None
+        }
+    };
+
+    let infer = OllamaBackend::new(config.infer.clone());
+    let ollama_provider: Arc<dyn AiProvider> = Arc::new(infer.clone());
+    let provider_router =
+        Arc::new(ProviderRouter::new().with_provider("ollama", Arc::clone(&ollama_provider)));
 
     let state = Arc::new(AppState {
         config: config.clone(),
         clipboard: ClipboardOwner::new().context("failed to initialize clipboard owner")?,
-        infer: OllamaBackend::new(config.infer.clone()),
+        infer,
+        provider_router,
         search: if config.search.enabled {
             Some(GoogleSearchClient::new(config.search.clone())?)
         } else {
@@ -91,6 +110,7 @@ async fn main() -> Result<()> {
         tools: ToolRegistry::builtin(),
         permission_engine: PermissionEngine::default(),
         audit_log: AuditLog::default(),
+        audit_store: Arc::new(StdMutex::new(audit_store)),
         sessions: Mutex::new(SessionManager::default()),
         documents: Arc::new(Mutex::new(document_store)),
         #[cfg(feature = "coddy-protocol")]
@@ -112,12 +132,14 @@ struct AppState {
     config: AppConfig,
     clipboard: ClipboardOwner,
     infer: OllamaBackend,
+    provider_router: Arc<ProviderRouter>,
     search: Option<GoogleSearchClient>,
     piper: Option<PiperHttpClient>,
     tts_gate: TtsPlaybackGate,
     tools: ToolRegistry,
     permission_engine: PermissionEngine,
     audit_log: AuditLog,
+    audit_store: Arc<StdMutex<Option<SqliteDocumentStore>>>,
     sessions: Mutex<SessionManager>,
     documents: Arc<Mutex<DocumentStore>>,
     #[cfg(feature = "coddy-protocol")]
@@ -374,29 +396,63 @@ impl DocumentStore {
 
         Ok(())
     }
+
+    fn has_sqlite_store(&self) -> bool {
+        self.sqlite.is_some()
+    }
+
+    fn save_audio_chunk(&mut self, chunk: &StoredAudioChunk) -> Result<()> {
+        let Some(sqlite) = self.sqlite.as_mut() else {
+            return Ok(());
+        };
+        sqlite.save_audio_chunk(chunk)
+    }
+
+    fn load_audio_chunk(
+        &self,
+        document_id: &str,
+        target_language: &str,
+        voice_id: &str,
+        chunk_id: &str,
+        text_hash: &str,
+    ) -> Result<Option<StoredAudioChunk>> {
+        let Some(sqlite) = self.sqlite.as_ref() else {
+            return Ok(None);
+        };
+        let chunk = sqlite
+            .load_audio_chunks(document_id, target_language, voice_id)?
+            .into_iter()
+            .find(|chunk| chunk.chunk_id == chunk_id && chunk.text_hash == text_hash);
+        Ok(chunk)
+    }
 }
 
 #[derive(Clone)]
-struct OllamaDocumentTranslator {
-    infer: OllamaBackend,
+struct RoutedDocumentTranslator {
+    provider_router: Arc<ProviderRouter>,
     request_id: uuid::Uuid,
 }
 
 #[async_trait]
-impl TranslationProvider for OllamaDocumentTranslator {
+impl TranslationProvider for RoutedDocumentTranslator {
     async fn translate(&self, request: TranslationRequest) -> Result<String> {
         ensure_supported_document_target_language(&request.target_language)?;
-        let output = self
-            .infer
-            .infer_from_text(
-                format!(
+        let target_language_label = document_target_language_label(&request.target_language);
+        let selection = self
+            .provider_router
+            .route(ProviderRouteRequest::sensitive(AiTask::DocumentTranslation))
+            .await
+            .context("failed to route local document translation provider")?;
+        let output = selection
+            .provider
+            .translate(TranslateRequest {
+                request_id: format!(
                     "{}-document-translate-{}",
                     self.request_id, request.chunk_index
                 ),
-                Action::TranslatePtBr,
-                Some("document".to_string()),
-                request.source_text,
-            )
+                target_language: target_language_label.to_string(),
+                text: request.source_text,
+            })
             .await?;
         Ok(sanitize_output(&Action::TranslatePtBr, &output.text))
     }
@@ -453,6 +509,133 @@ impl ReadingProgressStore for DaemonReadingProgressStore {
             .progress
             .insert(progress.session_id.clone(), progress);
         documents.persist()?;
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct DaemonAudioCacheStore {
+    documents: Arc<Mutex<DocumentStore>>,
+    cache_dir: PathBuf,
+}
+
+#[async_trait]
+impl AudioCacheStore for DaemonAudioCacheStore {
+    async fn load_audio_chunk(&self, lookup: AudioCacheLookup) -> Result<Option<AudioChunk>> {
+        match self.try_load_audio_chunk(lookup).await {
+            Ok(chunk) => Ok(chunk),
+            Err(error) => {
+                warn!(?error, "failed to load document audio cache entry");
+                Ok(None)
+            }
+        }
+    }
+
+    async fn save_audio_chunk(&self, entry: AudioCacheEntry) -> Result<()> {
+        if let Err(error) = self.try_save_audio_chunk(entry).await {
+            warn!(?error, "failed to save document audio cache entry");
+        }
+        Ok(())
+    }
+}
+
+impl DaemonAudioCacheStore {
+    async fn try_load_audio_chunk(&self, lookup: AudioCacheLookup) -> Result<Option<AudioChunk>> {
+        let voice_id = normalized_audio_cache_voice_id(lookup.voice_id.as_deref());
+        let text_hash = stable_audio_text_hash(&lookup.target_language, &voice_id, &lookup.text);
+        let stored = {
+            let documents = self.documents.lock().await;
+            documents.load_audio_chunk(
+                lookup.document_id.as_str(),
+                &lookup.target_language,
+                &voice_id,
+                &lookup.chunk_id,
+                &text_hash,
+            )?
+        };
+        let Some(stored) = stored else {
+            return Ok(None);
+        };
+
+        let read_path = stored.audio_path.clone();
+        let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+            fs::read(&read_path).with_context(|| format!("failed to read {}", read_path.display()))
+        })
+        .await
+        .context("document audio cache read task failed")??;
+        let voice_id = if stored.voice_id == "default" {
+            None
+        } else {
+            Some(stored.voice_id)
+        };
+        Ok(Some(AudioChunk {
+            id: format!("audio_cache_{}", uuid::Uuid::new_v4()),
+            chunk_id: stored.chunk_id,
+            chunk_index: stored.chunk_index,
+            target_language: stored.target_language,
+            voice_id,
+            text: lookup.text,
+            bytes,
+            duration_ms: stored.duration_ms,
+            cached: true,
+        }))
+    }
+
+    async fn try_save_audio_chunk(&self, entry: AudioCacheEntry) -> Result<()> {
+        {
+            let documents = self.documents.lock().await;
+            if !documents.has_sqlite_store() {
+                return Ok(());
+            }
+        }
+
+        let voice_id = normalized_audio_cache_voice_id(entry.voice_id.as_deref());
+        let text_hash = stable_audio_text_hash(&entry.target_language, &voice_id, &entry.text);
+        let file_name = format!(
+            "{:06}_{}_{}.wav",
+            entry.chunk_index,
+            safe_cache_component(&voice_id),
+            safe_cache_component(&text_hash)
+        );
+        let audio_path = self
+            .cache_dir
+            .join(safe_cache_component(entry.document_id.as_str()))
+            .join(file_name);
+        let audio_bytes = entry.bytes.clone();
+        let write_path = audio_path.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            if let Some(parent) = write_path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            let tmp_path = write_path.with_extension("wav.tmp");
+            fs::write(&tmp_path, audio_bytes)
+                .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+            fs::rename(&tmp_path, &write_path).with_context(|| {
+                format!(
+                    "failed to replace {} with {}",
+                    write_path.display(),
+                    tmp_path.display()
+                )
+            })?;
+            Ok(())
+        })
+        .await
+        .context("document audio cache write task failed")??;
+
+        let stored = StoredAudioChunk {
+            document_id: entry.document_id,
+            chunk_id: entry.chunk_id,
+            chunk_index: entry.chunk_index,
+            target_language: entry.target_language,
+            voice_id,
+            text_hash,
+            audio_path,
+            duration_ms: entry.duration_ms,
+        };
+        let mut documents = self.documents.lock().await;
+        documents.save_audio_chunk(&stored)?;
         Ok(())
     }
 }
@@ -745,7 +928,8 @@ async fn process_document_ingest(state: &AppState, job: DocumentIngestJob) -> Re
             "embeddings": embeddings_status,
         }),
     );
-    state.audit_log.record_tool_event(
+    record_audit_tool_event(
+        state,
         "document.ingested",
         Some(session_id),
         "ingest_document",
@@ -802,8 +986,8 @@ async fn process_document_translate(
         )
     };
 
-    let translator = OllamaDocumentTranslator {
-        infer: state.infer.clone(),
+    let translator = RoutedDocumentTranslator {
+        provider_router: Arc::clone(&state.provider_router),
         request_id,
     };
     let translation_session_id = format!("{request_id}-translate");
@@ -906,7 +1090,8 @@ async fn process_document_read(state: &AppState, job: DocumentReadJob) -> Result
         (document_id, title, chunks, reading_session)
     };
 
-    state.audit_log.record_tool_event(
+    record_audit_tool_event(
+        state,
         "document.reading_started",
         Some(session_id.clone()),
         "read_document_aloud",
@@ -920,9 +1105,9 @@ async fn process_document_read(state: &AppState, job: DocumentReadJob) -> Result
         }),
     );
 
-    let pipeline = TranslatedReadingPipeline::new(
-        Arc::new(OllamaDocumentTranslator {
-            infer: state.infer.clone(),
+    let mut pipeline = TranslatedReadingPipeline::new(
+        Arc::new(RoutedDocumentTranslator {
+            provider_router: Arc::clone(&state.provider_router),
             request_id,
         }),
         Arc::new(PiperDocumentTts {
@@ -935,7 +1120,15 @@ async fn process_document_read(state: &AppState, job: DocumentReadJob) -> Result
         Arc::new(DaemonReadingProgressStore {
             documents: Arc::clone(&state.documents),
         }),
-    );
+    )
+    .with_voice_id(default_document_voice_id(&state.config));
+
+    if state.config.documents.cache_audio {
+        pipeline = pipeline.with_audio_cache(Arc::new(DaemonAudioCacheStore {
+            documents: Arc::clone(&state.documents),
+            cache_dir: document_audio_cache_dir()?,
+        }));
+    }
 
     let summary = pipeline
         .run(document_id.clone(), reading_session.clone(), chunks)
@@ -1066,14 +1259,17 @@ async fn process_document_ask(state: &AppState, job: DocumentAskJob) -> Result<J
     .await;
     let context = document_context_text(&selected_chunks);
     let prompt = document_question_prompt(&title, question, &context);
-    let output = state
-        .infer
-        .infer_from_text(
-            format!("{request_id}-document-ask"),
-            Action::Explain,
-            Some("document".to_string()),
-            prompt,
-        )
+    let provider =
+        route_sensitive_local_provider(state, Some(&session_id), AiTask::Chat, "document.ask")
+            .await?;
+    let output = provider
+        .provider
+        .chat(ChatRequest {
+            request_id: format!("{request_id}-document-ask"),
+            action: Action::Explain,
+            source_app: Some("document".to_string()),
+            text: prompt,
+        })
         .await?;
     let answer = sanitize_output(&Action::Explain, &output.text);
     let result_text = format!(
@@ -1106,7 +1302,8 @@ async fn process_document_ask(state: &AppState, job: DocumentAskJob) -> Result<J
             "tts_enqueue_ms": tts_enqueue_ms,
         }),
     );
-    state.audit_log.record_tool_event(
+    record_audit_tool_event(
+        state,
         "document.question_answered",
         Some(session_id),
         "ask_document",
@@ -1160,14 +1357,17 @@ async fn process_document_summarize(
     };
     let context = document_context_text(&selected_chunks);
     let prompt = document_summary_prompt(&title, &context, total_chunks);
-    let output = state
-        .infer
-        .infer_from_text(
-            format!("{request_id}-document-summary"),
-            Action::Explain,
-            Some("document".to_string()),
-            prompt,
-        )
+    let provider =
+        route_sensitive_local_provider(state, Some(&session_id), AiTask::Chat, "document.summary")
+            .await?;
+    let output = provider
+        .provider
+        .chat(ChatRequest {
+            request_id: format!("{request_id}-document-summary"),
+            action: Action::Explain,
+            source_app: Some("document".to_string()),
+            text: prompt,
+        })
         .await?;
     let summary = sanitize_output(&Action::Explain, &output.text);
     let result_text = format!("Documento: {title}\n\nResumo:\n{}", summary.trim());
@@ -1197,7 +1397,8 @@ async fn process_document_summarize(
             "tts_enqueue_ms": tts_enqueue_ms,
         }),
     );
-    state.audit_log.record_tool_event(
+    record_audit_tool_event(
+        state,
         "document.summarized",
         Some(session_id),
         "summarize_document",
@@ -1223,25 +1424,104 @@ fn normalize_document_target_language(target_language: &str) -> Result<String> {
     if target.is_empty() {
         return Ok("pt-BR".to_string());
     }
-    ensure_supported_document_target_language(target)?;
-    Ok("pt-BR".to_string())
+    let normalized = target.to_ascii_lowercase().replace('_', "-");
+    let compact = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    match compact.as_str() {
+        "pt" | "pt-br" | "portuguese" | "portugues" | "português"
+        | "portugues do brasil" | "português do brasil" | "brazilian portuguese" => {
+            Ok("pt-BR".to_string())
+        }
+        "en" | "en-us" | "en-gb" | "english" | "ingles" | "inglês" => Ok("en".to_string()),
+        "es" | "es-es" | "es-mx" | "spanish" | "espanol" | "español" | "castellano" => {
+            Ok("es".to_string())
+        }
+        "zh" | "zh-cn" | "zh-hans" | "chinese" | "chines" | "chinês" | "mandarin"
+        | "mandarim" | "中文" => Ok("zh".to_string()),
+        "ru" | "russian" | "russo" | "русский" => Ok("ru".to_string()),
+        "ja" | "jp" | "japanese" | "japones" | "japonês" | "日本語" => Ok("ja".to_string()),
+        "ko" | "kr" | "korean" | "coreano" | "한국어" => Ok("ko".to_string()),
+        "hi" | "hindi" | "indian" | "indiano" | "हिन्दी" | "हिंदी" => Ok("hi".to_string()),
+        _ => anyhow::bail!(
+            "unsupported document translation target `{}`; supported targets: pt-BR, en, es, zh, ru, ja, ko, hi",
+            target_language
+        ),
+    }
 }
 
 fn ensure_supported_document_target_language(target_language: &str) -> Result<()> {
-    let normalized = target_language
-        .trim()
-        .to_ascii_lowercase()
-        .replace('_', "-");
-    if matches!(
-        normalized.as_str(),
-        "pt" | "pt-br" | "portuguese" | "portugues" | "português"
-    ) {
-        return Ok(());
+    normalize_document_target_language(target_language).map(|_| ())
+}
+
+fn document_target_language_label(target_language: &str) -> &'static str {
+    match target_language {
+        "pt-BR" => "Brazilian Portuguese",
+        "en" => "English",
+        "es" => "Spanish",
+        "zh" => "Chinese",
+        "ru" => "Russian",
+        "ja" => "Japanese",
+        "ko" => "Korean",
+        "hi" => "Hindi",
+        _ => "Brazilian Portuguese",
     }
-    anyhow::bail!(
-        "document translation currently supports only pt-BR; requested `{}`",
-        target_language
-    );
+}
+
+fn document_audio_cache_dir() -> Result<PathBuf> {
+    Ok(AppConfig::data_dir()?.join("document-audio-cache"))
+}
+
+fn default_document_voice_id(config: &AppConfig) -> Option<String> {
+    let voice = config.audio.default_voice.trim();
+    if voice.is_empty() {
+        None
+    } else {
+        Some(voice.to_string())
+    }
+}
+
+fn normalized_audio_cache_voice_id(voice_id: Option<&str>) -> String {
+    let voice = voice_id.unwrap_or("default").trim();
+    if voice.is_empty() {
+        "default".to_string()
+    } else {
+        voice.to_string()
+    }
+}
+
+fn stable_audio_text_hash(target_language: &str, voice_id: &str, text: &str) -> String {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut hash = FNV_OFFSET;
+    for section in ["visionclip-audio-v1", target_language, voice_id, text] {
+        for byte in section.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash ^= 0;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("fnv1a64_{hash:016x}")
+}
+
+fn safe_cache_component(input: &str) -> String {
+    let value = input
+        .chars()
+        .take(96)
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if value.trim_matches('_').is_empty() || matches!(value.as_str(), "." | "..") {
+        "default".to_string()
+    } else {
+        value
+    }
 }
 
 async fn generate_document_embeddings(
@@ -1250,9 +1530,14 @@ async fn generate_document_embeddings(
     document_id: &str,
     chunks: &[DocumentChunk],
 ) -> Option<Vec<DocumentChunkEmbedding>> {
-    if !state.infer.has_embedding_model() || chunks.is_empty() {
+    if chunks.is_empty() {
         return None;
     }
+    let provider = state
+        .provider_router
+        .route(ProviderRouteRequest::sensitive(AiTask::Embeddings))
+        .await
+        .ok()?;
 
     let mut embeddings = Vec::with_capacity(chunks.len());
     for (batch_index, batch) in chunks.chunks(16).enumerate() {
@@ -1260,9 +1545,12 @@ async fn generate_document_embeddings(
             .iter()
             .map(|chunk| chunk.text.clone())
             .collect::<Vec<_>>();
-        let output = match state
-            .infer
-            .embed_texts(format!("{request_id}-document-embed-{batch_index}"), texts)
+        let output = match provider
+            .provider
+            .embed(EmbedRequest {
+                request_id: format!("{request_id}-document-embed-{batch_index}"),
+                texts,
+            })
             .await
         {
             Ok(output) => output,
@@ -1315,14 +1603,18 @@ async fn select_document_context_with_optional_embeddings(
     query: &str,
     limits: DocumentContextLimits,
 ) -> Vec<DocumentChunk> {
-    if state.infer.has_embedding_model() {
-        if let Some(embeddings) = embeddings {
-            match state
-                .infer
-                .embed_texts(
-                    format!("{request_id}-document-query-embed"),
-                    vec![query.to_string()],
-                )
+    if let Some(embeddings) = embeddings {
+        if let Ok(provider) = state
+            .provider_router
+            .route(ProviderRouteRequest::sensitive(AiTask::Embeddings))
+            .await
+        {
+            match provider
+                .provider
+                .embed(EmbedRequest {
+                    request_id: format!("{request_id}-document-query-embed"),
+                    texts: vec![query.to_string()],
+                })
                 .await
             {
                 Ok(output) => {
@@ -1571,9 +1863,20 @@ impl coddy_bridge::ReplNativeServices for DaemonReplNativeServices {
         speak: bool,
     ) -> coddy_bridge::ReplJobFuture<'a> {
         Box::pin(async move {
-            let output = state
-                .infer
-                .answer_repl_turn(format!("{request_id}-repl-agent"), &command_text)
+            let session_id = ensure_request_session(state, request_id).await;
+            let provider = route_sensitive_local_provider(
+                state,
+                Some(&session_id),
+                AiTask::Chat,
+                "repl.answer",
+            )
+            .await?;
+            let output = provider
+                .provider
+                .answer_repl(visionclip_infer::ReplRequest {
+                    request_id: format!("{request_id}-repl-agent"),
+                    user_message: command_text,
+                })
                 .await?;
             let answer = sanitize_output(&Action::Explain, &output.text);
             let speak_requested = state
@@ -1715,6 +2018,220 @@ async fn ensure_request_session(state: &AppState, request_id: uuid::Uuid) -> Ses
     session_id
 }
 
+fn record_audit_tool_event(
+    state: &AppState,
+    event_type: impl Into<String>,
+    session_id: Option<SessionId>,
+    tool_name: impl Into<String>,
+    risk_level: RiskLevel,
+    decision: impl Into<String>,
+    data: serde_json::Value,
+) {
+    let mut event = AuditEvent::tool_event(event_type, session_id, tool_name, risk_level, decision);
+    event.data = redact_for_audit(&data);
+    state.audit_log.record(event.clone());
+    persist_audit_event(state, &event);
+}
+
+fn persist_audit_event(state: &AppState, event: &AuditEvent) {
+    let stored = match stored_audit_event_from_event(event) {
+        Ok(value) => value,
+        Err(error) => {
+            warn!(?error, event_id = %event.id, "failed to encode audit event data");
+            return;
+        }
+    };
+
+    let Ok(mut audit_store) = state.audit_store.lock() else {
+        warn!(event_id = %event.id, "failed to lock persistent audit store");
+        return;
+    };
+    let Some(store) = audit_store.as_mut() else {
+        return;
+    };
+    if let Err(error) = store.save_audit_event(&stored) {
+        warn!(
+            ?error,
+            event_id = %event.id,
+            "failed to persist audit event to SQLite"
+        );
+    }
+}
+
+async fn route_sensitive_local_provider(
+    state: &AppState,
+    session_id: Option<&SessionId>,
+    task: AiTask,
+    operation: &str,
+) -> Result<ProviderSelection> {
+    let selection = state
+        .provider_router
+        .route(ProviderRouteRequest {
+            task,
+            mode: ProviderMode::LocalFirst,
+            sensitive: true,
+        })
+        .await
+        .with_context(|| format!("failed to route local AI provider for {operation}"))?;
+
+    record_provider_selected(state, session_id.cloned(), &selection, task, operation);
+    Ok(selection)
+}
+
+fn record_provider_selected(
+    state: &AppState,
+    session_id: Option<SessionId>,
+    selection: &ProviderSelection,
+    task: AiTask,
+    operation: &str,
+) {
+    let mut event = AuditEvent::new("provider.selected");
+    event.session_id = session_id;
+    event.provider = Some(selection.id.clone());
+    event.decision = Some("selected".to_string());
+    event.data = redact_for_audit(&json!({
+        "task": format!("{task:?}"),
+        "operation": operation,
+        "local": selection.health.local,
+        "display_name": selection.health.display_name.clone(),
+    }));
+    state.audit_log.record(event.clone());
+    persist_audit_event(state, &event);
+}
+
+async fn run_provider_chat(
+    state: &AppState,
+    session_id: &SessionId,
+    request_id: String,
+    action: Action,
+    source_app: Option<String>,
+    text: String,
+    operation: &str,
+) -> Result<ChatResponse> {
+    let provider =
+        route_sensitive_local_provider(state, Some(session_id), AiTask::Chat, operation).await?;
+    provider
+        .provider
+        .chat(ChatRequest {
+            request_id,
+            action,
+            source_app,
+            text,
+        })
+        .await
+}
+
+struct ProviderVisionJob {
+    request_id: String,
+    action: Action,
+    source_app: Option<String>,
+    image_bytes: Vec<u8>,
+    mime_type: String,
+}
+
+async fn run_provider_vision(
+    state: &AppState,
+    session_id: &SessionId,
+    task: AiTask,
+    operation: &str,
+    job: ProviderVisionJob,
+) -> Result<VisionResponse> {
+    let provider = route_sensitive_local_provider(state, Some(session_id), task, operation).await?;
+    let request = ProviderVisionRequest {
+        request_id: job.request_id,
+        action: job.action,
+        source_app: job.source_app,
+        image_bytes: job.image_bytes,
+        mime_type: job.mime_type,
+    };
+
+    match task {
+        AiTask::Ocr => provider.provider.ocr(request).await,
+        AiTask::Vision => provider.provider.vision(request).await,
+        _ => anyhow::bail!("unsupported vision provider task {task:?}"),
+    }
+}
+
+async fn run_provider_search_answer(
+    state: &AppState,
+    session_id: &SessionId,
+    request_id: String,
+    query: &str,
+    enrichment: &SearchEnrichment,
+    source_label: &str,
+    operation: &str,
+) -> Result<SearchAnswerResponse> {
+    let provider =
+        route_sensitive_local_provider(state, Some(session_id), AiTask::Chat, operation).await?;
+    provider
+        .provider
+        .answer_search(search_answer_request(
+            request_id,
+            query,
+            enrichment,
+            source_label,
+        )?)
+        .await
+}
+
+async fn run_provider_search_answer_with_router(
+    provider_router: &ProviderRouter,
+    request_id: String,
+    query: &str,
+    enrichment: &SearchEnrichment,
+    source_label: &str,
+) -> Result<SearchAnswerResponse> {
+    let provider = provider_router
+        .route(ProviderRouteRequest::sensitive(AiTask::Chat))
+        .await
+        .context("failed to route local search answer provider")?;
+    provider
+        .provider
+        .answer_search(search_answer_request(
+            request_id,
+            query,
+            enrichment,
+            source_label,
+        )?)
+        .await
+}
+
+fn search_answer_request(
+    request_id: String,
+    query: &str,
+    enrichment: &SearchEnrichment,
+    source_label: &str,
+) -> Result<SearchAnswerRequest> {
+    let overview = enrichment
+        .ai_overview
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("search enrichment does not include AI overview text")?;
+
+    Ok(SearchAnswerRequest {
+        request_id,
+        query: query.to_string(),
+        source_label: source_label.to_string(),
+        ai_overview_text: overview.to_string(),
+        supporting_sources: supporting_sources_text(enrichment),
+    })
+}
+
+fn stored_audit_event_from_event(event: &AuditEvent) -> Result<StoredAuditEvent> {
+    Ok(StoredAuditEvent {
+        id: event.id.clone(),
+        captured_at_unix_ms: event.captured_at_unix_ms,
+        session_id: event.session_id.as_ref().map(ToString::to_string),
+        event_type: event.event_type.clone(),
+        risk_level: event.risk_level.map(RiskLevel::as_u8),
+        tool_name: event.tool_name.clone(),
+        provider: event.provider.clone(),
+        decision: event.decision.clone(),
+        data_json: serde_json::to_string(&event.data)?,
+    })
+}
+
 fn authorize_tool_call(
     state: &AppState,
     session_id: &SessionId,
@@ -1724,7 +2241,8 @@ fn authorize_tool_call(
     let definition = match state.tools.validate_call(&call) {
         Ok(definition) => definition,
         Err(error) => {
-            state.audit_log.record_tool_event(
+            record_audit_tool_event(
+                state,
                 "security.blocked",
                 Some(session_id.clone()),
                 call.name,
@@ -1736,7 +2254,8 @@ fn authorize_tool_call(
         }
     };
 
-    state.audit_log.record_tool_event(
+    record_audit_tool_event(
+        state,
         "tool.proposed",
         Some(session_id.clone()),
         definition.name.clone(),
@@ -1756,7 +2275,8 @@ fn authorize_tool_call(
 
     match state.permission_engine.evaluate(&policy_input) {
         PolicyDecision::Allow => {
-            state.audit_log.record_tool_event(
+            record_audit_tool_event(
+                state,
                 "tool.confirmed",
                 Some(session_id.clone()),
                 definition.name.clone(),
@@ -1770,7 +2290,8 @@ fn authorize_tool_call(
             })
         }
         PolicyDecision::RequireConfirmation(request) => {
-            state.audit_log.record_tool_event(
+            record_audit_tool_event(
+                state,
                 "tool.confirmation_requested",
                 Some(session_id.clone()),
                 definition.name.clone(),
@@ -1784,7 +2305,8 @@ fn authorize_tool_call(
             );
         }
         PolicyDecision::Deny(reason) => {
-            state.audit_log.record_tool_event(
+            record_audit_tool_event(
+                state,
                 "tool.denied",
                 Some(session_id.clone()),
                 definition.name.clone(),
@@ -1803,7 +2325,8 @@ fn record_tool_executed(
     tool: &AuthorizedTool,
     data: serde_json::Value,
 ) {
-    state.audit_log.record_tool_event(
+    record_audit_tool_event(
+        state,
         "tool.executed",
         Some(session_id.clone()),
         tool.name.clone(),
@@ -1820,7 +2343,8 @@ fn record_tool_failed(
     risk_level: RiskLevel,
     error: &str,
 ) {
-    state.audit_log.record_tool_event(
+    record_audit_tool_event(
+        state,
         "tool.failed",
         Some(session_id.clone()),
         tool_name.to_string(),
@@ -1864,15 +2388,20 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
             _ => Action::CopyText,
         };
 
-        match state
-            .infer
-            .infer_with_ocr_model(
-                request_id.to_string(),
-                ocr_action,
-                job.image_bytes.clone(),
-                job.mime_type.clone(),
-            )
-            .await
+        match run_provider_vision(
+            state,
+            &session_id,
+            AiTask::Ocr,
+            "capture.ocr",
+            ProviderVisionJob {
+                request_id: request_id.to_string(),
+                action: ocr_action,
+                source_app: job.source_app.clone(),
+                image_bytes: job.image_bytes.clone(),
+                mime_type: job.mime_type.clone(),
+            },
+        )
+        .await
         {
             Ok(output) => {
                 ocr_ms = elapsed_ms(ocr_started_at);
@@ -1902,32 +2431,40 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                 inference_mode = "ocr_only";
                 visionclip_infer::backend::InferenceOutput { text }
             } else {
-                state
-                    .infer
-                    .infer(InferenceInput {
+                let output = run_provider_vision(
+                    state,
+                    &session_id,
+                    AiTask::Vision,
+                    "capture.primary_image",
+                    ProviderVisionJob {
                         request_id: request_id.to_string(),
                         action: job.action.clone(),
                         source_app: job.source_app.clone(),
                         image_bytes: job.image_bytes.clone(),
                         mime_type: job.mime_type.clone(),
-                    })
-                    .await?
+                    },
+                )
+                .await?;
+                visionclip_infer::backend::InferenceOutput { text: output.text }
             }
         }
         _ => {
             if let Some(text) = ocr_text.clone().filter(|value| value.chars().count() >= 12) {
                 inference_mode = "ocr_text_to_reasoning";
-                match state
-                    .infer
-                    .infer_from_text(
-                        request_id.to_string(),
-                        job.action.clone(),
-                        job.source_app.clone(),
-                        text,
-                    )
-                    .await
+                match run_provider_chat(
+                    state,
+                    &session_id,
+                    request_id.to_string(),
+                    job.action.clone(),
+                    job.source_app.clone(),
+                    text,
+                    "capture.ocr_text_to_reasoning",
+                )
+                .await
                 {
-                    Ok(output) if !output.text.trim().is_empty() => output,
+                    Ok(output) if !output.text.trim().is_empty() => {
+                        visionclip_infer::backend::InferenceOutput { text: output.text }
+                    }
                     Ok(_) => {
                         warn!(
                             request_id = %request_id,
@@ -1935,16 +2472,21 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                             "OCR text to reasoning returned empty content; falling back to primary image inference"
                         );
                         inference_mode = "primary_image_fallback";
-                        state
-                            .infer
-                            .infer(InferenceInput {
+                        let output = run_provider_vision(
+                            state,
+                            &session_id,
+                            AiTask::Vision,
+                            "capture.primary_image_fallback",
+                            ProviderVisionJob {
                                 request_id: request_id.to_string(),
                                 action: job.action.clone(),
                                 source_app: job.source_app.clone(),
                                 image_bytes: job.image_bytes.clone(),
                                 mime_type: job.mime_type.clone(),
-                            })
-                            .await?
+                            },
+                        )
+                        .await?;
+                        visionclip_infer::backend::InferenceOutput { text: output.text }
                     }
                     Err(error) => {
                         warn!(
@@ -1954,29 +2496,39 @@ async fn process_job(state: &AppState, job: CaptureJob) -> Result<JobResult> {
                             "OCR text to reasoning failed; falling back to primary image inference"
                         );
                         inference_mode = "primary_image_fallback";
-                        state
-                            .infer
-                            .infer(InferenceInput {
+                        let output = run_provider_vision(
+                            state,
+                            &session_id,
+                            AiTask::Vision,
+                            "capture.primary_image_fallback",
+                            ProviderVisionJob {
                                 request_id: request_id.to_string(),
                                 action: job.action.clone(),
                                 source_app: job.source_app.clone(),
                                 image_bytes: job.image_bytes.clone(),
                                 mime_type: job.mime_type.clone(),
-                            })
-                            .await?
+                            },
+                        )
+                        .await?;
+                        visionclip_infer::backend::InferenceOutput { text: output.text }
                     }
                 }
             } else {
-                state
-                    .infer
-                    .infer(InferenceInput {
+                let output = run_provider_vision(
+                    state,
+                    &session_id,
+                    AiTask::Vision,
+                    "capture.primary_image",
+                    ProviderVisionJob {
                         request_id: request_id.to_string(),
                         action: job.action.clone(),
                         source_app: job.source_app.clone(),
                         image_bytes: job.image_bytes.clone(),
                         mime_type: job.mime_type.clone(),
-                    })
-                    .await?
+                    },
+                )
+                .await?;
+                visionclip_infer::backend::InferenceOutput { text: output.text }
             }
         }
     };
@@ -2202,7 +2754,8 @@ async fn execute_search_query(
                     .map(|value| value.chars().count())
                     .unwrap_or_default();
                 if let Some(answer) = generate_google_ai_overview_answer(
-                    &state.infer,
+                    state,
+                    &session_id,
                     request_id,
                     query,
                     &enrichment,
@@ -2337,7 +2890,7 @@ fn spawn_rendered_ai_overview_listener(
         request_id,
         query: query.to_string(),
         search: state.config.search.clone(),
-        infer: state.infer.clone(),
+        provider_router: Arc::clone(&state.provider_router),
     };
     let piper = state.piper.clone();
     let tts_gate = state.tts_gate.clone();
@@ -2346,8 +2899,8 @@ fn spawn_rendered_ai_overview_listener(
         let started_at = Instant::now();
         match rendered_search::wait_for_rendered_ai_overview(&job).await {
             Ok(Some(result)) => {
-                let grounded_answer = generate_google_ai_overview_answer(
-                    &job.infer,
+                let grounded_answer = generate_google_ai_overview_answer_with_router(
+                    &job.provider_router,
                     job.request_id,
                     &job.query,
                     &result.enrichment,
@@ -2431,42 +2984,25 @@ fn spawn_rendered_ai_overview_listener(
 }
 
 async fn generate_google_ai_overview_answer(
-    infer: &OllamaBackend,
+    state: &AppState,
+    session_id: &SessionId,
     request_id: uuid::Uuid,
     query: &str,
     enrichment: &SearchEnrichment,
     source_label: &str,
 ) -> Option<String> {
-    let overview = enrichment
-        .ai_overview
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?;
-    let supporting_sources = supporting_sources_text(enrichment);
-
-    match infer
-        .answer_search_from_context(
-            format!("{request_id}-google-ai-overview-answer"),
-            query,
-            source_label,
-            overview,
-            &supporting_sources,
-        )
-        .await
+    match run_provider_search_answer(
+        state,
+        session_id,
+        format!("{request_id}-google-ai-overview-answer"),
+        query,
+        enrichment,
+        source_label,
+        "search.ai_overview_answer",
+    )
+    .await
     {
-        Ok(output) => {
-            let answer = sanitize_output(&Action::Explain, &output.text);
-            if answer.trim().is_empty() {
-                warn!(
-                    request_id = %request_id,
-                    query = %query,
-                    "grounded Google AI overview answer was empty"
-                );
-                None
-            } else {
-                Some(answer)
-            }
-        }
+        Ok(output) => sanitized_search_answer(request_id, query, &output.text),
         Err(error) => {
             warn!(
                 ?error,
@@ -2476,6 +3012,53 @@ async fn generate_google_ai_overview_answer(
             );
             None
         }
+    }
+}
+
+async fn generate_google_ai_overview_answer_with_router(
+    provider_router: &ProviderRouter,
+    request_id: uuid::Uuid,
+    query: &str,
+    enrichment: &SearchEnrichment,
+    source_label: &str,
+) -> Option<String> {
+    match run_provider_search_answer_with_router(
+        provider_router,
+        format!("{request_id}-google-ai-overview-answer"),
+        query,
+        enrichment,
+        source_label,
+    )
+    .await
+    {
+        Ok(output) => sanitized_search_answer(request_id, query, &output.text),
+        Err(error) => {
+            warn!(
+                ?error,
+                request_id = %request_id,
+                query = %query,
+                "failed to generate grounded Google AI overview answer"
+            );
+            None
+        }
+    }
+}
+
+fn sanitized_search_answer(
+    request_id: uuid::Uuid,
+    query: &str,
+    raw_answer: &str,
+) -> Option<String> {
+    let answer = sanitize_output(&Action::Explain, raw_answer);
+    if answer.trim().is_empty() {
+        warn!(
+            request_id = %request_id,
+            query = %query,
+            "grounded Google AI overview answer was empty"
+        );
+        None
+    } else {
+        Some(answer)
     }
 }
 
@@ -2684,6 +3267,31 @@ mod tests {
     }
 
     #[test]
+    fn audit_event_conversion_preserves_redacted_tool_metadata() {
+        let session_id = SessionId::new();
+        let mut event = AuditEvent::tool_event(
+            "tool.executed",
+            Some(session_id.clone()),
+            "ingest_document",
+            RiskLevel::Level2,
+            "executed",
+        );
+        event.data = redact_for_audit(&json!({
+            "document_id": "doc_1",
+            "api_key": "sk-secret"
+        }));
+
+        let stored = stored_audit_event_from_event(&event).unwrap();
+
+        assert_eq!(stored.id, event.id);
+        assert_eq!(stored.session_id, Some(session_id.to_string()));
+        assert_eq!(stored.event_type, "tool.executed");
+        assert_eq!(stored.risk_level, Some(2));
+        assert_eq!(stored.tool_name.as_deref(), Some("ingest_document"));
+        assert!(stored.data_json.contains("\"api_key\":\"<redacted>\""));
+    }
+
+    #[test]
     fn document_context_selection_prefers_matching_chunks() {
         let chunks = test_document_chunks(&[
             "Introdução geral sobre o livro.",
@@ -2869,6 +3477,150 @@ mod tests {
             Some(&[0.7, 0.3][..])
         );
         let _ = std::fs::remove_file(sqlite_path);
+    }
+
+    #[tokio::test]
+    async fn daemon_audio_cache_store_writes_wav_and_sqlite_metadata() {
+        let config = AppConfig::default();
+        let storage_path = std::env::temp_dir().join(format!(
+            "visionclip-document-audio-cache-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let sqlite_path = std::env::temp_dir().join(format!(
+            "visionclip-document-audio-cache-{}.sqlite3",
+            uuid::Uuid::new_v4()
+        ));
+        let cache_dir = std::env::temp_dir().join(format!(
+            "visionclip-document-audio-cache-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let document_id = visionclip_documents::DocumentId::new();
+        let chunks = test_document_chunks_with_id(&document_id, &["Audio chunk."]);
+        let chunk_id = chunks[0].id.clone();
+        let mut store =
+            DocumentStore::empty(&config, storage_path.clone(), sqlite_path.clone()).unwrap();
+        store.documents.insert(
+            document_id.as_str().to_string(),
+            IngestedDocument {
+                document: visionclip_documents::LoadedDocument {
+                    id: document_id.clone(),
+                    source_path: PathBuf::from("/tmp/audio.txt"),
+                    title: "audio".into(),
+                    format: visionclip_documents::DocumentFormat::Text,
+                    text: "Audio chunk.".into(),
+                },
+                chunks,
+            },
+        );
+        store.persist().unwrap();
+
+        let documents = Arc::new(Mutex::new(store));
+        let cache = DaemonAudioCacheStore {
+            documents: Arc::clone(&documents),
+            cache_dir: cache_dir.clone(),
+        };
+        cache
+            .try_save_audio_chunk(AudioCacheEntry {
+                document_id: document_id.clone(),
+                session_id: "read_test".into(),
+                chunk_id: chunk_id.clone(),
+                chunk_index: 0,
+                target_language: "pt-BR".into(),
+                voice_id: Some("pt_BR-test".into()),
+                text: "Texto narrado.".into(),
+                bytes: b"wav-data".to_vec(),
+                duration_ms: Some(42),
+            })
+            .await
+            .unwrap();
+
+        let doc_cache_dir = cache_dir.join(safe_cache_component(document_id.as_str()));
+        let audio_files = std::fs::read_dir(&doc_cache_dir)
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(audio_files.len(), 1);
+        assert_eq!(std::fs::read(audio_files[0].path()).unwrap(), b"wav-data");
+
+        let cached = cache
+            .try_load_audio_chunk(AudioCacheLookup {
+                document_id: document_id.clone(),
+                session_id: "read_test".into(),
+                chunk_id: chunk_id.clone(),
+                chunk_index: 0,
+                target_language: "pt-BR".into(),
+                voice_id: Some("pt_BR-test".into()),
+                text: "Texto narrado.".into(),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(cached.cached);
+        assert_eq!(cached.bytes, b"wav-data");
+        assert_eq!(cached.text, "Texto narrado.");
+
+        let documents = documents.lock().await;
+        let stored = documents
+            .sqlite
+            .as_ref()
+            .unwrap()
+            .load_audio_chunks(document_id.as_str(), "pt-BR", "pt_BR-test")
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].chunk_id, chunk_id);
+        assert_eq!(
+            stored[0].text_hash,
+            stable_audio_text_hash("pt-BR", "pt_BR-test", "Texto narrado.")
+        );
+        assert_eq!(stored[0].duration_ms, Some(42));
+
+        let _ = std::fs::remove_file(storage_path);
+        let _ = std::fs::remove_file(sqlite_path);
+        let _ = std::fs::remove_dir_all(cache_dir);
+    }
+
+    #[test]
+    fn audio_cache_helpers_are_stable_and_path_safe() {
+        assert_eq!(normalized_audio_cache_voice_id(None), "default");
+        assert_eq!(safe_cache_component("../pt BR/test"), ".._pt_BR_test");
+        assert_eq!(safe_cache_component(".."), "default");
+        assert_eq!(
+            stable_audio_text_hash("pt-BR", "voice-a", "texto"),
+            stable_audio_text_hash("pt-BR", "voice-a", "texto")
+        );
+        assert_ne!(
+            stable_audio_text_hash("pt-BR", "voice-a", "texto"),
+            stable_audio_text_hash("pt-BR", "voice-b", "texto")
+        );
+    }
+
+    #[test]
+    fn document_target_language_normalization_supports_priority_languages() {
+        let cases = [
+            ("", "pt-BR", "Brazilian Portuguese"),
+            ("Português do Brasil", "pt-BR", "Brazilian Portuguese"),
+            ("english", "en", "English"),
+            ("español", "es", "Spanish"),
+            ("chinês", "zh", "Chinese"),
+            ("русский", "ru", "Russian"),
+            ("japonês", "ja", "Japanese"),
+            ("coreano", "ko", "Korean"),
+            ("हिंदी", "hi", "Hindi"),
+        ];
+
+        for (input, expected, label) in cases {
+            let normalized = normalize_document_target_language(input).unwrap();
+            assert_eq!(normalized, expected);
+            assert_eq!(document_target_language_label(&normalized), label);
+        }
+    }
+
+    #[test]
+    fn document_target_language_normalization_rejects_unsupported_language() {
+        let error = normalize_document_target_language("klingon").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unsupported document translation target"));
     }
 
     #[tokio::test]

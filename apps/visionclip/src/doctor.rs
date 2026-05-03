@@ -7,7 +7,7 @@ use std::{
 };
 use tokio::net::UnixStream;
 use visionclip_common::{
-    config::{AudioConfig, SearchConfig, VoiceConfig},
+    config::{AudioConfig, DocumentsConfig, SearchConfig, VoiceConfig},
     discover_capture_backends, discover_rendered_capture_backends, read_message,
     summarize_capture_backends, write_message, AppConfig, HealthCheckJob, JobResult, SessionType,
     VisionRequest,
@@ -88,6 +88,7 @@ pub(crate) async fn run(config: &AppConfig) -> Result<bool> {
     checks.push(check_voice_recorder(&config.voice, command_available));
     checks.push(check_voice_transcriber(&config.voice, command_available));
     checks.push(check_tts_player(&config.audio, command_available));
+    checks.push(check_pdf_extractor(&config.documents, command_available));
     checks.push(check_voice_wrapper());
     checks.push(check_shortcut_environment());
     checks.push(check_media_keys_service());
@@ -392,6 +393,27 @@ fn check_tts_player(audio: &AudioConfig, command_exists: impl Fn(&str) -> bool) 
     };
 
     check_command("tts", &command, command_exists)
+}
+
+fn check_pdf_extractor(
+    documents: &DocumentsConfig,
+    command_exists: impl Fn(&str) -> bool,
+) -> DoctorCheck {
+    if !documents.enabled {
+        return DoctorCheck::warn(
+            "pdf-docs",
+            "runtime de documentos desabilitado na configuracao",
+        );
+    }
+
+    if command_exists("pdftotext") {
+        DoctorCheck::ok("pdf-docs", "pdftotext disponivel para PDFs textuais")
+    } else {
+        DoctorCheck::warn(
+            "pdf-docs",
+            "pdftotext nao encontrado; TXT/Markdown continuam funcionando, PDFs textuais exigem poppler-utils",
+        )
+    }
 }
 
 fn check_voice_wrapper() -> DoctorCheck {
@@ -825,6 +847,18 @@ mod tests {
     #[test]
     fn tts_player_checks_configured_player() {
         let check = check_tts_player(&audio_config(), |command| command == "pw-play");
+        assert_eq!(check.status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn pdf_extractor_is_optional_for_document_runtime() {
+        let check = check_pdf_extractor(&DocumentsConfig::default(), |_| false);
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.message.contains("pdftotext"));
+
+        let check = check_pdf_extractor(&DocumentsConfig::default(), |command| {
+            command == "pdftotext"
+        });
         assert_eq!(check.status, CheckStatus::Ok);
     }
 
