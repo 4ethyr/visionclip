@@ -61,16 +61,17 @@ plus current upstream documentation.
 
 ## Current Gap Priority
 
-1. Persist sessions, audit events, documents, chunks, translations, and reading
-   progress in SQLite while preserving the current JSON snapshot migration path.
-2. Wire local embeddings into document ingestion and `ask_document` retrieval.
-3. Add PDF text extraction behind a safe loader with explicit consent and path
-   validation.
+1. Connect daemon inference flows to the new `AiProvider`/`ProviderRouter`
+   foundation while keeping Ollama local-first and cloud disabled by default.
+2. Make SQLite the single document store after the JSON compatibility window and
+   add optional `sqlite-vec` vector search.
+3. Add OCR fallback for scanned PDFs behind explicit consent and local-only
+   policy by default.
 4. Build AudioRuntime control channels for pause/resume/stop/skip instead of
    relying only on external player process completion.
 5. Move desktop operations into a DesktopController with fixed command
    templates and mockable executors.
-6. Add ProviderRouter traits for chat, vision, embedding, STT, translation, and
-   TTS while keeping local providers as defaults.
+6. Expand provider traits to STT/TTS and future cloud stubs only after policy
+   enforcement and secret handling are in place.
 7. Build frontend configuration only on top of daemon IPC; do not duplicate
    privileged logic in the UI process.

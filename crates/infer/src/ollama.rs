@@ -7,6 +7,10 @@ use crate::prompts::{
     search_answer_system_prompt, search_answer_user_prompt, system_prompt, user_prompt,
     user_prompt_from_text,
 };
+use crate::provider::{
+    AiProvider, ChatRequest, ChatResponse, EmbedRequest, EmbedResponse, ProviderCapability,
+    ProviderHealth, TranslateRequest, Translation, VisionRequest, VisionResponse,
+};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -44,7 +48,7 @@ impl OllamaBackend {
         request_id: String,
         texts: Vec<String>,
     ) -> Result<EmbeddingOutput> {
-        self.embed(EmbeddingInput { request_id, texts }).await
+        <Self as EmbeddingBackend>::embed(self, EmbeddingInput { request_id, texts }).await
     }
 
     pub async fn infer_with_ocr_model(
@@ -540,6 +544,71 @@ impl EmbeddingBackend for OllamaBackend {
     }
 }
 
+#[async_trait]
+impl AiProvider for OllamaBackend {
+    async fn chat(&self, req: ChatRequest) -> Result<ChatResponse> {
+        self.infer_from_text(req.request_id, req.action, req.source_app, req.text)
+            .await
+            .map(ChatResponse::from)
+    }
+
+    async fn vision(&self, req: VisionRequest) -> Result<VisionResponse> {
+        let input = InferenceInput {
+            request_id: req.request_id,
+            action: req.action,
+            source_app: req.source_app,
+            image_bytes: req.image_bytes,
+            mime_type: req.mime_type,
+        };
+        let model = if self.has_ocr_model() {
+            self.config.ocr_model.as_str()
+        } else {
+            self.config.model.as_str()
+        };
+
+        self.infer_image_with_model(&input, model)
+            .await
+            .map(VisionResponse::from)
+    }
+
+    async fn embed(&self, req: EmbedRequest) -> Result<EmbedResponse> {
+        self.embed_texts(req.request_id, req.texts)
+            .await
+            .map(EmbedResponse::from)
+    }
+
+    async fn translate(&self, req: TranslateRequest) -> Result<Translation> {
+        self.translate_document_text(req.request_id, &req.target_language, &req.text)
+            .await
+            .map(Translation::from)
+    }
+
+    async fn health(&self) -> ProviderHealth {
+        let mut capabilities = Vec::new();
+        let has_model = !self.config.model.trim().is_empty();
+
+        if has_model {
+            capabilities.push(ProviderCapability::Chat);
+            capabilities.push(ProviderCapability::Vision);
+            capabilities.push(ProviderCapability::Ocr);
+            capabilities.push(ProviderCapability::DocumentTranslation);
+        }
+
+        if self.has_embedding_model() {
+            capabilities.push(ProviderCapability::Embeddings);
+        }
+
+        ProviderHealth {
+            id: "ollama".into(),
+            display_name: "Ollama".into(),
+            local: true,
+            available: has_model || self.has_embedding_model(),
+            capabilities,
+            message: None,
+        }
+    }
+}
+
 fn elapsed_ms(started_at: Instant) -> u64 {
     started_at.elapsed().as_millis() as u64
 }
@@ -929,6 +998,62 @@ mod tests {
         assert_eq!(json["options"]["num_predict"], 512);
         assert!(user_prompt.contains("Idioma alvo: Spanish"));
         assert!(user_prompt.contains("Preserve cargo test."));
+    }
+
+    #[tokio::test]
+    async fn ai_provider_chat_uses_existing_text_inference_path() {
+        let server = TestServer::spawn(r#"{"message":{"content":"Resposta curta"}}"#);
+        let backend = OllamaBackend::new(InferConfig {
+            base_url: server.base_url.clone(),
+            model: "gemma4:test".into(),
+            keep_alive: "5m".into(),
+            temperature: 0.1,
+            thinking_default: String::new(),
+            ..InferConfig::default()
+        });
+
+        let output = <OllamaBackend as AiProvider>::chat(
+            &backend,
+            ChatRequest {
+                request_id: "req-provider-chat".into(),
+                action: Action::Explain,
+                source_app: Some("terminal".into()),
+                text: "explique esse erro".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let requests = server.finish();
+        let json: serde_json::Value = serde_json::from_str(&requests[0].1).unwrap();
+        assert_eq!(output.text, "Resposta curta");
+        assert_eq!(json["model"], "gemma4:test");
+        assert_eq!(json["messages"][0]["role"], "system");
+        assert!(json["messages"][1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("explique esse erro"));
+    }
+
+    #[tokio::test]
+    async fn ai_provider_health_advertises_local_ollama_capabilities() {
+        let backend = OllamaBackend::new(InferConfig {
+            model: "gemma4:test".into(),
+            ocr_model: "gemma4:test".into(),
+            embedding_model: "embeddinggemma".into(),
+            ..InferConfig::default()
+        });
+
+        let health = <OllamaBackend as AiProvider>::health(&backend).await;
+
+        assert_eq!(health.id, "ollama");
+        assert!(health.local);
+        assert!(health.available);
+        assert!(health.supports(ProviderCapability::Chat));
+        assert!(health.supports(ProviderCapability::Vision));
+        assert!(health.supports(ProviderCapability::Ocr));
+        assert!(health.supports(ProviderCapability::DocumentTranslation));
+        assert!(health.supports(ProviderCapability::Embeddings));
     }
 
     #[tokio::test]
