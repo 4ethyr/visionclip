@@ -4,10 +4,12 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
     convert::TryInto,
+    io,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration as StdDuration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     sync::mpsc,
@@ -199,17 +201,17 @@ fn extract_pdf_text_with_extractors(
 }
 
 fn extract_pdf_text_with_pdftotext(path: &Path, extractor: &Path) -> Result<String> {
-    let output = Command::new(extractor)
+    let mut command = Command::new(extractor);
+    command
         .args(["-layout", "-enc", "UTF-8"])
         .arg(path)
-        .arg("-")
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to execute `pdftotext`; install poppler-utils to ingest PDF `{}`",
-                path.display()
-            )
-        })?;
+        .arg("-");
+    let output = run_extractor_command(&mut command).with_context(|| {
+        format!(
+            "failed to execute `pdftotext`; install poppler-utils to ingest PDF `{}`",
+            path.display()
+        )
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -235,16 +237,16 @@ fn extract_pdf_text_with_pdftotext(path: &Path, extractor: &Path) -> Result<Stri
 }
 
 fn extract_pdf_text_with_mutool(path: &Path, extractor: &Path) -> Result<String> {
-    let output = Command::new(extractor)
+    let mut command = Command::new(extractor);
+    command
         .args(["draw", "-q", "-F", "txt", "-o", "-"])
-        .arg(path)
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to execute `mutool`; install mupdf-tools to ingest PDF `{}`",
-                path.display()
-            )
-        })?;
+        .arg(path);
+    let output = run_extractor_command(&mut command).with_context(|| {
+        format!(
+            "failed to execute `mutool`; install mupdf-tools to ingest PDF `{}`",
+            path.display()
+        )
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -267,6 +269,21 @@ fn extract_pdf_text_with_mutool(path: &Path, extractor: &Path) -> Result<String>
         );
     }
     Ok(text)
+}
+
+fn run_extractor_command(command: &mut Command) -> io::Result<Output> {
+    let mut delay = StdDuration::from_millis(10);
+    for attempt in 0..3 {
+        match command.output() {
+            Ok(output) => return Ok(output),
+            Err(error) if error.raw_os_error() == Some(26) && attempt < 2 => {
+                thread::sleep(delay);
+                delay *= 2;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("extractor retry loop always returns by the final attempt")
 }
 
 fn normalize_pdf_text(input: &str) -> String {
@@ -537,14 +554,16 @@ impl SqliteDocumentStore {
         Self::from_connection(
             Connection::open(path)
                 .with_context(|| format!("failed to open SQLite store {}", path.display()))?,
+            true,
         )
     }
 
     pub fn in_memory() -> Result<Self> {
-        Self::from_connection(Connection::open_in_memory()?)
+        Self::from_connection(Connection::open_in_memory()?, false)
     }
 
-    fn from_connection(conn: Connection) -> Result<Self> {
+    fn from_connection(conn: Connection, persistent: bool) -> Result<Self> {
+        configure_sqlite_connection(&conn, persistent)?;
         conn.execute_batch(SQLITE_SCHEMA)?;
         conn.execute(
             "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('store_version', '1')",
@@ -1078,6 +1097,24 @@ impl SqliteDocumentStore {
         }
         Ok(chunks)
     }
+}
+
+fn configure_sqlite_connection(conn: &Connection, persistent: bool) -> Result<()> {
+    conn.execute_batch(
+        r#"
+        PRAGMA foreign_keys = ON;
+        PRAGMA busy_timeout = 5000;
+        "#,
+    )?;
+    if persistent {
+        conn.execute_batch(
+            r#"
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
+            "#,
+        )?;
+    }
+    Ok(())
 }
 
 const SQLITE_SCHEMA: &str = r#"
@@ -1843,6 +1880,37 @@ mod tests {
         assert_eq!(loaded_progress.current_chunk_index, 2);
         assert_eq!(loaded_progress.status, ReadingStatus::Completed);
         assert_eq!(all_progress.len(), 1);
+    }
+
+    #[test]
+    fn sqlite_store_configures_file_connection_for_concurrent_access() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "visionclip-documents-sqlite-pragmas-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let db_path = temp_dir.join("documents.sqlite");
+        let store = SqliteDocumentStore::open(&db_path).unwrap();
+
+        let journal_mode: String = store
+            .conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        let busy_timeout_ms: i64 = store
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+        let synchronous: i64 = store
+            .conn
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        assert_eq!(busy_timeout_ms, 5000);
+        assert_eq!(synchronous, 1);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     #[test]
