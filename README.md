@@ -337,7 +337,7 @@ No GNOME, o fluxo principal de feedback visual é o indicador de barra `visioncl
 visionclip --stop-speaking
 ```
 
-O overlay central antigo fica como fallback legado; novas instalações usam `ui.overlay = "panel"` e `voice.overlay_enabled = false`.
+O overlay central antigo foi desativado. Mesmo que uma configuração antiga ainda tenha `voice.overlay_enabled = true`, o cliente ignora essa opção e usa apenas o indicador de barra.
 
 Em sessões GNOME Wayland, extensões copiadas durante a sessão podem não aparecer imediatamente em `gnome-extensions list`. Se `gnome-extensions enable visionclip-status@visionclip` responder `Extension ... does not exist`, encerre a sessão e entre novamente; o instalador já deixa o UUID marcado em `org.gnome.shell enabled-extensions`.
 
