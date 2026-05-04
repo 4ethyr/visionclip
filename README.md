@@ -90,6 +90,7 @@ bash scripts/install_visionclip.sh --skip-system-packages
 bash scripts/install_visionclip.sh --skip-ollama-install
 bash scripts/install_visionclip.sh --no-shortcut
 bash scripts/install_visionclip.sh --no-start
+bash scripts/install_visionclip.sh --enable-wake-listener
 ```
 
 ## Verificação
@@ -101,6 +102,7 @@ visionclip-config doctor
 visionclip --doctor
 systemctl --user status visionclip-daemon.service
 systemctl --user status piper-http.service
+systemctl --user status visionclip-wake-listener.service
 ```
 
 Se o daemon estiver ativo, teste sem microfone:
@@ -146,13 +148,84 @@ visionclip --voice-agent-dry-run --voice-transcript 'Open the book, Programming 
 visionclip --voice-agent --voice-transcript 'abra o livro Programming TypeScript' --speak
 visionclip --voice-agent --voice-transcript 'Key, Open my book Grey Hat Python' --speak
 
+# Busca local indexada
+visionclip locate docker-compose.yml
+visionclip search 'architecture notes kind:document'
+visionclip grep 'auth middleware' ./src
+visionclip index status
+visionclip index audit
+
 # Captura de tela
 visionclip --action explain --speak
 visionclip --action translate_ptbr --speak
 visionclip --action extract_code
 ```
 
+A busca local roda dentro do `visionclip-daemon`, usa SQLite como catalogo inicial e aplica denylist forte para secrets. A UI Spotlight GTK é acionada por `Alt+Space` quando o atalho GNOME é instalado, e também pode ser aberta com `visionclip --search-overlay` em binarios compilados com `--features gtk-overlay`; veja [docs/search-subsystem.md](docs/search-subsystem.md).
+
+A overlay mantém uma única instância por sessão gráfica: se você acionar o atalho enquanto ela já está aberta, a janela existente é reapresentada. Clique fora da área da busca, `Alt+Tab` para outra janela ou `Esc` fecham a overlay. Resultados longos são renderizados dentro de uma lista rolável com clipping no painel Liquid Crystal, evitando que documentos ou apps vazem para fora do layout arredondado.
+
+Por padrão, a search usa o preset `liquid_crystal`, inspirado nos controles do Aether CSS: superfície translúcida escura, brilho espectral, bordas luminosas e barra de processamento cyan. Os presets configuráveis em `[ui.search_overlay]` são:
+
+```text
+liquid_crystal, liquid_glass, liquid_glass_advanced, aurora_gel, crystal_mist,
+fluid_amber, frost_lens, ice_ripple, mercury_drop, molten_glass,
+nebula_prism, ocean_wave, plasma_flow, prisma_flow, silk_veil, glass, glassmorphism,
+frosted, bright_overlay, dark_overlay, dark_glass, high_contrast, vibrant,
+desaturated, monochrome, vintage, inverted, color_shifted, animated_glass,
+accessible_glass, neumorphism, neumorphic_pressed, neumorphic_concave,
+neumorphic_colored, neumorphic_accessible
+```
+
+Exemplo de ajuste visual:
+
+```toml
+[ui.search_overlay]
+glass_style = "liquid_crystal"
+panel_opacity = 0.04
+corner_radius_px = 28
+border_opacity = 0.30
+shadow_intensity = 0.28
+highlight_intensity = 0.42
+refraction_strength = 0.86
+chromatic_aberration = 0.28
+liquid_noise = 0.52
+```
+
 O agente também aceita o prefixo falado `Key` antes do comando, com som de `K` em inglês: `Key, quem foi Steve Jobs?`, `Key, abra o terminal` ou `Key, abra o livro Black Hat Python`.
+
+Wake word contínua é opcional por privacidade. Para acionar o agente apenas falando `Key`, instale ou reinstale com:
+
+```bash
+bash scripts/install_visionclip.sh --enable-wake-listener
+```
+
+Isso habilita `visionclip-wake-listener.service`, um listener local que grava janelas curtas de áudio, roda STT local e só executa o agente quando o transcript começa com `Key`/`K`/variações comuns de ASR. Ao detectar `Key`, o indicador de barra passa para `listening`; se você disser apenas `Key`, ele abre uma segunda janela de escuta para o comando seguinte.
+
+Por padrão, o listener ignora ativações enquanto existir playback ativo no PipeWire/PulseAudio, reduzindo disparos vindos de YouTube, música ou vídeos. Esse bloqueio usa `pactl list sink-inputs`, é habilitado por `wake_block_during_playback = true` e pode ser desativado somente se você aceitar esse risco:
+
+```toml
+[voice]
+wake_block_during_playback = false
+```
+
+Também existe um gate local de locutor para reduzir ativações por áudio externo sem desligar a proteção de playback. Primeiro grave um perfil de voz local:
+
+```bash
+visionclip voice enroll --samples 3 --label main
+visionclip voice status
+```
+
+Depois habilite a verificação no `~/.config/visionclip/config.toml`:
+
+```toml
+[voice]
+speaker_verification_enabled = true
+speaker_verification_threshold = 0.72
+speaker_verification_min_samples = 3
+```
+
+Com um perfil válido, o wake listener pode continuar ouvindo durante YouTube/música, mas só aceita o comando `Key` quando a amostra capturada se parece com o perfil cadastrado. O perfil fica em `~/.local/share/visionclip/voice-profile.json`, contém apenas vetores acústicos derivados e pode ser removido com `visionclip voice clear`. Isso é um filtro de conveniência local, não autenticação biométrica forte.
 
 Os atalhos GNOME padrão instalados pelo script são:
 
@@ -163,15 +236,16 @@ Super+2     -> captura + translate_ptbr
 Super+3     -> pesquisa por voz
 Super+4     -> modo de voz para leitura de livro
 Super+5     -> modo de voz para leitura/tradução de livro
+Alt+Space   -> busca local / Search Overlay
 ```
 
-O GNOME custom-keybindings não suporta chording real `Super+Space+1`; por isso o instalador usa `Super+1..5` para os modos derivados. Os logs dos atalhos ficam em:
+O GNOME custom-keybindings não suporta chording real `Super+Space+1`; por isso o instalador usa `Super+1..5` para os modos derivados e libera os atalhos nativos `switch-to-application-1..5` do GNOME Shell quando reinstala os bindings. Os logs dos atalhos ficam em:
 
 ```text
 ~/.local/state/visionclip/voice-shortcut.log
 ```
 
-Se o STT retornar só ruído/filler, como `You` ou `you too`, o CLI bloqueia a busca para não abrir o navegador com uma query acidental. Ao iniciar uma nova gravação pelo atalho, playbacks TTS temporários do próprio VisionClip também são interrompidos para reduzir feedback do alto-falante no microfone.
+Se o STT retornar só ruído/filler, como `uh` ou `thank you`, o CLI bloqueia a busca para não abrir o navegador com uma query acidental. Variações comuns de ASR para YouTube, como `you too`, `you to` e `you two`, são tratadas como aliases de YouTube. Ao iniciar uma nova gravação pelo atalho, playbacks TTS temporários do próprio VisionClip também são interrompidos para reduzir feedback do alto-falante no microfone.
 
 Use `--voice-agent-dry-run` para depurar comandos de voz sem executar ações. O comando imprime a intenção resolvida, idioma detectado e slots extraídos, por exemplo `intent=open_document`, `language=en` e `query=Programming TypeScript`.
 
@@ -257,7 +331,7 @@ hi_IN-pratham-medium
 
 Japonês e coreano são aceitos como idiomas de comando/documento, mas você precisa instalar uma voz Piper compatível ou plugar outro provider TTS local para pronúncia natural nesses idiomas.
 
-No GNOME, o fluxo principal de feedback visual é o indicador de barra `visionclip-status@visionclip`. Ele lê `~/.local/state/visionclip/status.json`, mostra a animação compacta enquanto o microfone grava e troca para um ícone de stop durante a fala por TTS. Clicar no stop executa:
+No GNOME, o fluxo principal de feedback visual é o indicador de barra `visionclip-status@visionclip`. Ele lê `~/.local/state/visionclip/status.json`, mostra o ícone de microfone com animação compacta enquanto o microfone grava ou quando `Key` é detectado, e troca para um ícone de stop durante a fala por TTS. Clicar no stop executa:
 
 ```bash
 visionclip --stop-speaking
@@ -299,11 +373,14 @@ systemctl --user journalctl -u piper-http.service -f
 Build e validação:
 
 ```bash
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features
-cargo test --workspace
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+cargo build --release --workspace --all-features
 scripts/guard_no_secrets.sh
 ```
+
+O mesmo conjunto básico roda no GitHub Actions em `.github/workflows/ci.yml`.
 
 Build release manual:
 
@@ -325,7 +402,7 @@ scripts/stop_local_stack.sh
 ## Limites Atuais
 
 - A UI desktop completa em Electron/React ainda não está implementada.
-- Wake word ainda não é prioridade; o fluxo atual é push-to-talk/atalho.
+- Wake word contínua existe como opção local, mas ainda é um modo inicial; por padrão ela bloqueia ativação durante playback e ainda precisa evoluir para um detector dedicado com AEC/VAD streaming.
 - STT usa faster-whisper configurável, com filtros contra transcrições curtas acidentais, mas ainda não há runtime de voz streaming completo.
 - TTS usa Piper HTTP e player externo; o atalho interrompe playbacks temporários antes de gravar, mas o `AudioRuntime` controlável ainda está em evolução.
 - Cloud providers estão modelados na configuração, mas não executam chamadas nesta fase.
@@ -341,6 +418,9 @@ scripts/stop_local_stack.sh
 - Piper TTS: https://github.com/rhasspy/piper
 - Piper voices: https://huggingface.co/rhasspy/piper-voices
 - OpenVoiceOS pt-BR Dii Piper voice: https://huggingface.co/OpenVoiceOS/pipertts_pt-BR_dii
+- PipeWire echo-cancel: https://docs.pipewire.org/page_module_echo_cancel.html
+- WebRTC Audio Processing Module: https://webrtc.googlesource.com/src/+/main/modules/audio_processing/g3doc/audio_processing_module.md
+- Aether CSS Liquid Glass/Glassmorphism/Neumorphism reference: https://aethercss.lovable.app/
 
 ## Licença
 
