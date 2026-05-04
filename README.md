@@ -231,15 +231,15 @@ Os atalhos GNOME padrão instalados pelo script são:
 
 ```text
 Super+Space -> agente de voz
-Super+1     -> captura + explain
-Super+2     -> captura + translate_ptbr
-Super+3     -> pesquisa por voz
-Super+4     -> modo de voz para leitura de livro
-Super+5     -> modo de voz para leitura/tradução de livro
+Alt+1       -> captura + explain
+Alt+2       -> captura + translate_ptbr
+Alt+3       -> pesquisa por voz
+Alt+4       -> modo de voz para leitura de livro
+Alt+5       -> modo de voz para leitura/tradução de livro
 Alt+Space   -> busca local / Search Overlay
 ```
 
-O GNOME custom-keybindings não suporta chording real `Super+Space+1`; por isso o instalador usa `Super+1..5` para os modos derivados e libera os atalhos nativos `switch-to-application-1..5` do GNOME Shell quando reinstala os bindings. Os logs dos atalhos ficam em:
+O GNOME custom-keybindings não suporta chording real `Super+Space+1`; por isso o instalador usa `Alt+1..5` para os modos derivados. Os logs dos atalhos ficam em:
 
 ```text
 ~/.local/state/visionclip/voice-shortcut.log
