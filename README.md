@@ -106,6 +106,9 @@ systemctl --user status piper-http.service
 Se o daemon estiver ativo, teste sem microfone:
 
 ```bash
+visionclip --voice-agent-dry-run --voice-transcript 'Por favor, abra o terminal.'
+visionclip --voice-agent-dry-run --voice-transcript 'Open the book, Programming TypeScript.'
+visionclip --voice-agent-dry-run --voice-transcript 'Pesquise, por Rust async no Linux'
 visionclip --voice-agent --voice-transcript 'Abra o terminal' --speak
 visionclip --voice-agent --voice-transcript 'Open the book Programming TypeScript' --speak
 visionclip --voice-agent --voice-transcript 'abra o livro Grey Hat Python' --speak
@@ -127,15 +130,18 @@ Comandos comuns:
 
 ```bash
 # Abrir apps e sites
+visionclip --voice-agent-dry-run --voice-transcript 'Abra o terminal'
 visionclip --voice-agent --voice-transcript 'Abra o terminal' --speak
 visionclip --voice-agent --voice-transcript 'Open YouTube' --speak
 visionclip --open-app terminal
 
 # Buscar na web
+visionclip --voice-agent-dry-run --voice-transcript 'Pesquise, por Rust async no Linux'
 visionclip --voice-agent --voice-transcript 'Pesquise Rust async no Linux' --speak
 visionclip --voice-agent --voice-transcript 'Who founded Apple?' --speak
 
 # Abrir documentos por voz
+visionclip --voice-agent-dry-run --voice-transcript 'Open the book, Programming TypeScript.'
 visionclip --voice-agent --voice-transcript 'abra o livro Programming TypeScript' --speak
 visionclip --voice-agent --voice-transcript 'Open my book Grey Hat Python' --speak
 
@@ -152,6 +158,8 @@ O atalho GNOME padrão instalado pelo script é `Super+F12`, com fallbacks `Supe
 ```
 
 Se o STT retornar só ruído/filler, como `You` ou `you too`, o CLI bloqueia a busca para não abrir o navegador com uma query acidental. Ao iniciar uma nova gravação pelo atalho, playbacks TTS temporários do próprio VisionClip também são interrompidos para reduzir feedback do alto-falante no microfone.
+
+Use `--voice-agent-dry-run` para depurar comandos de voz sem executar ações. O comando imprime a intenção resolvida, idioma detectado e slots extraídos, por exemplo `intent=open_document`, `language=en` e `query=Programming TypeScript`.
 
 ## Documentos, RAG Local e Audiobook
 
