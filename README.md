@@ -243,6 +243,8 @@ visionclip --stop-speaking
 
 O overlay central antigo fica como fallback legado; novas instalações usam `ui.overlay = "panel"` e `voice.overlay_enabled = false`.
 
+Em sessões GNOME Wayland, extensões copiadas durante a sessão podem não aparecer imediatamente em `gnome-extensions list`. Se `gnome-extensions enable visionclip-status@visionclip` responder `Extension ... does not exist`, encerre a sessão e entre novamente; o instalador já deixa o UUID marcado em `org.gnome.shell enabled-extensions`.
+
 ## Configuração
 
 Arquivo principal:

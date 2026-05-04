@@ -46,11 +46,13 @@ cp "$SOURCE_DIR"/stylesheet.css "$TARGET_DIR"/stylesheet.css
 enable_in_gsettings
 
 if command -v gnome-extensions >/dev/null 2>&1; then
-    if gnome-extensions enable "$EXTENSION_UUID" 2>/dev/null; then
+    if gnome-extensions info "$EXTENSION_UUID" >/dev/null 2>&1 && gnome-extensions enable "$EXTENSION_UUID" 2>/dev/null; then
         echo "Indicador GNOME do VisionClip habilitado."
     else
-        echo "Indicador GNOME copiado. Se ele nao aparecer agora, encerre a sessao e entre novamente, depois rode:" >&2
-        echo "  gnome-extensions enable $EXTENSION_UUID" >&2
+        echo "Indicador GNOME instalado e marcado para habilitar." >&2
+        echo "O GNOME Shell atual ainda pode nao enxergar extensoes copiadas nesta sessao." >&2
+        echo "Em Wayland, encerre a sessao e entre novamente; depois verifique com:" >&2
+        echo "  gnome-extensions info $EXTENSION_UUID" >&2
     fi
 fi
 
