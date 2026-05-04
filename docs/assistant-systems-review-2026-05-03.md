@@ -185,9 +185,14 @@ risco >= 3.
   `<supporting_sources>` com instrução explícita para tratar resultados externos
   como dados não confiáveis; a auditoria da busca registra se houve resposta
   grounded e quantas fontes entraram no contexto.
+- Prompts que recebem texto extraído por OCR agora encapsulam o conteúdo em
+  `<ocr_text>` e instruem o modelo a tratar o texto da captura como dados não
+  confiáveis, inclusive quando o objetivo é traduzir, explicar ou gerar query de
+  busca.
 - Foram adicionados testes unitários para garantir idioma parametrizado e guarda
   de grounding, cobertura lexical+semântica no RAG híbrido, delimitadores de
-  contexto, citações locais e metadados de grounding de busca.
+  contexto, citações locais, metadados de grounding de busca e fronteiras de
+  dados em OCR.
 
 ## Próximas melhorias recomendadas
 
