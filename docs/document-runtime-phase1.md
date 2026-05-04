@@ -58,8 +58,9 @@ integration work.
   the local app data directory and stores cache metadata in SQLite when
   `documents.cache_audio` is enabled; cache hits are loaded before calling TTS
   again.
-- Textual PDF ingestion via optional `pdftotext`/poppler-utils using fixed
-  process arguments and no shell execution.
+- Textual PDF ingestion via optional `pdftotext`/poppler-utils or
+  `mutool`/mupdf-tools fallback using fixed process arguments and no shell
+  execution.
 - Document translation/read target language normalization for `pt-BR`, `en`,
   `es`, `zh`, `ru`, `ja`, `ko`, and `hi` plus common aliases.
 
@@ -68,7 +69,8 @@ integration work.
 - Document ingestion is a level 2 tool and uses `FileRead`.
 - Reading and translation are level 2 tools with once-per-resource confirmation.
 - Pause, resume, and stop are level 0 audio-control tools.
-- Textual PDF extraction uses local `pdftotext`; scanned PDFs still require OCR.
+- Textual PDF extraction uses local `pdftotext` or `mutool`; scanned PDFs still
+  require OCR.
 - The runtime does not send content to cloud providers. The daemon adapter uses
   the existing local Ollama backend and Piper HTTP TTS.
 - Document translation targets are allowlisted; unsupported target names are

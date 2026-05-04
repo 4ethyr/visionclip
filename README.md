@@ -50,7 +50,7 @@ O script faz, em ordem:
 - instala Rust via `rustup` se `cargo` não existir;
 - instala Ollama se estiver ausente e você autorizar;
 - cria um venv Python local em `~/.local/share/visionclip/venv`;
-- instala `piper-tts`, `Flask`, `faster-whisper` e `huggingface_hub`;
+- instala as dependências Python de `requirements.txt` no `venv` local do projeto;
 - baixa vozes Piper em `~/.local/share/visionclip/piper-voices`;
 - inicia ou conecta ao Ollama;
 - baixa `gemma4:e2b` pelo Ollama para uso real do VisionClip;
@@ -180,7 +180,7 @@ pt-BR, en, es, zh, ru, ja, ko, hi
 Notas:
 
 - TXT e Markdown funcionam sem dependências extras.
-- PDF textual precisa de `pdftotext`/`poppler-utils`.
+- PDF textual usa `pdftotext`/`poppler-utils` ou `mutool`/`mupdf-tools`.
 - PDF escaneado ainda depende de OCR de documento futuro.
 - EPUB ainda pode ser aberto por voz como arquivo local, mas ingestão textual de EPUB ainda não está implementada.
 - A leitura incremental usa backpressure, cache de tradução e cache de áudio quando habilitado.

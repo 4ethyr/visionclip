@@ -621,10 +621,15 @@ fn check_pdf_extractor(
 
     if command_exists("pdftotext") {
         DoctorCheck::ok("pdf-docs", "pdftotext disponivel para PDFs textuais")
+    } else if command_exists("mutool") {
+        DoctorCheck::ok(
+            "pdf-docs",
+            "mutool disponivel como fallback para PDFs textuais",
+        )
     } else {
         DoctorCheck::warn(
             "pdf-docs",
-            "pdftotext nao encontrado; TXT/Markdown continuam funcionando, PDFs textuais exigem poppler-utils",
+            "pdftotext/mutool nao encontrados; TXT/Markdown continuam funcionando, PDFs textuais exigem poppler-utils ou mupdf-tools",
         )
     }
 }
@@ -1103,12 +1108,16 @@ mod tests {
     fn pdf_extractor_is_optional_for_document_runtime() {
         let check = check_pdf_extractor(&DocumentsConfig::default(), |_| false);
         assert_eq!(check.status, CheckStatus::Warn);
-        assert!(check.message.contains("pdftotext"));
+        assert!(check.message.contains("pdftotext/mutool"));
 
         let check = check_pdf_extractor(&DocumentsConfig::default(), |command| {
             command == "pdftotext"
         });
         assert_eq!(check.status, CheckStatus::Ok);
+
+        let check = check_pdf_extractor(&DocumentsConfig::default(), |command| command == "mutool");
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(check.message.contains("fallback"));
     }
 
     #[test]
