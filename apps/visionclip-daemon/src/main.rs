@@ -2033,10 +2033,11 @@ async fn select_document_context_with_optional_embeddings(
             {
                 Ok(output) => {
                     if let Some(query_vector) = output.vectors.first() {
-                        if let Some(selected) = select_document_context_by_embedding(
+                        if let Some(selected) = select_document_context_hybrid(
                             chunks,
                             embeddings,
                             query_vector,
+                            query,
                             limits.max_chunks,
                             limits.max_chars,
                         ) {
@@ -2044,7 +2045,7 @@ async fn select_document_context_with_optional_embeddings(
                                 request_id = %request_id,
                                 document_id,
                                 context_chunks = selected.len(),
-                                "selected document context with embeddings"
+                                "selected document context with hybrid retrieval"
                             );
                             return selected;
                         }
@@ -2064,6 +2065,7 @@ async fn select_document_context_with_optional_embeddings(
     select_document_context(chunks, query, limits.max_chunks, limits.max_chars)
 }
 
+#[cfg(test)]
 fn select_document_context_by_embedding(
     chunks: &[DocumentChunk],
     embeddings: &[DocumentChunkEmbedding],
@@ -2071,6 +2073,53 @@ fn select_document_context_by_embedding(
     max_chunks: usize,
     max_chars: usize,
 ) -> Option<Vec<DocumentChunk>> {
+    let ranked = rank_document_context_by_embedding(chunks, embeddings, query_vector)?;
+    let selected = collect_context_chunks(ranked, max_chunks, max_chars);
+    (!selected.is_empty()).then_some(selected)
+}
+
+fn select_document_context_hybrid(
+    chunks: &[DocumentChunk],
+    embeddings: &[DocumentChunkEmbedding],
+    query_vector: &[f32],
+    query: &str,
+    max_chunks: usize,
+    max_chars: usize,
+) -> Option<Vec<DocumentChunk>> {
+    let semantic_ranked = rank_document_context_by_embedding(chunks, embeddings, query_vector)?;
+    let lexical_ranked = rank_document_context_lexical(chunks, query);
+    if lexical_ranked.is_empty() {
+        let selected = collect_context_chunks(semantic_ranked, max_chunks, max_chars);
+        return (!selected.is_empty()).then_some(selected);
+    }
+
+    let mut scores = HashMap::new();
+    add_reciprocal_rank_scores(&mut scores, semantic_ranked);
+    add_reciprocal_rank_scores(&mut scores, lexical_ranked);
+
+    let mut ranked = scores.into_values().collect::<Vec<_>>();
+    ranked.sort_by(|(left_score, left), (right_score, right)| {
+        right_score
+            .total_cmp(left_score)
+            .then_with(|| left.chunk_index.cmp(&right.chunk_index))
+    });
+
+    let selected = collect_context_chunks(
+        ranked
+            .into_iter()
+            .map(|(_, chunk)| chunk)
+            .collect::<Vec<_>>(),
+        max_chunks,
+        max_chars,
+    );
+    (!selected.is_empty()).then_some(selected)
+}
+
+fn rank_document_context_by_embedding<'a>(
+    chunks: &'a [DocumentChunk],
+    embeddings: &[DocumentChunkEmbedding],
+    query_vector: &[f32],
+) -> Option<Vec<&'a DocumentChunk>> {
     if chunks.is_empty() || embeddings.is_empty() || query_vector.is_empty() {
         return None;
     }
@@ -2098,15 +2147,27 @@ fn select_document_context_by_embedding(
             .then_with(|| left.chunk_index.cmp(&right.chunk_index))
     });
 
-    let selected = collect_context_chunks(
+    Some(
         scored
             .into_iter()
             .map(|(_, chunk)| chunk)
             .collect::<Vec<_>>(),
-        max_chunks,
-        max_chars,
-    );
-    (!selected.is_empty()).then_some(selected)
+    )
+}
+
+fn add_reciprocal_rank_scores<'a>(
+    scores: &mut HashMap<&'a str, (f32, &'a DocumentChunk)>,
+    ranked: Vec<&'a DocumentChunk>,
+) {
+    const RRF_K: f32 = 60.0;
+
+    for (rank, chunk) in ranked.into_iter().enumerate() {
+        let score = 1.0 / (RRF_K + rank as f32 + 1.0);
+        scores
+            .entry(chunk.id.as_str())
+            .and_modify(|(existing, _)| *existing += score)
+            .or_insert((score, chunk));
+    }
 }
 
 fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
@@ -2141,6 +2202,24 @@ fn select_document_context(
         return select_document_prefix(chunks, max_chunks, max_chars);
     }
 
+    let ranked = rank_document_context_lexical(chunks, query);
+    let selected = collect_context_chunks(ranked, max_chunks, max_chars);
+    if selected.is_empty() {
+        select_document_prefix(chunks, max_chunks, max_chars)
+    } else {
+        selected
+    }
+}
+
+fn rank_document_context_lexical<'a>(
+    chunks: &'a [DocumentChunk],
+    query: &str,
+) -> Vec<&'a DocumentChunk> {
+    let terms = document_terms(query);
+    if terms.is_empty() {
+        return Vec::new();
+    }
+
     let mut scored = chunks
         .iter()
         .map(|chunk| (document_chunk_score(chunk, &terms), chunk))
@@ -2152,16 +2231,10 @@ fn select_document_context(
             .then_with(|| left.chunk_index.cmp(&right.chunk_index))
     });
 
-    let ranked = scored
+    scored
         .into_iter()
         .map(|(_, chunk)| chunk)
-        .collect::<Vec<_>>();
-    let selected = collect_context_chunks(ranked, max_chunks, max_chars);
-    if selected.is_empty() {
-        select_document_prefix(chunks, max_chunks, max_chars)
-    } else {
-        selected
-    }
+        .collect::<Vec<_>>()
 }
 
 fn select_document_prefix(
@@ -4205,6 +4278,37 @@ mod tests {
 
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].chunk_index, 1);
+    }
+
+    #[test]
+    fn document_context_selection_hybrid_keeps_lexical_and_semantic_matches() {
+        let chunks = test_document_chunks(&[
+            "Introdução geral sobre o livro.",
+            "Capítulo de redes com VPN, DNS e configuração de Wi-Fi.",
+            "Apêndice semântico sobre autenticação multifator.",
+        ]);
+        let embeddings = test_document_embeddings(
+            &chunks,
+            &[
+                vec![1.0, 0.0, 0.0],
+                vec![0.0, 0.2, 0.8],
+                vec![0.0, 1.0, 0.0],
+            ],
+        );
+
+        let selected = select_document_context_hybrid(
+            &chunks,
+            &embeddings,
+            &[0.0, 1.0, 0.0],
+            "Como configurar VPN?",
+            2,
+            4_000,
+        )
+        .expect("hybrid context");
+
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].chunk_index, 1);
+        assert_eq!(selected[1].chunk_index, 2);
     }
 
     #[test]
