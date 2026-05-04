@@ -713,6 +713,10 @@ fn is_low_information_voice_text(value: &str) -> bool {
         return true;
     }
 
+    if is_repetitive_voice_noise(&normalized) {
+        return true;
+    }
+
     let compact = compact_normalized(&normalized);
     matches!(
         compact.as_str(),
@@ -737,6 +741,37 @@ fn is_low_information_voice_text(value: &str) -> bool {
             | "obrigada"
             | "valeu"
     )
+}
+
+fn is_repetitive_voice_noise(normalized: &str) -> bool {
+    let tokens = normalized.split_whitespace().collect::<Vec<_>>();
+    if tokens.len() < 6 {
+        return false;
+    }
+
+    let numeric_tokens = tokens
+        .iter()
+        .filter(|token| token.chars().all(|ch| ch.is_ascii_digit()))
+        .count();
+    if numeric_tokens * 100 >= tokens.len() * 80 {
+        let mut unique = tokens.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        return unique.len() <= 4;
+    }
+
+    let short_tokens = tokens
+        .iter()
+        .filter(|token| token.chars().count() <= 3)
+        .count();
+    if short_tokens * 100 < tokens.len() * 80 {
+        return false;
+    }
+
+    let mut unique = tokens;
+    unique.sort_unstable();
+    unique.dedup();
+    unique.len() <= 2
 }
 
 fn resolve_open_document_query_from_transcript(transcript: &str) -> Option<String> {
@@ -2002,6 +2037,15 @@ mod tests {
         assert!(error.to_string().contains("ASR filler"));
 
         let error = resolve_search_query_from_transcript("you too").unwrap_err();
+        assert!(error.to_string().contains("not opening a browser"));
+    }
+
+    #[test]
+    fn rejects_repetitive_numeric_voice_noise() {
+        let error = resolve_search_query_from_transcript("1-2-3-4-4-4-4-4-4-4-4-4").unwrap_err();
+        assert!(error.to_string().contains("ASR filler"));
+
+        let error = resolve_search_query_from_transcript("ok ok ok ok ok ok").unwrap_err();
         assert!(error.to_string().contains("not opening a browser"));
     }
 
