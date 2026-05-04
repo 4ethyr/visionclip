@@ -50,7 +50,7 @@ O script faz, em ordem:
 - instala Rust via `rustup` se `cargo` não existir;
 - instala Ollama se estiver ausente e você autorizar;
 - cria um venv Python local em `~/.local/share/visionclip/venv`;
-- instala `piper-tts`, `Flask`, `faster-whisper` e `huggingface_hub`;
+- instala as dependências Python de `requirements.txt` no `venv` local do projeto;
 - baixa vozes Piper em `~/.local/share/visionclip/piper-voices`;
 - inicia ou conecta ao Ollama;
 - baixa `gemma4:e2b` pelo Ollama para uso real do VisionClip;

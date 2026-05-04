@@ -1,0 +1,4 @@
+Flask
+faster-whisper
+huggingface_hub
+piper-tts

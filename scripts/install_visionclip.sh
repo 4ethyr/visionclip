@@ -377,8 +377,7 @@ ensure_python_runtime() {
         run python3 -m venv "$VENV_DIR"
     fi
     run "$VENV_DIR/bin/python" -m pip install --upgrade pip wheel
-    run "$VENV_DIR/bin/python" -m pip install --upgrade \
-        Flask piper-tts faster-whisper huggingface_hub
+    run "$VENV_DIR/bin/python" -m pip install --upgrade -r "$ROOT_DIR/requirements.txt"
 }
 
 download_piper_voice() {
