@@ -617,6 +617,23 @@ LOG_DIR="${HOME}/.local/state/visionclip"
 LOG_FILE="${LOG_DIR}/voice-shortcut.log"
 mkdir -p "$LOG_DIR"
 printf '%s visionclip voice shortcut invoked\n' "$(date --iso-8601=seconds)" >>"$LOG_FILE"
+if command -v pgrep >/dev/null 2>&1 && command -v kill >/dev/null 2>&1; then
+    while IFS= read -r line; do
+        pid="${line%% *}"
+        command_line="${line#* }"
+        case "$pid" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        if [[ "$pid" == "$$" ]]; then
+            continue
+        fi
+        case "$command_line" in
+            *pw-play*"visionclip-"*.wav*|*paplay*"visionclip-"*.wav*|*aplay*"visionclip-"*.wav*)
+                kill -INT "$pid" 2>/dev/null || true
+                ;;
+        esac
+    done < <(pgrep -af 'visionclip-.*\.wav' 2>/dev/null || true)
+fi
 exec "${HOME}/.local/bin/visionclip" --voice-agent --speak "$@" >>"$LOG_FILE" 2>&1
 EOF
     chmod +x "$BIN_DIR/visionclip-voice-search"

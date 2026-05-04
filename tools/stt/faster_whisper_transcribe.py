@@ -31,6 +31,34 @@ def parse_args() -> argparse.Namespace:
         default=int(os.environ.get("VISIONCLIP_STT_BEAM_SIZE", "5")),
     )
     parser.add_argument(
+        "--temperature",
+        type=float,
+        default=float(os.environ.get("VISIONCLIP_STT_TEMPERATURE", "0.0")),
+        help="Whisper decoding temperature. 0.0 is more stable for short commands.",
+    )
+    parser.add_argument(
+        "--condition-on-previous-text",
+        default=os.environ.get("VISIONCLIP_STT_CONDITION_ON_PREVIOUS_TEXT", "false"),
+        help="Use true/false. Disable by default to reduce short-command hallucinations.",
+    )
+    parser.add_argument(
+        "--no-speech-threshold",
+        type=float,
+        default=float(os.environ.get("VISIONCLIP_STT_NO_SPEECH_THRESHOLD", "0.45")),
+        help="Lower values reject silence/noise more aggressively.",
+    )
+    parser.add_argument(
+        "--log-prob-threshold",
+        type=float,
+        default=float(os.environ.get("VISIONCLIP_STT_LOG_PROB_THRESHOLD", "-0.8")),
+        help="Reject low-confidence segments more aggressively than faster-whisper defaults.",
+    )
+    parser.add_argument(
+        "--compression-ratio-threshold",
+        type=float,
+        default=float(os.environ.get("VISIONCLIP_STT_COMPRESSION_RATIO_THRESHOLD", "2.4")),
+    )
+    parser.add_argument(
         "--vad-filter",
         default=os.environ.get("VISIONCLIP_STT_VAD_FILTER", "true"),
         help="Use true/false. VAD helps remove silence/noise around short commands.",
@@ -86,11 +114,19 @@ def main() -> int:
         args.wav_path,
         language=language,
         beam_size=max(args.beam_size, 1),
+        temperature=args.temperature,
+        condition_on_previous_text=parse_bool(args.condition_on_previous_text),
+        no_speech_threshold=args.no_speech_threshold,
+        log_prob_threshold=args.log_prob_threshold,
+        compression_ratio_threshold=args.compression_ratio_threshold,
         vad_filter=vad_filter,
     )
     detected_language = getattr(info, "language", None)
     if detected_language:
         print(f"detected_language={detected_language}", file=sys.stderr)
+    language_probability = getattr(info, "language_probability", None)
+    if language_probability is not None:
+        print(f"language_probability={language_probability:.3f}", file=sys.stderr)
     transcript = " ".join(segment.text.strip() for segment in segments).strip()
     if transcript:
         print(transcript)

@@ -144,11 +144,13 @@ visionclip --action translate_ptbr --speak
 visionclip --action extract_code
 ```
 
-O atalho GNOME padrão instalado pelo script é `Super+F12`, com fallbacks `Super+Shift+F12` e `Super+Alt+V`. Os logs do atalho ficam em:
+O atalho GNOME padrão instalado pelo script é `Super+F12`, com fallbacks `Super+Shift+F12` e `Super+Alt+V`. Ele chama `visionclip --voice-agent --speak`, não o modo de busca pura. Os logs do atalho ficam em:
 
 ```text
 ~/.local/state/visionclip/voice-shortcut.log
 ```
+
+Se o STT retornar só ruído/filler, como `You` ou `you too`, o CLI bloqueia a busca para não abrir o navegador com uma query acidental. Ao iniciar uma nova gravação pelo atalho, playbacks TTS temporários do próprio VisionClip também são interrompidos para reduzir feedback do alto-falante no microfone.
 
 ## Documentos, RAG Local e Audiobook
 
@@ -291,8 +293,8 @@ scripts/stop_local_stack.sh
 
 - A UI desktop completa em Electron/React ainda não está implementada.
 - Wake word ainda não é prioridade; o fluxo atual é push-to-talk/atalho.
-- STT usa faster-whisper configurável, mas ainda não há runtime de voz streaming completo.
-- TTS usa Piper HTTP e player externo; `AudioRuntime` controlável ainda está em evolução.
+- STT usa faster-whisper configurável, com filtros contra transcrições curtas acidentais, mas ainda não há runtime de voz streaming completo.
+- TTS usa Piper HTTP e player externo; o atalho interrompe playbacks temporários antes de gravar, mas o `AudioRuntime` controlável ainda está em evolução.
 - Cloud providers estão modelados na configuração, mas não executam chamadas nesta fase.
 - Busca vetorial com `sqlite-vec` ainda não está conectada; embeddings locais são opcionais.
 - OCR de PDF escaneado e ingestão EPUB ainda são próximos passos.
