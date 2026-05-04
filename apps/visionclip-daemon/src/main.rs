@@ -3355,6 +3355,8 @@ async fn execute_search_query(
     let mut search_spoken_text = None;
     let mut search_result_count = 0_usize;
     let mut ai_overview_chars = 0_usize;
+    let mut grounded_source_count = 0_usize;
+    let mut grounded_answer_generated = false;
     let mut search_blocked = false;
 
     #[cfg(feature = "coddy-protocol")]
@@ -3371,6 +3373,7 @@ async fn execute_search_query(
                     .as_ref()
                     .map(|value| value.chars().count())
                     .unwrap_or_default();
+                grounded_source_count = search_grounding_source_count(&enrichment);
                 let should_generate_grounded_answer =
                     enrichment.ai_overview.is_some() || !response_language.is_portuguese();
                 let grounded_answer = if should_generate_grounded_answer {
@@ -3388,6 +3391,7 @@ async fn execute_search_query(
                     None
                 };
                 if let Some(answer) = grounded_answer {
+                    grounded_answer_generated = true;
                     search_spoken_text = Some(answer.clone());
                     search_summary = Some(clipboard_text_for_grounded_search_answer(
                         query,
@@ -3504,6 +3508,8 @@ async fn execute_search_query(
             "query": query,
             "result_count": search_result_count,
             "ai_overview_chars": ai_overview_chars,
+            "grounded_source_count": grounded_source_count,
+            "grounded_answer_generated": grounded_answer_generated,
             "spoken": spoken,
         }),
     );
@@ -3761,6 +3767,10 @@ fn search_answer_source_label(enrichment: &SearchEnrichment) -> &'static str {
     } else {
         "Resultados orgânicos extraídos do Google Search"
     }
+}
+
+fn search_grounding_source_count(enrichment: &SearchEnrichment) -> usize {
+    usize::from(enrichment.ai_overview.is_some()) + enrichment.snippets.len().min(3)
 }
 
 fn supporting_sources_text(enrichment: &SearchEnrichment) -> String {
@@ -4234,6 +4244,25 @@ mod tests {
 
         assert!(text.contains("Resposta baseada nos resultados iniciais"));
         assert!(text.contains("Fontes orgânicas complementares"));
+    }
+
+    #[test]
+    fn search_grounding_source_count_tracks_overview_and_limited_sources() {
+        let enrichment = SearchEnrichment {
+            ai_overview: Some("Resumo principal.".into()),
+            snippets: (1..=4)
+                .map(|index| crate::search::SearchSnippet {
+                    title: format!("Fonte {index}"),
+                    url: format!("https://example.com/{index}"),
+                    domain: "example.com".into(),
+                    snippet: format!("Fonte complementar {index}."),
+                })
+                .collect(),
+            related_questions: Vec::new(),
+            related_searches: Vec::new(),
+        };
+
+        assert_eq!(search_grounding_source_count(&enrichment), 4);
     }
 
     #[test]

@@ -181,9 +181,13 @@ risco >= 3.
 - O contexto recuperado agora é entregue ao modelo dentro de
   `<retrieved_context>` com delimitadores por chunk, e a saída copiada inclui
   uma lista determinística dos trechos usados.
+- O prompt de respostas grounded de busca agora usa `<search_context>` e
+  `<supporting_sources>` com instrução explícita para tratar resultados externos
+  como dados não confiáveis; a auditoria da busca registra se houve resposta
+  grounded e quantas fontes entraram no contexto.
 - Foram adicionados testes unitários para garantir idioma parametrizado e guarda
   de grounding, cobertura lexical+semântica no RAG híbrido, delimitadores de
-  contexto e citações locais.
+  contexto, citações locais e metadados de grounding de busca.
 
 ## Próximas melhorias recomendadas
 
