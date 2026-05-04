@@ -29,12 +29,12 @@ use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use visionclip_common::{
     decode_message_payload, normalize_latin_for_language, read_message_payload, redact_for_audit,
-    write_message, Action, AppConfig, ApplicationLaunchJob, AssistantLanguage, AuditEvent,
-    AuditLog, CaptureJob, DocumentAskJob, DocumentControlJob, DocumentControlKind,
-    DocumentIngestJob, DocumentOpenJob, DocumentReadJob, DocumentSummarizeJob,
-    DocumentTranslateJob, HealthCheckJob, JobResult, PermissionEngine, PolicyDecision, PolicyInput,
-    RiskContext, RiskLevel, SessionId, SessionManager, ToolCall, ToolRegistry, UrlOpenJob,
-    VisionRequest, VoiceSearchJob,
+    write_assistant_status, write_message, Action, AppConfig, ApplicationLaunchJob,
+    AssistantLanguage, AssistantStatusKind, AuditEvent, AuditLog, CaptureJob, DocumentAskJob,
+    DocumentControlJob, DocumentControlKind, DocumentIngestJob, DocumentOpenJob, DocumentReadJob,
+    DocumentSummarizeJob, DocumentTranslateJob, HealthCheckJob, JobResult, PermissionEngine,
+    PolicyDecision, PolicyInput, RiskContext, RiskLevel, SessionId, SessionManager, ToolCall,
+    ToolRegistry, UrlOpenJob, VisionRequest, VoiceSearchJob,
 };
 use visionclip_documents::{
     AudioCacheEntry, AudioCacheLookup, AudioCacheStore, AudioChunk, AudioSink, ChunkerConfig,
@@ -583,9 +583,15 @@ impl AudioSink for PiperDocumentAudioSink {
         let piper = self.piper.clone();
         self.tts_gate
             .run(async move {
-                tokio::task::spawn_blocking(move || piper.play_wav(&chunk.bytes))
-                    .await
-                    .context("document audio playback task failed")?
+                set_assistant_status(
+                    AssistantStatusKind::Speaking,
+                    Some("document_reading"),
+                    None,
+                );
+                let playback_result =
+                    tokio::task::spawn_blocking(move || piper.play_wav(&chunk.bytes)).await;
+                set_assistant_status(AssistantStatusKind::Idle, None, None);
+                playback_result.context("document audio playback task failed")?
             })
             .await
     }
@@ -3824,6 +3830,20 @@ struct TtsEnqueueRequest<'a> {
     requested: bool,
 }
 
+fn set_assistant_status(
+    state: AssistantStatusKind,
+    detail: Option<&str>,
+    request_id: Option<&str>,
+) {
+    if let Err(error) = write_assistant_status(state, detail, request_id) {
+        warn!(
+            ?error,
+            state = state.as_str(),
+            "failed to write assistant status"
+        );
+    }
+}
+
 fn enqueue_tts(
     piper: Option<&PiperHttpClient>,
     tts_gate: &TtsPlaybackGate,
@@ -3855,6 +3875,7 @@ fn enqueue_tts(
     let action_name = request.action_name.to_string();
     let voice_id = request.voice_id.filter(|voice| !voice.trim().is_empty());
     let tts_gate = tts_gate.clone();
+    let request_id_text = request_id.to_string();
 
     tokio::spawn(async move {
         tts_gate
@@ -3865,6 +3886,11 @@ fn enqueue_tts(
                         let tts_synthesize_ms = elapsed_ms(tts_started_at);
                         let playback_started_at = Instant::now();
                         let piper_for_playback = piper.clone();
+                        set_assistant_status(
+                            AssistantStatusKind::Speaking,
+                            Some(&action_name),
+                            Some(&request_id_text),
+                        );
                         match tokio::task::spawn_blocking(move || piper_for_playback.play_wav(&wav))
                             .await
                         {
@@ -3886,6 +3912,7 @@ fn enqueue_tts(
                                 warn!(?error, request_id = %request_id, action = %action_name, "TTS playback task failed");
                             }
                         }
+                        set_assistant_status(AssistantStatusKind::Idle, None, None);
                     }
                     Err(error) => {
                         warn!(?error, request_id = %request_id, action = %action_name, "failed to synthesize audio");

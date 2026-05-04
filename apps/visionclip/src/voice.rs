@@ -13,7 +13,9 @@ use tokio::{
 };
 use tracing::{info, warn};
 use uuid::Uuid;
-use visionclip_common::{config::VoiceConfig, Action, AssistantLanguage};
+use visionclip_common::{
+    config::VoiceConfig, write_assistant_status, Action, AssistantLanguage, AssistantStatusKind,
+};
 use which::which;
 
 #[derive(Debug, Clone)]
@@ -147,6 +149,7 @@ async fn capture_and_transcribe(config: &VoiceConfig) -> Result<String> {
 
     let wav_path = temp_voice_path("wav");
     let transcript_path = temp_voice_path("txt");
+    let _status = AssistantStatusGuard::new(AssistantStatusKind::Listening, Some("voice_capture"));
 
     let _overlay = start_listening_overlay(config);
     interrupt_active_tts_playback().await;
@@ -159,18 +162,18 @@ async fn capture_and_transcribe(config: &VoiceConfig) -> Result<String> {
     Ok(transcript)
 }
 
-async fn interrupt_active_tts_playback() {
+pub async fn interrupt_active_tts_playback() -> u32 {
     let Ok(output) = Command::new("pgrep")
         .args(["-af", "visionclip-.*\\.wav"])
         .stdin(Stdio::null())
         .output()
         .await
     else {
-        return;
+        return 0;
     };
 
     if !output.status.success() {
-        return;
+        return 0;
     }
 
     let current_pid = std::process::id();
@@ -206,6 +209,7 @@ async fn interrupt_active_tts_playback() {
             "interrupted active VisionClip TTS playback before voice capture"
         );
     }
+    interrupted
 }
 
 fn is_visionclip_tts_player_process(command_line: &str) -> bool {
@@ -217,6 +221,21 @@ fn is_visionclip_tts_player_process(command_line: &str) -> bool {
         || normalized.contains("aplay ")
         || normalized.ends_with("aplay");
     is_player && normalized.contains("visionclip-") && normalized.contains(".wav")
+}
+
+struct AssistantStatusGuard;
+
+impl AssistantStatusGuard {
+    fn new(state: AssistantStatusKind, detail: Option<&str>) -> Self {
+        let _ = write_assistant_status(state, detail, None);
+        Self
+    }
+}
+
+impl Drop for AssistantStatusGuard {
+    fn drop(&mut self) {
+        let _ = write_assistant_status(AssistantStatusKind::Idle, None, None);
+    }
 }
 
 fn start_listening_overlay(config: &VoiceConfig) -> Option<OverlayGuard> {
@@ -822,6 +841,8 @@ fn extract_document_subject_from_specific_prefix(raw: &str, normalized: &str) ->
         "abrir o livro",
         "abrir o pdf",
         "abrir o documento",
+        "abri o livro",
+        "abri livro",
         "abre o livro",
         "abre o pdf",
         "abre o documento",
@@ -841,6 +862,8 @@ fn extract_document_subject_from_specific_prefix(raw: &str, normalized: &str) ->
         "open pdf",
         "open the epub",
         "open epub",
+        "open up the book",
+        "open up book",
         "open the document",
         "open my document",
         "open document",
@@ -856,7 +879,13 @@ fn extract_document_subject_from_specific_prefix(raw: &str, normalized: &str) ->
         "find and open the book",
         "find and open the document",
         "locate and open the book",
+        "avaro liberal",
+        "avery el libro",
+        "a ver el libro",
+        "acabre il libro",
+        "abbre il libro",
         "abre el libro",
+        "abre il libro",
         "abre libro",
         "abrir el libro",
         "abre el documento",
@@ -890,9 +919,15 @@ fn extract_document_subject_from_generic_open(raw: &str, normalized: &str) -> Op
         "abra o",
         "abra a",
         "abra",
+        "habra o",
+        "habra a",
+        "habra",
         "abre o",
         "abre a",
         "abre",
+        "abri o",
+        "abri a",
+        "abri",
         "abrir o",
         "abrir a",
         "abrir",
@@ -1286,6 +1321,9 @@ fn extract_open_subject(raw: &str, normalized: &str) -> Option<String> {
         "abra o",
         "abra a",
         "abra",
+        "habra o",
+        "habra a",
+        "habra",
         "abro o",
         "abro a",
         "abro",
@@ -1299,6 +1337,9 @@ fn extract_open_subject(raw: &str, normalized: &str) -> Option<String> {
         "abre o",
         "abre a",
         "abre",
+        "abri o",
+        "abri a",
+        "abri",
         "abrir o",
         "abrir a",
         "abrir",
@@ -2095,6 +2136,7 @@ mod tests {
             ("abro terminal", "terminal"),
             ("abra o terminau", "terminal"),
             ("abra o termnal", "terminal"),
+            ("Habra uterminál.", "terminal"),
             ("open the terminal", "terminal"),
             ("abra o vscode", "VS Code"),
             ("abra o BurpSuite", "BurpSuite"),
@@ -2120,12 +2162,21 @@ mod tests {
             ("abra o pdf Grey Hat Python", "Grey Hat Python"),
             ("abra meu livro chamado Grey Hat Python", "Grey Hat Python"),
             ("abru lívru Grey Hat Python", "Grey Hat Python"),
+            ("Avaro Liberal Learning TypeScript", "Learning TypeScript"),
+            (
+                "Avery El Libro Programming with TypeScript",
+                "Programming with TypeScript",
+            ),
             (
                 "Open the book Programming TypeScript",
                 "Programming TypeScript",
             ),
             ("open my book Grey Hat Python", "Grey Hat Python"),
             ("open Programming TypeScript book", "Programming TypeScript"),
+            (
+                "Open up the book Distributed Systems with Node.js",
+                "Distributed Systems with Node.js",
+            ),
             (
                 "Open de boek, Computer Security Fundamentals",
                 "Computer Security Fundamentals",

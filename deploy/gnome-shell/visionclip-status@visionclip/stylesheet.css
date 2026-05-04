@@ -1,0 +1,32 @@
+.visionclip-panel-button {
+  -natural-hpadding: 6px;
+  -minimum-hpadding: 4px;
+}
+
+.visionclip-listening-icon {
+  spacing: 2px;
+}
+
+.visionclip-listening-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background-color: #4285f4;
+  box-shadow: 0 0 7px rgba(161, 75, 255, 0.9);
+}
+
+.visionclip-listening-dot-a {
+  background-color: #4285f4;
+}
+
+.visionclip-listening-dot-b {
+  background-color: #a14bff;
+}
+
+.visionclip-listening-dot-c {
+  background-color: #ff4b91;
+}
+
+.visionclip-stop-icon {
+  color: #ff5a5f;
+}

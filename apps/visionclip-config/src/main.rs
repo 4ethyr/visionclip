@@ -61,11 +61,11 @@ async fn run_doctor() -> Result<()> {
     println!("Voice input enabled: {}", yes_no(config.voice.enabled));
     println!("Voice backend: {}", config.voice.backend);
     println!(
-        "Voice overlay enabled: {}",
+        "Legacy voice overlay enabled: {}",
         yes_no(config.voice.overlay_enabled)
     );
     println!(
-        "Voice overlay runtime: {}",
+        "Legacy voice overlay runtime: {}",
         if GTK_OVERLAY_ENABLED {
             "gtk-overlay compiled"
         } else {

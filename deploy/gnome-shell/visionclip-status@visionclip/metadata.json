@@ -1,0 +1,7 @@
+{
+  "uuid": "visionclip-status@visionclip",
+  "name": "VisionClip Status",
+  "description": "Shows VisionClip listening and speaking status in the GNOME top bar.",
+  "shell-version": ["45", "46", "47", "48", "49"],
+  "url": "https://github.com/4ethyr/visionclip"
+}

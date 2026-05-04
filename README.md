@@ -56,10 +56,11 @@ O script faz, em ordem:
 - baixa `gemma4:e2b` pelo Ollama para uso real do VisionClip;
 - opcionalmente baixa/cacheia o modelo oficial `google/gemma-4-E2B-it` no Hugging Face usando seu token;
 - gera `~/.config/visionclip/config.toml`, com backup se já existir;
-- compila release com overlay GTK;
+- compila release com suporte GTK para fallback visual;
 - instala binários em `~/.local/bin`;
 - instala e sobe os serviços de usuário `piper-http.service` e `visionclip-daemon.service`;
 - instala o atalho GNOME de voz quando `gsettings` está disponível;
+- instala o indicador GNOME `visionclip-status@visionclip` para mostrar escuta/fala na barra superior;
 - roda diagnósticos no final.
 
 Durante a instalação, o `sudo` pode pedir sua senha para pacotes do sistema. O Hugging Face token pode ser informado por variável de ambiente ou digitado quando o script pedir:
@@ -233,6 +234,14 @@ hi_IN-pratham-medium
 O daemon escolhe a voz pela língua detectada do comando em `OpenApplication`, `OpenUrl`, `OpenDocument` e `SearchWeb`; para documentos, usa o idioma alvo da leitura/tradução.
 
 Japonês e coreano são aceitos como idiomas de comando/documento, mas você precisa instalar uma voz Piper compatível ou plugar outro provider TTS local para pronúncia natural nesses idiomas.
+
+No GNOME, o fluxo principal de feedback visual é o indicador de barra `visionclip-status@visionclip`. Ele lê `~/.local/state/visionclip/status.json`, mostra a animação compacta enquanto o microfone grava e troca para um ícone de stop durante a fala por TTS. Clicar no stop executa:
+
+```bash
+visionclip --stop-speaking
+```
+
+O overlay central antigo fica como fallback legado; novas instalações usam `ui.overlay = "panel"` e `voice.overlay_enabled = false`.
 
 ## Configuração
 

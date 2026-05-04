@@ -54,7 +54,7 @@ playback_timeout_ms = 120000
 enabled = true
 backend = "auto"
 target = ""
-overlay_enabled = true
+overlay_enabled = false
 shortcut = "<Super>F12"
 record_duration_ms = 4000
 sample_rate_hz = 16000
@@ -71,5 +71,5 @@ cache_translations = true
 cache_audio = true
 
 [ui]
-overlay = "compact"
+overlay = "panel"
 show_notification = true

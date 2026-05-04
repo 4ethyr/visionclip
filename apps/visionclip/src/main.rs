@@ -11,10 +11,10 @@ use tokio::net::UnixStream;
 use tracing::{info, warn};
 use uuid::Uuid;
 use visionclip_common::{
-    read_message, write_message, AppConfig, ApplicationLaunchJob, AssistantLanguage, CaptureJob,
-    DocumentAskJob, DocumentControlJob, DocumentControlKind, DocumentIngestJob, DocumentOpenJob,
-    DocumentReadJob, DocumentSummarizeJob, DocumentTranslateJob, JobResult, SessionType,
-    UrlOpenJob, VisionRequest, VoiceSearchJob,
+    read_message, write_assistant_status, write_message, AppConfig, ApplicationLaunchJob,
+    AssistantLanguage, AssistantStatusKind, CaptureJob, DocumentAskJob, DocumentControlJob,
+    DocumentControlKind, DocumentIngestJob, DocumentOpenJob, DocumentReadJob, DocumentSummarizeJob,
+    DocumentTranslateJob, JobResult, SessionType, UrlOpenJob, VisionRequest, VoiceSearchJob,
 };
 
 #[derive(Debug, Parser)]
@@ -59,6 +59,9 @@ struct Cli {
 
     #[arg(long)]
     voice_transcript: Option<String>,
+
+    #[arg(long, default_value_t = false)]
+    stop_speaking: bool,
 
     #[arg(long, hide = true, default_value_t = false)]
     voice_overlay_listening: bool,
@@ -125,6 +128,17 @@ async fn main() -> Result<()> {
         let healthy = doctor::run(&config).await?;
         if !healthy {
             std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    if cli.stop_speaking {
+        let interrupted = voice::interrupt_active_tts_playback().await;
+        let _ = write_assistant_status(AssistantStatusKind::Idle, None, None);
+        if interrupted > 0 {
+            println!("Speech stopped.");
+        } else {
+            println!("No active VisionClip speech playback was found.");
         }
         return Ok(());
     }
