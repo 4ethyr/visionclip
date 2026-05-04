@@ -261,7 +261,7 @@ install_system_packages() {
             done
             ;;
         pacman)
-            run sudo pacman -Sy --needed --noconfirm \
+            run sudo pacman -Syu --needed --noconfirm \
                 base-devel pkgconf curl ca-certificates git \
                 python python-pip python-virtualenv \
                 gtk4 glib2 xdg-utils libnotify \
@@ -434,7 +434,22 @@ download_hf_model_if_requested() {
 
     mkdir -p "$HF_CACHE_DIR"
     info "downloading Hugging Face model cache: $HF_MODEL"
-    if ! HUGGINGFACE_HUB_TOKEN="$token" HF_HOME="$HF_CACHE_DIR" "$VENV_DIR/bin/huggingface-cli" download "$HF_MODEL" --cache-dir "$HF_CACHE_DIR"; then
+    if ! HF_MODEL="$HF_MODEL" HF_CACHE_DIR="$HF_CACHE_DIR" HF_HOME="$HF_CACHE_DIR" HF_TOKEN="$token" "$VENV_DIR/bin/python" <<'PY'; then
+import os
+import sys
+from huggingface_hub import snapshot_download
+
+try:
+    snapshot_download(
+        repo_id=os.environ["HF_MODEL"],
+        cache_dir=os.environ["HF_CACHE_DIR"],
+        token=os.environ["HF_TOKEN"],
+        resume_download=True,
+    )
+except Exception as error:
+    print(error, file=sys.stderr)
+    raise SystemExit(1)
+PY
         warn "Hugging Face download failed. Check token permissions and accept the model terms on https://huggingface.co/$HF_MODEL if required."
     fi
 }
