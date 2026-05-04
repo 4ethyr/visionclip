@@ -1003,6 +1003,15 @@ fn map_job_result(result: JobResult) -> CoddyResult {
             code,
             message,
         },
+        JobResult::Search(response) => CoddyResult::ActionStatus {
+            request_id: uuid::Uuid::parse_str(&response.request_id)
+                .unwrap_or_else(|_| uuid::Uuid::new_v4()),
+            message: response
+                .diagnostics
+                .and_then(|diagnostics| diagnostics.message)
+                .unwrap_or_else(|| format!("Search returned {} hits.", response.hits.len())),
+            spoken: false,
+        },
     }
 }
 
@@ -1350,6 +1359,11 @@ mod tests {
         ));
         assert!(matches!(
             resolve_voice_turn("abra o youtube"),
+            Some(ResolvedVoiceTurn::OpenWebsite { label, url, .. })
+                if label == "YouTube" && url == "https://www.youtube.com/"
+        ));
+        assert!(matches!(
+            resolve_voice_turn("open you too"),
             Some(ResolvedVoiceTurn::OpenWebsite { label, url, .. })
                 if label == "YouTube" && url == "https://www.youtube.com/"
         ));

@@ -1,17 +1,19 @@
 use crate::voice_overlay;
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::{
     env,
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
     process::{Output, Stdio},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     process::Command,
     time::{timeout, Duration},
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 use visionclip_common::{
     config::VoiceConfig, write_assistant_status, Action, AssistantLanguage, AssistantStatusKind,
@@ -55,6 +57,44 @@ pub enum VoiceAgentCommand {
         language: AssistantLanguage,
         query: String,
     },
+}
+
+#[derive(Debug, Clone)]
+pub enum WakeAgentActivation {
+    AwaitingCommand { transcript: String },
+    Command(VoiceAgentCommand),
+}
+
+const SPEAKER_PROFILE_VERSION: u32 = 1;
+const SPEAKER_VECTOR_LEN: usize = 13;
+const SPEAKER_BANDS_HZ: [f32; 8] = [120.0, 200.0, 320.0, 500.0, 800.0, 1_300.0, 2_200.0, 3_500.0];
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpeakerProfile {
+    pub version: u32,
+    pub label: String,
+    pub created_at_ms: u128,
+    pub sample_count: usize,
+    pub sample_rate_hz: u32,
+    pub threshold: f32,
+    pub mean_vector: Vec<f32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SpeakerProfileStatus {
+    pub path: PathBuf,
+    pub exists: bool,
+    pub label: Option<String>,
+    pub sample_count: usize,
+    pub threshold: Option<f32>,
+    pub created_at_ms: Option<u128>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SpeakerVerificationResult {
+    pub accepted: bool,
+    pub similarity: f32,
+    pub threshold: f32,
 }
 
 pub async fn resolve_voice_request(
@@ -135,6 +175,12 @@ pub async fn resolve_voice_agent_command(
         };
     }
 
+    if looks_like_open_command(&transcript) {
+        anyhow::bail!(
+            "voice open command did not contain a plausible application, URL, or document target"
+        );
+    }
+
     let query = resolve_search_query_from_transcript(&transcript)?;
     Ok(VoiceAgentCommand::SearchWeb {
         transcript,
@@ -144,6 +190,15 @@ pub async fn resolve_voice_agent_command(
 }
 
 async fn capture_and_transcribe(config: &VoiceConfig) -> Result<String> {
+    capture_and_transcribe_with_status(config, true, false, None).await
+}
+
+async fn capture_and_transcribe_with_status(
+    config: &VoiceConfig,
+    show_status: bool,
+    skip_quiet_audio: bool,
+    speaker_profile_path: Option<&Path>,
+) -> Result<String> {
     if !config.enabled {
         anyhow::bail!(
             "voice input is disabled in config; enable [voice].enabled or pass --voice-transcript for testing"
@@ -152,17 +207,169 @@ async fn capture_and_transcribe(config: &VoiceConfig) -> Result<String> {
 
     let wav_path = temp_voice_path("wav");
     let transcript_path = temp_voice_path("txt");
-    let _status = AssistantStatusGuard::new(AssistantStatusKind::Listening, Some("voice_capture"));
+    let _status = show_status
+        .then(|| AssistantStatusGuard::new(AssistantStatusKind::Listening, Some("voice_capture")));
 
-    let _overlay = start_listening_overlay(config);
+    let _overlay = show_status
+        .then(|| start_listening_overlay(config))
+        .flatten();
     interrupt_active_tts_playback().await;
     record_voice_sample(config, &wav_path).await?;
+    if skip_quiet_audio && wav_looks_quiet(&wav_path).unwrap_or(false) {
+        let _ = fs::remove_file(&wav_path);
+        let _ = fs::remove_file(&transcript_path);
+        anyhow::bail!("wake audio below speech threshold");
+    }
+    if let Some(profile_path) = speaker_profile_path {
+        let verification = verify_speaker_sample(config, profile_path, &wav_path)?;
+        if !verification.accepted {
+            let _ = fs::remove_file(&wav_path);
+            let _ = fs::remove_file(&transcript_path);
+            anyhow::bail!(
+                "wake speaker verification rejected sample: similarity {:.3} below threshold {:.3}",
+                verification.similarity,
+                verification.threshold
+            );
+        }
+        debug!(
+            similarity = verification.similarity,
+            threshold = verification.threshold,
+            "wake speaker verification accepted sample"
+        );
+    }
     let transcript = transcribe_voice_sample(config, &wav_path, &transcript_path).await?;
 
     let _ = fs::remove_file(&wav_path);
     let _ = fs::remove_file(&transcript_path);
 
     Ok(transcript)
+}
+
+pub async fn listen_for_wake_agent_activation(
+    config: &VoiceConfig,
+    speaker_profile_path: Option<&Path>,
+) -> Result<Option<WakeAgentActivation>> {
+    if !config.wake_word_enabled {
+        anyhow::bail!(
+            "wake word listener is disabled in config; set [voice].wake_word_enabled = true"
+        );
+    }
+
+    let mut wake_config = config.clone();
+    wake_config.record_duration_ms = config.wake_record_duration_ms.max(1_000);
+    let transcript =
+        capture_and_transcribe_with_status(&wake_config, false, true, speaker_profile_path).await?;
+    resolve_wake_agent_activation_from_transcript(config, &transcript).await
+}
+
+pub async fn resolve_wake_agent_activation_from_transcript(
+    config: &VoiceConfig,
+    transcript: &str,
+) -> Result<Option<WakeAgentActivation>> {
+    let Some(suffix) = strip_agent_wake_prefix(transcript) else {
+        return Ok(None);
+    };
+
+    let suffix = normalize_voice_agent_invocation(&suffix);
+    if suffix.is_empty() {
+        return Ok(Some(WakeAgentActivation::AwaitingCommand {
+            transcript: transcript.trim().to_string(),
+        }));
+    }
+
+    Ok(Some(WakeAgentActivation::Command(
+        resolve_voice_agent_command(config, Some(transcript)).await?,
+    )))
+}
+
+pub fn speaker_profile_exists(profile_path: &Path) -> bool {
+    load_speaker_profile(profile_path).is_ok()
+}
+
+pub fn speaker_profile_status(profile_path: &Path) -> Result<SpeakerProfileStatus> {
+    if !profile_path.exists() {
+        return Ok(SpeakerProfileStatus {
+            path: profile_path.to_path_buf(),
+            exists: false,
+            label: None,
+            sample_count: 0,
+            threshold: None,
+            created_at_ms: None,
+        });
+    }
+
+    let profile = load_speaker_profile(profile_path)?;
+    Ok(SpeakerProfileStatus {
+        path: profile_path.to_path_buf(),
+        exists: true,
+        label: Some(profile.label),
+        sample_count: profile.sample_count,
+        threshold: Some(profile.threshold),
+        created_at_ms: Some(profile.created_at_ms),
+    })
+}
+
+pub fn clear_speaker_profile(profile_path: &Path) -> Result<bool> {
+    if !profile_path.exists() {
+        return Ok(false);
+    }
+    fs::remove_file(profile_path).with_context(|| {
+        format!(
+            "failed to remove speaker profile {}",
+            profile_path.display()
+        )
+    })?;
+    Ok(true)
+}
+
+pub async fn enroll_speaker_profile(
+    config: &VoiceConfig,
+    profile_path: &Path,
+    requested_samples: usize,
+    label: &str,
+) -> Result<SpeakerProfile> {
+    if !config.enabled {
+        anyhow::bail!("voice input is disabled; enable [voice].enabled before enrolling a speaker");
+    }
+
+    let sample_count = requested_samples
+        .max(config.speaker_verification_min_samples)
+        .clamp(1, 20);
+    let label = label.trim();
+    let label = if label.is_empty() { "default" } else { label };
+    let mut vectors = Vec::with_capacity(sample_count);
+    let mut sample_rate_hz = config.sample_rate_hz;
+
+    for index in 0..sample_count {
+        println!(
+            "Amostra {}/{}: fale uma frase curta e natural depois do bip visual.",
+            index + 1,
+            sample_count
+        );
+        let wav_path = temp_voice_path("speaker.wav");
+        let _status =
+            AssistantStatusGuard::new(AssistantStatusKind::Listening, Some("speaker_enroll"));
+        record_voice_sample(config, &wav_path).await?;
+        drop(_status);
+
+        let wav = pcm16_wav_from_path(&wav_path)?;
+        let vector = speaker_vector_from_wav(&wav)?;
+        sample_rate_hz = wav.sample_rate_hz;
+        vectors.push(vector);
+        let _ = fs::remove_file(&wav_path);
+    }
+
+    let profile = SpeakerProfile {
+        version: SPEAKER_PROFILE_VERSION,
+        label: label.to_string(),
+        created_at_ms: current_time_ms(),
+        sample_count: vectors.len(),
+        sample_rate_hz,
+        threshold: config.speaker_verification_threshold,
+        mean_vector: average_unit_vectors(&vectors)?,
+    };
+    save_speaker_profile(profile_path, &profile)?;
+    Ok(profile)
 }
 
 fn normalize_voice_agent_invocation(transcript: &str) -> String {
@@ -191,6 +398,15 @@ fn strip_agent_wake_prefix(transcript: &str) -> Option<String> {
                 transcript.trim(),
                 prefix,
             ));
+        }
+    }
+
+    for prefix in ["ok", "okay"] {
+        if normalized_prefix_match(&normalized, prefix) {
+            let suffix = raw_suffix_after_normalized_prefix(transcript.trim(), prefix);
+            if !normalize_transcript(&suffix).is_empty() {
+                return Some(suffix);
+            }
         }
     }
 
@@ -367,6 +583,405 @@ async fn record_voice_sample(config: &VoiceConfig, wav_path: &Path) -> Result<()
     Ok(())
 }
 
+fn wav_looks_quiet(path: &Path) -> Result<bool> {
+    let Some(wav) = pcm16_wav_from_path(path).ok() else {
+        return Ok(false);
+    };
+    if wav.samples.is_empty() {
+        return Ok(true);
+    }
+
+    let mut sum_squares = 0_f64;
+    let mut peak = 0_i32;
+    for sample in &wav.samples {
+        let value = i32::from(*sample);
+        let abs = value.abs();
+        peak = peak.max(abs);
+        sum_squares += f64::from(value * value);
+    }
+    let rms = (sum_squares / wav.samples.len() as f64).sqrt();
+
+    debug!(peak, rms, "wake audio energy measured");
+    Ok(rms < 80.0 && peak < 1_200)
+}
+
+#[derive(Debug, Clone)]
+struct Pcm16Wav {
+    sample_rate_hz: u32,
+    samples: Vec<i16>,
+}
+
+fn pcm16_wav_from_path(path: &Path) -> Result<Pcm16Wav> {
+    let bytes = fs::read(path).with_context(|| {
+        format!(
+            "failed to read captured voice audio at {}",
+            path.to_string_lossy()
+        )
+    })?;
+    pcm16_wav_from_bytes(&bytes).context("captured voice audio is not a supported PCM16 WAV")
+}
+
+#[cfg(test)]
+fn pcm16_samples_from_wav_bytes(bytes: &[u8]) -> Option<Vec<i16>> {
+    pcm16_wav_from_bytes(bytes).map(|wav| wav.samples)
+}
+
+fn pcm16_wav_from_bytes(bytes: &[u8]) -> Option<Pcm16Wav> {
+    if bytes.len() < 44 || bytes.get(0..4)? != b"RIFF" || bytes.get(8..12)? != b"WAVE" {
+        return None;
+    }
+
+    let mut offset = 12_usize;
+    let mut sample_rate_hz = None;
+    let mut channels = None;
+    let mut bits_per_sample = None;
+    let mut audio_format = None;
+    let mut data: Option<Vec<i16>> = None;
+    while offset.checked_add(8)? <= bytes.len() {
+        let chunk_id = bytes.get(offset..offset + 4)?;
+        let chunk_len =
+            u32::from_le_bytes(bytes.get(offset + 4..offset + 8)?.try_into().ok()?) as usize;
+        let data_start = offset.checked_add(8)?;
+        let data_end = data_start.checked_add(chunk_len)?.min(bytes.len());
+        if chunk_id == b"fmt " && data_end.saturating_sub(data_start) >= 16 {
+            audio_format = Some(u16::from_le_bytes(
+                bytes.get(data_start..data_start + 2)?.try_into().ok()?,
+            ));
+            channels = Some(u16::from_le_bytes(
+                bytes.get(data_start + 2..data_start + 4)?.try_into().ok()?,
+            ));
+            sample_rate_hz = Some(u32::from_le_bytes(
+                bytes.get(data_start + 4..data_start + 8)?.try_into().ok()?,
+            ));
+            bits_per_sample = Some(u16::from_le_bytes(
+                bytes
+                    .get(data_start + 14..data_start + 16)?
+                    .try_into()
+                    .ok()?,
+            ));
+        } else if chunk_id == b"data" {
+            data = Some(
+                bytes
+                    .get(data_start..data_end)?
+                    .chunks_exact(2)
+                    .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+                    .collect(),
+            );
+        }
+        offset = data_start
+            .checked_add(chunk_len)?
+            .checked_add(chunk_len % 2)?;
+    }
+
+    if audio_format != Some(1) || bits_per_sample != Some(16) {
+        return None;
+    }
+
+    Some(Pcm16Wav {
+        sample_rate_hz: sample_rate_hz?,
+        samples: mono_pcm_samples(&data?, channels?),
+    })
+}
+
+fn mono_pcm_samples(samples: &[i16], channels: u16) -> Vec<i16> {
+    if channels <= 1 {
+        return samples.to_vec();
+    }
+    let channels = channels as usize;
+    samples
+        .chunks_exact(channels)
+        .map(|frame| {
+            let sum = frame.iter().map(|sample| i32::from(*sample)).sum::<i32>();
+            (sum / channels as i32).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+        })
+        .collect()
+}
+
+fn verify_speaker_sample(
+    config: &VoiceConfig,
+    profile_path: &Path,
+    wav_path: &Path,
+) -> Result<SpeakerVerificationResult> {
+    let profile = load_speaker_profile(profile_path)?;
+    if profile.mean_vector.len() != SPEAKER_VECTOR_LEN {
+        anyhow::bail!("speaker profile has an unsupported vector length");
+    }
+
+    let wav = pcm16_wav_from_path(wav_path)?;
+    let vector = speaker_vector_from_wav(&wav)?;
+    let threshold = config
+        .speaker_verification_threshold
+        .max(profile.threshold)
+        .clamp(0.50, 0.99);
+    let similarity = cosine_similarity(&profile.mean_vector, &vector);
+    Ok(SpeakerVerificationResult {
+        accepted: similarity >= threshold,
+        similarity,
+        threshold,
+    })
+}
+
+fn load_speaker_profile(profile_path: &Path) -> Result<SpeakerProfile> {
+    let raw = fs::read_to_string(profile_path)
+        .with_context(|| format!("failed to read speaker profile {}", profile_path.display()))?;
+    let profile: SpeakerProfile = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse speaker profile {}", profile_path.display()))?;
+    if profile.version != SPEAKER_PROFILE_VERSION {
+        anyhow::bail!(
+            "unsupported speaker profile version {} in {}",
+            profile.version,
+            profile_path.display()
+        );
+    }
+    if profile.mean_vector.len() != SPEAKER_VECTOR_LEN {
+        anyhow::bail!(
+            "speaker profile {} has invalid vector length",
+            profile_path.display()
+        );
+    }
+    Ok(profile)
+}
+
+fn save_speaker_profile(profile_path: &Path, profile: &SpeakerProfile) -> Result<()> {
+    if let Some(parent) = profile_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let tmp_path = profile_path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec_pretty(profile)?;
+    fs::write(&tmp_path, bytes)
+        .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to protect {}", tmp_path.display()))?;
+    }
+    fs::rename(&tmp_path, profile_path).with_context(|| {
+        format!(
+            "failed to replace {} with {}",
+            profile_path.display(),
+            tmp_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn speaker_vector_from_wav(wav: &Pcm16Wav) -> Result<Vec<f32>> {
+    let samples = trim_low_energy_edges(&wav.samples);
+    if samples.len() < wav.sample_rate_hz as usize / 2 {
+        anyhow::bail!("voice sample is too short for speaker enrollment");
+    }
+
+    let floats = samples
+        .iter()
+        .map(|sample| f32::from(*sample) / 32_768.0)
+        .collect::<Vec<_>>();
+    let rms =
+        (floats.iter().map(|sample| sample * sample).sum::<f32>() / floats.len() as f32).sqrt();
+    let peak = floats
+        .iter()
+        .map(|sample| sample.abs())
+        .fold(0.0_f32, f32::max);
+    if rms < 0.004 || peak < 0.025 {
+        anyhow::bail!("voice sample is too quiet for speaker enrollment");
+    }
+
+    let zero_crossing_rate = zero_crossing_rate(&floats);
+    let centroid = spectral_centroid_hz(&floats, wav.sample_rate_hz);
+    let rolloff = spectral_rolloff_hz(&floats, wav.sample_rate_hz);
+    let pitch = estimate_pitch_hz(&floats, wav.sample_rate_hz).unwrap_or(0.0);
+    let bands = band_energy_features(&floats, wav.sample_rate_hz);
+    let nyquist = (wav.sample_rate_hz as f32 / 2.0).max(1.0);
+
+    let mut vector = Vec::with_capacity(SPEAKER_VECTOR_LEN);
+    vector.push((rms * 20.0).clamp(0.0, 1.0));
+    vector.push((zero_crossing_rate * 12.0).clamp(0.0, 1.0));
+    vector.push((pitch / 420.0).clamp(0.0, 1.0));
+    vector.push((centroid / nyquist).clamp(0.0, 1.0));
+    vector.push((rolloff / nyquist).clamp(0.0, 1.0));
+    vector.extend(bands);
+    normalize_vector(&mut vector)?;
+    Ok(vector)
+}
+
+fn trim_low_energy_edges(samples: &[i16]) -> &[i16] {
+    let threshold = 320_i16;
+    let Some(start) = samples.iter().position(|sample| sample.abs() >= threshold) else {
+        return samples;
+    };
+    let end = samples
+        .iter()
+        .rposition(|sample| sample.abs() >= threshold)
+        .map(|index| index + 1)
+        .unwrap_or(samples.len());
+    &samples[start..end]
+}
+
+fn zero_crossing_rate(samples: &[f32]) -> f32 {
+    if samples.len() < 2 {
+        return 0.0;
+    }
+    let crossings = samples
+        .windows(2)
+        .filter(|pair| pair[0].is_sign_positive() != pair[1].is_sign_positive())
+        .count();
+    crossings as f32 / (samples.len() - 1) as f32
+}
+
+fn spectral_centroid_hz(samples: &[f32], sample_rate_hz: u32) -> f32 {
+    let energies = band_power_values(samples, sample_rate_hz);
+    let total = energies.iter().map(|(_, power)| *power).sum::<f32>();
+    if total <= f32::EPSILON {
+        return 0.0;
+    }
+    energies
+        .iter()
+        .map(|(frequency, power)| frequency * power)
+        .sum::<f32>()
+        / total
+}
+
+fn spectral_rolloff_hz(samples: &[f32], sample_rate_hz: u32) -> f32 {
+    let energies = band_power_values(samples, sample_rate_hz);
+    let total = energies.iter().map(|(_, power)| *power).sum::<f32>();
+    if total <= f32::EPSILON {
+        return 0.0;
+    }
+    let target = total * 0.85;
+    let mut cumulative = 0.0_f32;
+    for (frequency, power) in energies {
+        cumulative += power;
+        if cumulative >= target {
+            return frequency;
+        }
+    }
+    0.0
+}
+
+fn band_energy_features(samples: &[f32], sample_rate_hz: u32) -> Vec<f32> {
+    let powers = band_power_values(samples, sample_rate_hz)
+        .into_iter()
+        .map(|(_, power)| power.max(1.0e-12).log10() + 12.0)
+        .map(|power| power.max(0.0))
+        .collect::<Vec<_>>();
+    let total = powers.iter().sum::<f32>().max(f32::EPSILON);
+    powers.into_iter().map(|power| power / total).collect()
+}
+
+fn band_power_values(samples: &[f32], sample_rate_hz: u32) -> Vec<(f32, f32)> {
+    let nyquist = sample_rate_hz as f32 / 2.0;
+    SPEAKER_BANDS_HZ
+        .iter()
+        .map(|frequency| {
+            let frequency = (*frequency).min(nyquist * 0.92);
+            (
+                frequency,
+                goertzel_power(samples, sample_rate_hz, frequency),
+            )
+        })
+        .collect()
+}
+
+fn goertzel_power(samples: &[f32], sample_rate_hz: u32, target_hz: f32) -> f32 {
+    if samples.is_empty() || sample_rate_hz == 0 || target_hz <= 0.0 {
+        return 0.0;
+    }
+    let omega = 2.0 * std::f32::consts::PI * target_hz / sample_rate_hz as f32;
+    let coeff = 2.0 * omega.cos();
+    let mut prev = 0.0_f32;
+    let mut prev2 = 0.0_f32;
+    for sample in samples.iter().step_by((samples.len() / 16_000).max(1)) {
+        let current = sample + coeff * prev - prev2;
+        prev2 = prev;
+        prev = current;
+    }
+    (prev2 * prev2 + prev * prev - coeff * prev * prev2).max(0.0) / samples.len() as f32
+}
+
+fn estimate_pitch_hz(samples: &[f32], sample_rate_hz: u32) -> Option<f32> {
+    let max_len = samples.len().min(sample_rate_hz as usize);
+    let samples = samples.get(..max_len)?;
+    let min_lag = (sample_rate_hz / 420).max(1) as usize;
+    let max_lag = (sample_rate_hz / 70).max(min_lag as u32 + 1) as usize;
+    if samples.len() <= max_lag + 1 {
+        return None;
+    }
+
+    let mut best_lag = 0_usize;
+    let mut best_score = 0.0_f32;
+    for lag in min_lag..=max_lag {
+        let mut sum = 0.0_f32;
+        let mut energy_a = 0.0_f32;
+        let mut energy_b = 0.0_f32;
+        for index in 0..samples.len() - lag {
+            let a = samples[index];
+            let b = samples[index + lag];
+            sum += a * b;
+            energy_a += a * a;
+            energy_b += b * b;
+        }
+        let denom = (energy_a * energy_b).sqrt().max(f32::EPSILON);
+        let score = sum / denom;
+        if score > best_score {
+            best_score = score;
+            best_lag = lag;
+        }
+    }
+
+    (best_lag > 0 && best_score >= 0.25).then_some(sample_rate_hz as f32 / best_lag as f32)
+}
+
+fn average_unit_vectors(vectors: &[Vec<f32>]) -> Result<Vec<f32>> {
+    if vectors.is_empty() {
+        anyhow::bail!("speaker enrollment produced no usable samples");
+    }
+    let mut mean = vec![0.0_f32; SPEAKER_VECTOR_LEN];
+    for vector in vectors {
+        if vector.len() != SPEAKER_VECTOR_LEN {
+            anyhow::bail!("speaker vector has invalid length");
+        }
+        for (index, value) in vector.iter().enumerate() {
+            mean[index] += *value;
+        }
+    }
+    for value in &mut mean {
+        *value /= vectors.len() as f32;
+    }
+    normalize_vector(&mut mean)?;
+    Ok(mean)
+}
+
+fn normalize_vector(vector: &mut [f32]) -> Result<()> {
+    let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+    if norm <= f32::EPSILON {
+        anyhow::bail!("speaker vector has zero norm");
+    }
+    for value in vector {
+        *value /= norm;
+    }
+    Ok(())
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
+    if left.len() != right.len() || left.is_empty() {
+        return 0.0;
+    }
+    left.iter()
+        .zip(right)
+        .map(|(left, right)| left * right)
+        .sum::<f32>()
+        .clamp(-1.0, 1.0)
+}
+
+fn current_time_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
 async fn record_with_arecord_if_available(
     config: &VoiceConfig,
     wav_path: &Path,
@@ -476,7 +1091,7 @@ async fn transcribe_voice_sample(
             .last()
             .map(|diagnostic| diagnostic.stderr.as_str())
             .unwrap_or_default();
-        warn!(
+        debug!(
             stderr = %truncate_diagnostic(primary_stderr),
             "voice transcription returned an empty transcript; retrying without VAD"
         );
@@ -786,10 +1401,6 @@ fn is_low_information_voice_text(value: &str) -> bool {
             | "ok"
             | "okay"
             | "u"
-            | "you"
-            | "youto"
-            | "youtoo"
-            | "youtwo"
             | "thankyou"
             | "thanks"
             | "obrigado"
@@ -1388,6 +1999,16 @@ fn resolve_open_target_from_transcript(transcript: &str) -> Option<VoiceOpenTarg
     None
 }
 
+fn looks_like_open_command(transcript: &str) -> bool {
+    let raw = transcript.trim();
+    if raw.is_empty() {
+        return false;
+    }
+
+    let normalized = normalize_transcript(raw);
+    extract_open_subject(raw, &normalized).is_some()
+}
+
 #[cfg(test)]
 fn resolve_open_application_from_transcript(transcript: &str) -> Option<String> {
     match resolve_open_target_from_transcript(transcript) {
@@ -1519,12 +2140,35 @@ fn resolve_open_subject(subject: &str, mode: OpenSubjectMode) -> Option<VoiceOpe
     }
 
     match mode {
-        OpenSubjectMode::Explicit => Some(VoiceOpenTarget::Application(cleaned)),
+        OpenSubjectMode::Explicit if is_plausible_unknown_application_subject(&normalized) => {
+            Some(VoiceOpenTarget::Application(cleaned))
+        }
+        OpenSubjectMode::Explicit => None,
         OpenSubjectMode::Standalone if is_known_standalone_application(&normalized) => {
             Some(VoiceOpenTarget::Application(cleaned))
         }
         OpenSubjectMode::Standalone => None,
     }
+}
+
+fn is_plausible_unknown_application_subject(normalized: &str) -> bool {
+    if is_low_information_voice_text(normalized) {
+        return false;
+    }
+
+    let tokens = normalized
+        .split_whitespace()
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return false;
+    }
+
+    if tokens.iter().all(|token| token.chars().count() <= 3) {
+        return false;
+    }
+
+    normalized.chars().any(char::is_alphabetic)
 }
 
 fn clean_open_subject(subject: &str) -> Option<String> {
@@ -1681,7 +2325,7 @@ fn likely_terminal_misrecognition(compact: &str) -> bool {
 fn known_website(normalized: &str) -> Option<KnownWebsite> {
     let compact = compact_normalized(normalized);
     let target = match compact.as_str() {
-        "youtube" | "youtubecom" => KnownWebsite {
+        "youtube" | "youtubecom" | "youto" | "youtoo" | "youtwo" => KnownWebsite {
             label: "YouTube",
             url: "https://www.youtube.com/",
         },
@@ -1995,11 +2639,18 @@ mod tests {
     fn test_voice_config(transcribe_command: &str) -> VoiceConfig {
         VoiceConfig {
             enabled: true,
+            wake_word_enabled: false,
+            wake_block_during_playback: true,
+            speaker_verification_enabled: false,
+            speaker_verification_threshold: 0.72,
+            speaker_verification_min_samples: 3,
             backend: "auto".into(),
             target: String::new(),
             overlay_enabled: true,
             shortcut: "<Super>space".into(),
             record_duration_ms: 4_000,
+            wake_record_duration_ms: 3_200,
+            wake_idle_sleep_ms: 250,
             sample_rate_hz: 16_000,
             channels: 1,
             record_command: String::new(),
@@ -2052,11 +2703,18 @@ mod tests {
     fn renders_template_with_known_placeholders() {
         let config = VoiceConfig {
             enabled: true,
+            wake_word_enabled: false,
+            wake_block_during_playback: true,
+            speaker_verification_enabled: false,
+            speaker_verification_threshold: 0.72,
+            speaker_verification_min_samples: 3,
             backend: "auto".into(),
             target: String::new(),
             overlay_enabled: true,
             shortcut: "<Super>space".into(),
             record_duration_ms: 4_000,
+            wake_record_duration_ms: 3_200,
+            wake_idle_sleep_ms: 250,
             sample_rate_hz: 16_000,
             channels: 1,
             record_command: String::new(),
@@ -2184,11 +2842,20 @@ mod tests {
 
     #[test]
     fn rejects_low_information_implicit_voice_search_text() {
-        let error = resolve_search_query_from_transcript("You").unwrap_err();
+        let error = resolve_search_query_from_transcript("uh").unwrap_err();
         assert!(error.to_string().contains("ASR filler"));
 
-        let error = resolve_search_query_from_transcript("you too").unwrap_err();
+        let error = resolve_search_query_from_transcript("thank you").unwrap_err();
         assert!(error.to_string().contains("not opening a browser"));
+    }
+
+    #[test]
+    fn allows_you_tokens_for_youtube_asr_regression() {
+        let query = resolve_search_query_from_transcript("You").unwrap();
+        assert_eq!(query, "You");
+
+        let query = resolve_search_query_from_transcript("you too").unwrap();
+        assert_eq!(query, "you too");
     }
 
     #[test]
@@ -2236,6 +2903,126 @@ mod tests {
             normalize_voice_agent_invocation("Okay Key, quem foi Steve Jobs?"),
             "quem foi Steve Jobs?"
         );
+        assert_eq!(
+            normalize_voice_agent_invocation("Okay, abra o terminal"),
+            "abra o terminal"
+        );
+        assert_eq!(normalize_voice_agent_invocation("Ok"), "Ok");
+    }
+
+    #[tokio::test]
+    async fn wake_activation_ignores_transcripts_without_key() {
+        let config = test_voice_config("");
+        let activation = resolve_wake_agent_activation_from_transcript(&config, "abra o terminal")
+            .await
+            .unwrap();
+        assert!(activation.is_none());
+
+        let activation = resolve_wake_agent_activation_from_transcript(&config, "Okay")
+            .await
+            .unwrap();
+        assert!(activation.is_none());
+    }
+
+    #[tokio::test]
+    async fn wake_activation_waits_for_follow_up_after_key_only() {
+        let config = test_voice_config("");
+        let activation = resolve_wake_agent_activation_from_transcript(&config, "Key")
+            .await
+            .unwrap();
+        match activation {
+            Some(WakeAgentActivation::AwaitingCommand { transcript }) => {
+                assert_eq!(transcript, "Key");
+            }
+            other => panic!("unexpected wake activation: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn wake_activation_resolves_command_after_key_prefix() {
+        let config = test_voice_config("");
+        let activation =
+            resolve_wake_agent_activation_from_transcript(&config, "Key, abra o terminal")
+                .await
+                .unwrap();
+        match activation {
+            Some(WakeAgentActivation::Command(VoiceAgentCommand::OpenApplication {
+                transcript,
+                app_name,
+                language,
+            })) => {
+                assert_eq!(transcript, "abra o terminal");
+                assert_eq!(app_name, "terminal");
+                assert_eq!(language, AssistantLanguage::PortugueseBrazil);
+            }
+            other => panic!("unexpected wake activation: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_pcm16_samples_from_wav_data_chunk() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&40_u32.to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&16_000_u32.to_le_bytes());
+        bytes.extend_from_slice(&32_000_u32.to_le_bytes());
+        bytes.extend_from_slice(&2_u16.to_le_bytes());
+        bytes.extend_from_slice(&16_u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&4_u32.to_le_bytes());
+        bytes.extend_from_slice(&100_i16.to_le_bytes());
+        bytes.extend_from_slice(&(-200_i16).to_le_bytes());
+
+        assert_eq!(
+            pcm16_samples_from_wav_bytes(&bytes).unwrap(),
+            vec![100, -200]
+        );
+    }
+
+    #[test]
+    fn speaker_vector_prefers_similar_synthetic_voice_samples() {
+        let wav_a = pcm16_wav_from_bytes(&synthetic_sine_wav(180.0, 16_000, 16_000)).unwrap();
+        let wav_b = pcm16_wav_from_bytes(&synthetic_sine_wav(185.0, 16_000, 16_000)).unwrap();
+        let wav_c = pcm16_wav_from_bytes(&synthetic_sine_wav(720.0, 16_000, 16_000)).unwrap();
+
+        let vector_a = speaker_vector_from_wav(&wav_a).unwrap();
+        let vector_b = speaker_vector_from_wav(&wav_b).unwrap();
+        let vector_c = speaker_vector_from_wav(&wav_c).unwrap();
+
+        assert_eq!(vector_a.len(), SPEAKER_VECTOR_LEN);
+        assert!(cosine_similarity(&vector_a, &vector_b) > cosine_similarity(&vector_a, &vector_c));
+    }
+
+    #[test]
+    fn speaker_profile_status_reports_saved_profile_without_audio() {
+        let profile_path = std::env::temp_dir().join(format!(
+            "visionclip-speaker-profile-test-{}.json",
+            Uuid::new_v4()
+        ));
+        let mut mean_vector = vec![0.0_f32; SPEAKER_VECTOR_LEN];
+        mean_vector[0] = 1.0;
+        let profile = SpeakerProfile {
+            version: SPEAKER_PROFILE_VERSION,
+            label: "test-user".into(),
+            created_at_ms: 123,
+            sample_count: 3,
+            sample_rate_hz: 16_000,
+            threshold: 0.72,
+            mean_vector,
+        };
+
+        save_speaker_profile(&profile_path, &profile).unwrap();
+        let status = speaker_profile_status(&profile_path).unwrap();
+
+        assert!(status.exists);
+        assert_eq!(status.label.as_deref(), Some("test-user"));
+        assert_eq!(status.sample_count, 3);
+        assert!(clear_speaker_profile(&profile_path).unwrap());
     }
 
     #[test]
@@ -2356,11 +3143,18 @@ mod tests {
     async fn voice_agent_prefers_open_document_intent() {
         let config = VoiceConfig {
             enabled: false,
+            wake_word_enabled: false,
+            wake_block_during_playback: true,
+            speaker_verification_enabled: false,
+            speaker_verification_threshold: 0.72,
+            speaker_verification_min_samples: 3,
             backend: "auto".into(),
             target: String::new(),
             overlay_enabled: true,
             shortcut: "<Super>space".into(),
             record_duration_ms: 4_000,
+            wake_record_duration_ms: 3_200,
+            wake_idle_sleep_ms: 250,
             sample_rate_hz: 16_000,
             channels: 1,
             record_command: String::new(),
@@ -2412,12 +3206,22 @@ mod tests {
         assert!(resolve_open_application_from_transcript("Quem foi Rousseau?").is_none());
         assert!(resolve_open_application_from_transcript("O que é JavaScript?").is_none());
         assert!(resolve_open_application_from_transcript("pesquise youtube").is_none());
+        assert!(resolve_open_application_from_transcript("abro te mną").is_none());
+        assert!(resolve_open_application_from_transcript("abra te").is_none());
+        assert_eq!(
+            resolve_open_application_from_transcript("abra netmask").unwrap(),
+            "netmask"
+        );
     }
 
     #[test]
     fn resolves_known_website_from_voice_transcript() {
         let cases = [
             ("youtube", "YouTube", "https://www.youtube.com/"),
+            ("open you tube", "YouTube", "https://www.youtube.com/"),
+            ("open you too", "YouTube", "https://www.youtube.com/"),
+            ("open you to", "YouTube", "https://www.youtube.com/"),
+            ("open you two", "YouTube", "https://www.youtube.com/"),
             (
                 "abra o site do LinkedIn",
                 "LinkedIn",
@@ -2443,11 +3247,18 @@ mod tests {
     async fn voice_agent_prefers_open_application_intent() {
         let config = VoiceConfig {
             enabled: false,
+            wake_word_enabled: false,
+            wake_block_during_playback: true,
+            speaker_verification_enabled: false,
+            speaker_verification_threshold: 0.72,
+            speaker_verification_min_samples: 3,
             backend: "auto".into(),
             target: String::new(),
             overlay_enabled: true,
             shortcut: "<Super>space".into(),
             record_duration_ms: 4_000,
+            wake_record_duration_ms: 3_200,
+            wake_idle_sleep_ms: 250,
             sample_rate_hz: 16_000,
             channels: 1,
             record_command: String::new(),
@@ -2476,11 +3287,18 @@ mod tests {
     async fn voice_agent_prefers_open_url_intent_for_known_sites() {
         let config = VoiceConfig {
             enabled: false,
+            wake_word_enabled: false,
+            wake_block_during_playback: true,
+            speaker_verification_enabled: false,
+            speaker_verification_threshold: 0.72,
+            speaker_verification_min_samples: 3,
             backend: "auto".into(),
             target: String::new(),
             overlay_enabled: true,
             shortcut: "<Super>space".into(),
             record_duration_ms: 4_000,
+            wake_record_duration_ms: 3_200,
+            wake_idle_sleep_ms: 250,
             sample_rate_hz: 16_000,
             channels: 1,
             record_command: String::new(),
@@ -2498,16 +3316,73 @@ mod tests {
             }
             other => panic!("unexpected voice agent command: {other:?}"),
         }
+
+        let command = resolve_voice_agent_command(&config, Some("Key, open you too"))
+            .await
+            .unwrap();
+        match command {
+            VoiceAgentCommand::OpenUrl {
+                transcript,
+                label,
+                url,
+                language,
+            } => {
+                assert_eq!(transcript, "open you too");
+                assert_eq!(label, "YouTube");
+                assert_eq!(url, "https://www.youtube.com/");
+                assert_eq!(language, AssistantLanguage::English);
+            }
+            other => panic!("unexpected voice agent command: {other:?}"),
+        }
     }
 
     #[tokio::test]
     async fn voice_agent_rejects_low_information_fallback_search() {
         let config = test_voice_config("");
 
-        let error = resolve_voice_agent_command(&config, Some("You"))
+        let error = resolve_voice_agent_command(&config, Some("uh"))
             .await
             .unwrap_err();
 
         assert!(error.to_string().contains("ASR filler"));
+    }
+
+    #[tokio::test]
+    async fn voice_agent_rejects_implausible_open_application_command() {
+        let config = test_voice_config("");
+
+        let error = resolve_voice_agent_command(&config, Some("abro te mną"))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("plausible"));
+    }
+
+    fn synthetic_sine_wav(frequency_hz: f32, sample_rate_hz: u32, samples: usize) -> Vec<u8> {
+        let mut pcm = Vec::with_capacity(samples * 2);
+        for index in 0..samples {
+            let phase =
+                2.0 * std::f32::consts::PI * frequency_hz * index as f32 / sample_rate_hz as f32;
+            let sample = (phase.sin() * 12_000.0) as i16;
+            pcm.extend_from_slice(&sample.to_le_bytes());
+        }
+
+        let data_len = pcm.len() as u32;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate_hz.to_le_bytes());
+        bytes.extend_from_slice(&(sample_rate_hz * 2).to_le_bytes());
+        bytes.extend_from_slice(&2_u16.to_le_bytes());
+        bytes.extend_from_slice(&16_u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        bytes.extend_from_slice(&pcm);
+        bytes
     }
 }

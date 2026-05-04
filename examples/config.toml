@@ -37,6 +37,26 @@ open_browser = true
 rendered_ai_overview_listener = true
 rendered_ai_overview_wait_ms = 12000
 rendered_ai_overview_poll_interval_ms = 3000
+index_on_startup = true
+watch_enabled = true
+debounce_ms = 800
+max_file_size_mb = 64
+max_text_bytes = 4000000
+max_workers = 2
+content_index = true
+semantic_index = false
+ocr_index = false
+vector_backend = "sqlite_vec"
+roots = ["/usr/share/applications", "/var/lib/flatpak/exports/share/applications", "~/.local/share/applications", "~/.local/share/flatpak/exports/share/applications", "~/Documents", "~/Downloads", "~/Desktop", "~/Pictures", "~/Projects", "~/dev"]
+exclude_dirs = [".git", "node_modules", "target", "vendor", ".venv", "venv", "__pycache__", ".hg", ".svn", "dist", "build", ".cache", ".local/share/Trash"]
+exclude_sensitive_dirs = ["~/.ssh", "~/.gnupg", "~/.local/share/keyrings", "~/.password-store", "~/.aws", "~/.azure", "~/.kube", "~/.docker", "~/.mozilla", "~/.config/google-chrome", "~/.config/chromium", "~/.config/BraveSoftware", "~/.config/Signal", "~/.config/discord", "~/.cache", "~/.local/share/Trash"]
+exclude_globs = [".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa", "id_ed25519", "*credentials*", "*secret*", "*token*", "*password*", "*.sqlite", "*.db"]
+
+[search.ranking]
+prefer_filename_for_short_queries = true
+recency_boost = true
+frecency_boost = true
+hybrid_fusion = "rrf"
 
 [audio]
 enabled = true
@@ -61,11 +81,18 @@ playback_timeout_ms = 120000
 
 [voice]
 enabled = false
+wake_word_enabled = false
+wake_block_during_playback = true
+speaker_verification_enabled = false
+speaker_verification_threshold = 0.72
+speaker_verification_min_samples = 3
 backend = "auto"
 target = ""
 overlay_enabled = false
 shortcut = "<Super>space"
 record_duration_ms = 4000
+wake_record_duration_ms = 3200
+wake_idle_sleep_ms = 250
 sample_rate_hz = 16000
 channels = 1
 record_command = ""
@@ -84,3 +111,30 @@ cache_audio = true
 [ui]
 overlay = "panel"
 show_notification = true
+
+[ui.search_overlay]
+enabled = true
+shortcut = "<Alt>space"
+liquid_glass_enabled = true
+glass_style = "liquid_crystal"
+blur_radius_px = 32
+panel_opacity = 0.04
+corner_radius_px = 28
+border_opacity = 0.30
+shadow_intensity = 0.28
+highlight_intensity = 0.42
+saturation = 1.18
+contrast = 1.06
+brightness = 1.00
+refraction_strength = 0.86
+chromatic_aberration = 0.28
+liquid_noise = 0.52
+background = "#16111b"
+surface = "#110c15"
+text_primary = "#ffffff"
+text_secondary = "#e0e6ed"
+primary = "#3b82f6"
+secondary = "#0053db"
+ai_glow = "#2fd9f4"
+error = "#ffb4ab"
+animations_enabled = true

@@ -3,6 +3,7 @@ set -euo pipefail
 
 CUSTOM_KEYBINDINGS_SCHEMA="org.gnome.settings-daemon.plugins.media-keys"
 WM_KEYBINDINGS_SCHEMA="org.gnome.desktop.wm.keybindings"
+SHELL_KEYBINDINGS_SCHEMA="org.gnome.shell.keybindings"
 USER_BIN_DIR="${HOME}/.local/bin"
 VISIONCLIP_BIN="${VISIONCLIP_BIN:-${USER_BIN_DIR}/visionclip}"
 LOG_DIR="${HOME}/.local/state/visionclip"
@@ -13,6 +14,7 @@ CAPTURE_TRANSLATE_BINDING="${VISIONCLIP_CAPTURE_TRANSLATE_SHORTCUT:-<Super>2}"
 VOICE_SEARCH_BINDING="${VISIONCLIP_VOICE_SEARCH_SHORTCUT:-<Super>3}"
 BOOK_READ_BINDING="${VISIONCLIP_BOOK_READ_SHORTCUT:-<Super>4}"
 BOOK_TRANSLATE_READ_BINDING="${VISIONCLIP_BOOK_TRANSLATE_READ_SHORTCUT:-<Super>5}"
+SEARCH_OVERLAY_BINDING="${VISIONCLIP_SEARCH_OVERLAY_SHORTCUT:-<Alt>space}"
 
 OLD_KEYBINDING_PATHS=(
     "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-voice-search/"
@@ -27,6 +29,7 @@ SHORTCUT_PATHS=(
     "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-voice-search/"
     "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-book-read/"
     "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-book-translate-read/"
+    "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-search-overlay/"
 )
 
 normalize_binding() {
@@ -35,6 +38,9 @@ normalize_binding() {
     case "$lowered" in
         "windows+space"|"win+space"|"super+space"|"meta+space")
             echo "<Mod4>space"
+            ;;
+        "alt+space"|"option+space")
+            echo "<Alt>space"
             ;;
         "windows+1"|"win+1"|"super+1"|"meta+1")
             echo "<Mod4>1"
@@ -236,21 +242,39 @@ configure_shortcut() {
     gsettings set "$schema" binding "$binding"
 }
 
-clear_conflicting_gnome_bindings() {
-    local bindings=("$@")
+clear_accelerators_from_schema_keys() {
+    local schema="$1"
+    shift
+    local keys=("$@")
     local key current updated
 
-    for key in switch-input-source switch-input-source-backward; do
-        current="$(gsettings get "$WM_KEYBINDINGS_SCHEMA" "$key" 2>/dev/null || true)"
+    for key in "${keys[@]}"; do
+        current="$(gsettings get "$schema" "$key" 2>/dev/null || true)"
         if [[ -z "$current" ]]; then
             continue
         fi
-        updated="$(remove_accelerators_from_list "$current" "${bindings[@]}")"
+        updated="$(remove_accelerators_from_list "$current" "${CONFLICT_BINDINGS[@]}")"
         if [[ "$updated" != "$current" ]]; then
-            gsettings set "$WM_KEYBINDINGS_SCHEMA" "$key" "$updated"
-            echo "Removido conflito GNOME $key: $current -> $updated"
+            gsettings set "$schema" "$key" "$updated"
+            echo "Removido conflito GNOME $schema $key: $current -> $updated"
         fi
     done
+}
+
+clear_conflicting_gnome_bindings() {
+    CONFLICT_BINDINGS=("$@")
+
+    clear_accelerators_from_schema_keys "$WM_KEYBINDINGS_SCHEMA" \
+        switch-input-source \
+        switch-input-source-backward \
+        activate-window-menu
+
+    clear_accelerators_from_schema_keys "$SHELL_KEYBINDINGS_SCHEMA" \
+        switch-to-application-1 \
+        switch-to-application-2 \
+        switch-to-application-3 \
+        switch-to-application-4 \
+        switch-to-application-5
 }
 
 mkdir -p "$USER_BIN_DIR"
@@ -265,7 +289,8 @@ fi
 
 if [[ "${VISIONCLIP_ALLOW_CHORD_HINT:-1}" == "1" ]]; then
     echo "Nota: GNOME custom shortcuts nao suportam chording real como Windows+Space+1."
-    echo "Instalando Windows+Space para voz e Windows+1..5 para os modos."
+    echo "Instalando Windows+Space para voz, Alt+Space para busca e Windows+1..5 para os modos."
+    echo "Os atalhos nativos do GNOME Shell Super+1..5 serao liberados para o VisionClip."
 fi
 
 VOICE_AGENT_WRAPPER="${USER_BIN_DIR}/visionclip-voice-agent"
@@ -274,6 +299,7 @@ CAPTURE_TRANSLATE_WRAPPER="${USER_BIN_DIR}/visionclip-capture-translate"
 VOICE_SEARCH_WRAPPER="${USER_BIN_DIR}/visionclip-voice-search"
 BOOK_READ_WRAPPER="${USER_BIN_DIR}/visionclip-book-read"
 BOOK_TRANSLATE_READ_WRAPPER="${USER_BIN_DIR}/visionclip-book-translate-read"
+SEARCH_OVERLAY_WRAPPER="${USER_BIN_DIR}/visionclip-search-overlay"
 
 write_wrapper "$VOICE_AGENT_WRAPPER" "visionclip voice agent" --voice-agent --speak
 write_wrapper "$CAPTURE_EXPLAIN_WRAPPER" "visionclip capture explain" --action explain --speak
@@ -281,6 +307,7 @@ write_wrapper "$CAPTURE_TRANSLATE_WRAPPER" "visionclip capture translate" --acti
 write_wrapper "$VOICE_SEARCH_WRAPPER" "visionclip voice search" --voice-search --speak
 write_wrapper "$BOOK_READ_WRAPPER" "visionclip book read voice mode" --voice-agent --speak
 write_wrapper "$BOOK_TRANSLATE_READ_WRAPPER" "visionclip translated book read voice mode" --voice-agent --speak
+write_wrapper "$SEARCH_OVERLAY_WRAPPER" "visionclip search overlay" --search-overlay
 
 RESOLVED_VOICE_AGENT_BINDING="$(normalize_binding "$VOICE_AGENT_BINDING")"
 RESOLVED_CAPTURE_EXPLAIN_BINDING="$(normalize_binding "$CAPTURE_EXPLAIN_BINDING")"
@@ -288,6 +315,7 @@ RESOLVED_CAPTURE_TRANSLATE_BINDING="$(normalize_binding "$CAPTURE_TRANSLATE_BIND
 RESOLVED_VOICE_SEARCH_BINDING="$(normalize_binding "$VOICE_SEARCH_BINDING")"
 RESOLVED_BOOK_READ_BINDING="$(normalize_binding "$BOOK_READ_BINDING")"
 RESOLVED_BOOK_TRANSLATE_READ_BINDING="$(normalize_binding "$BOOK_TRANSLATE_READ_BINDING")"
+RESOLVED_SEARCH_OVERLAY_BINDING="$(normalize_binding "$SEARCH_OVERLAY_BINDING")"
 
 clear_conflicting_gnome_bindings \
     "$RESOLVED_VOICE_AGENT_BINDING" \
@@ -295,7 +323,8 @@ clear_conflicting_gnome_bindings \
     "$RESOLVED_CAPTURE_TRANSLATE_BINDING" \
     "$RESOLVED_VOICE_SEARCH_BINDING" \
     "$RESOLVED_BOOK_READ_BINDING" \
-    "$RESOLVED_BOOK_TRANSLATE_READ_BINDING"
+    "$RESOLVED_BOOK_TRANSLATE_READ_BINDING" \
+    "$RESOLVED_SEARCH_OVERLAY_BINDING"
 
 CURRENT_BINDINGS="$(gsettings get "$CUSTOM_KEYBINDINGS_SCHEMA" custom-keybindings)"
 UPDATED_BINDINGS="$(filter_custom_keybinding_paths "$CURRENT_BINDINGS" "${OLD_KEYBINDING_PATHS[@]}")"
@@ -310,6 +339,7 @@ configure_shortcut "${SHORTCUT_PATHS[2]}" "VisionClip Translate Screen" "$CAPTUR
 configure_shortcut "${SHORTCUT_PATHS[3]}" "VisionClip Voice Search" "$VOICE_SEARCH_WRAPPER" "$RESOLVED_VOICE_SEARCH_BINDING"
 configure_shortcut "${SHORTCUT_PATHS[4]}" "VisionClip Book Read" "$BOOK_READ_WRAPPER" "$RESOLVED_BOOK_READ_BINDING"
 configure_shortcut "${SHORTCUT_PATHS[5]}" "VisionClip Book Translate Read" "$BOOK_TRANSLATE_READ_WRAPPER" "$RESOLVED_BOOK_TRANSLATE_READ_BINDING"
+configure_shortcut "${SHORTCUT_PATHS[6]}" "VisionClip Search Overlay" "$SEARCH_OVERLAY_WRAPPER" "$RESOLVED_SEARCH_OVERLAY_BINDING"
 
 if command -v systemctl >/dev/null 2>&1; then
     systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS PATH >/dev/null 2>&1 || true
@@ -324,4 +354,5 @@ echo "Translate screen: $RESOLVED_CAPTURE_TRANSLATE_BINDING -> $CAPTURE_TRANSLAT
 echo "Voice search: $RESOLVED_VOICE_SEARCH_BINDING -> $VOICE_SEARCH_WRAPPER"
 echo "Book read voice mode: $RESOLVED_BOOK_READ_BINDING -> $BOOK_READ_WRAPPER"
 echo "Translated book read voice mode: $RESOLVED_BOOK_TRANSLATE_READ_BINDING -> $BOOK_TRANSLATE_READ_WRAPPER"
+echo "Search overlay: $RESOLVED_SEARCH_OVERLAY_BINDING -> $SEARCH_OVERLAY_WRAPPER"
 echo "Log: ${HOME}/.local/state/visionclip/voice-shortcut.log"

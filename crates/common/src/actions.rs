@@ -198,6 +198,154 @@ pub fn builtin_action_specs() -> Vec<ActionSpec> {
             12_000,
         ),
         ActionSpec::new(
+            "search_files",
+            "Pesquisa metadados de arquivos locais no indice do VisionClip.",
+            RiskLevel::Level1,
+            vec![ActionPermission::LocalFilesRead],
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "mode": {"type": "string"},
+                    "max_results": {"type": "integer", "minimum": 1, "maximum": 100}
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "hits": {"type": "array"},
+                    "elapsed_ms": {"type": "integer"}
+                },
+                "required": ["hits"]
+            }),
+            2_000,
+        ),
+        ActionSpec::new(
+            "search_file_content",
+            "Pesquisa conteudo local indexado, incluindo documentos e OCR quando habilitados.",
+            RiskLevel::Level2,
+            vec![ActionPermission::FileRead, ActionPermission::LocalFilesRead],
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "mode": {"type": "string"},
+                    "max_results": {"type": "integer", "minimum": 1, "maximum": 100}
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "hits": {"type": "array"},
+                    "elapsed_ms": {"type": "integer"}
+                },
+                "required": ["hits"]
+            }),
+            4_000,
+        ),
+        ActionSpec::new(
+            "open_search_result",
+            "Abre ou revela um resultado de busca local usando launchers seguros do desktop.",
+            RiskLevel::Level2,
+            vec![ActionPermission::DesktopLaunch, ActionPermission::FileRead],
+            json!({
+                "type": "object",
+                "properties": {
+                    "result_id": {"type": "string"},
+                    "action": {"type": "string", "enum": ["open", "reveal", "ask_about", "summarize"]}
+                },
+                "required": ["result_id", "action"],
+                "additionalProperties": false
+            }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "success": {"type": "boolean"},
+                    "message": {"type": "string"}
+                },
+                "required": ["success", "message"]
+            }),
+            5_000,
+        )
+        .with_confirmation(ConfirmationPolicy::OncePerResource),
+        ActionSpec::new(
+            "index_add_root",
+            "Adiciona uma root explicita ao catalogo de busca local.",
+            RiskLevel::Level2,
+            vec![ActionPermission::LocalFilesRead],
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "sensitive": {"type": "boolean"}
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "success": {"type": "boolean"},
+                    "message": {"type": "string"}
+                },
+                "required": ["success", "message"]
+            }),
+            5_000,
+        )
+        .with_confirmation(ConfirmationPolicy::OncePerResource),
+        ActionSpec::new(
+            "index_sensitive_root",
+            "Tenta indexar root sensivel e exige confirmacao explicita.",
+            RiskLevel::Level3,
+            vec![ActionPermission::FileRead, ActionPermission::LocalFilesRead],
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "reason": {"type": "string"}
+                },
+                "required": ["path", "reason"],
+                "additionalProperties": false
+            }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "success": {"type": "boolean"},
+                    "message": {"type": "string"}
+                },
+                "required": ["success", "message"]
+            }),
+            5_000,
+        ),
+        ActionSpec::new(
+            "send_result_to_cloud",
+            "Envia conteudo local recuperado para provedor cloud quando politica permitir.",
+            RiskLevel::Level5,
+            vec![ActionPermission::CloudInference, ActionPermission::Network],
+            json!({
+                "type": "object",
+                "properties": {
+                    "result_id": {"type": "string"},
+                    "provider": {"type": "string"}
+                },
+                "required": ["result_id", "provider"],
+                "additionalProperties": false
+            }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "success": {"type": "boolean"}
+                },
+                "required": ["success"]
+            }),
+            10_000,
+        )
+        .with_confirmation(ConfirmationPolicy::Disabled),
+        ActionSpec::new(
             "open_url",
             "Abre uma URL http/https no navegador padrao do usuario.",
             RiskLevel::Level1,

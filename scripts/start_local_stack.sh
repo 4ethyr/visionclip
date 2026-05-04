@@ -25,10 +25,15 @@ TTS_VOICE_HI="${VISIONCLIP_TTS_VOICE_HI:-}"
 PLAYER_COMMAND="${VISIONCLIP_PLAYER_COMMAND:-pw-play}"
 CAPTURE_TIMEOUT_MS="${VISIONCLIP_CAPTURE_TIMEOUT_MS:-60000}"
 VOICE_ENABLED="${VISIONCLIP_VOICE_ENABLED:-0}"
+WAKE_WORD_ENABLED="${VISIONCLIP_WAKE_WORD_ENABLED:-0}"
+WAKE_BLOCK_DURING_PLAYBACK="${VISIONCLIP_WAKE_BLOCK_DURING_PLAYBACK:-1}"
 VOICE_BACKEND="${VISIONCLIP_VOICE_BACKEND:-auto}"
 VOICE_OVERLAY_ENABLED="${VISIONCLIP_VOICE_OVERLAY_ENABLED:-0}"
 VOICE_SHORTCUT="${VISIONCLIP_VOICE_SHORTCUT:-<Super>space}"
+SEARCH_OVERLAY_SHORTCUT="${VISIONCLIP_SEARCH_OVERLAY_SHORTCUT:-<Alt>space}"
 VOICE_RECORD_DURATION_MS="${VISIONCLIP_VOICE_RECORD_DURATION_MS:-4000}"
+WAKE_RECORD_DURATION_MS="${VISIONCLIP_WAKE_RECORD_DURATION_MS:-3200}"
+WAKE_IDLE_SLEEP_MS="${VISIONCLIP_WAKE_IDLE_SLEEP_MS:-250}"
 VOICE_SAMPLE_RATE_HZ="${VISIONCLIP_VOICE_SAMPLE_RATE_HZ:-16000}"
 VOICE_CHANNELS="${VISIONCLIP_VOICE_CHANNELS:-1}"
 VOICE_RECORD_COMMAND="${VISIONCLIP_VOICE_RECORD_COMMAND:-}"
@@ -70,10 +75,15 @@ Variaveis uteis:
   VISIONCLIP_PLAYER_COMMAND
   VISIONCLIP_CAPTURE_TIMEOUT_MS
   VISIONCLIP_VOICE_ENABLED=1
+  VISIONCLIP_WAKE_WORD_ENABLED=0
+  VISIONCLIP_WAKE_BLOCK_DURING_PLAYBACK=1
   VISIONCLIP_VOICE_BACKEND=auto
   VISIONCLIP_VOICE_OVERLAY_ENABLED=0
   VISIONCLIP_VOICE_SHORTCUT=<Super>space
+  VISIONCLIP_SEARCH_OVERLAY_SHORTCUT=<Alt>space
   VISIONCLIP_VOICE_RECORD_DURATION_MS=4000
+  VISIONCLIP_WAKE_RECORD_DURATION_MS=3200
+  VISIONCLIP_WAKE_IDLE_SLEEP_MS=250
   VISIONCLIP_VOICE_SAMPLE_RATE_HZ=16000
   VISIONCLIP_VOICE_CHANNELS=1
   VISIONCLIP_VOICE_RECORD_COMMAND
@@ -294,6 +304,7 @@ write_config() {
     local escaped_player_command
     local escaped_voice_backend
     local escaped_voice_shortcut
+    local escaped_search_overlay_shortcut
     local escaped_voice_record_command
     local escaped_voice_transcribe_command
 
@@ -303,6 +314,7 @@ write_config() {
     escaped_player_command="$(escape_toml_string "$PLAYER_COMMAND")"
     escaped_voice_backend="$(escape_toml_string "$VOICE_BACKEND")"
     escaped_voice_shortcut="$(escape_toml_string "$VOICE_SHORTCUT")"
+    escaped_search_overlay_shortcut="$(escape_toml_string "$SEARCH_OVERLAY_SHORTCUT")"
     escaped_voice_record_command="$(escape_toml_string "$VOICE_RECORD_COMMAND")"
     escaped_voice_transcribe_command="$(escape_toml_string "$VOICE_TRANSCRIBE_COMMAND")"
 
@@ -349,10 +361,17 @@ playback_timeout_ms = 120000
 
 [voice]
 enabled = $( [[ "$VOICE_ENABLED" == "1" ]] && echo true || echo false )
+wake_word_enabled = $( [[ "$WAKE_WORD_ENABLED" == "1" ]] && echo true || echo false )
+wake_block_during_playback = $( [[ "$WAKE_BLOCK_DURING_PLAYBACK" == "1" ]] && echo true || echo false )
+speaker_verification_enabled = false
+speaker_verification_threshold = 0.72
+speaker_verification_min_samples = 3
 backend = "$escaped_voice_backend"
 overlay_enabled = $( [[ "$VOICE_OVERLAY_ENABLED" == "1" ]] && echo true || echo false )
 shortcut = "$escaped_voice_shortcut"
 record_duration_ms = $VOICE_RECORD_DURATION_MS
+wake_record_duration_ms = $WAKE_RECORD_DURATION_MS
+wake_idle_sleep_ms = $WAKE_IDLE_SLEEP_MS
 sample_rate_hz = $VOICE_SAMPLE_RATE_HZ
 channels = $VOICE_CHANNELS
 record_command = "$escaped_voice_record_command"
@@ -362,6 +381,33 @@ transcribe_timeout_ms = $VOICE_TRANSCRIBE_TIMEOUT_MS
 [ui]
 overlay = "panel"
 show_notification = true
+
+[ui.search_overlay]
+enabled = true
+shortcut = "$escaped_search_overlay_shortcut"
+liquid_glass_enabled = true
+glass_style = "liquid_crystal"
+blur_radius_px = 32
+panel_opacity = 0.04
+corner_radius_px = 28
+border_opacity = 0.30
+shadow_intensity = 0.28
+highlight_intensity = 0.42
+saturation = 1.18
+contrast = 1.06
+brightness = 1.00
+refraction_strength = 0.86
+chromatic_aberration = 0.28
+liquid_noise = 0.52
+background = "#16111b"
+surface = "#110c15"
+text_primary = "#ffffff"
+text_secondary = "#e0e6ed"
+primary = "#3b82f6"
+secondary = "#0053db"
+ai_glow = "#2fd9f4"
+error = "#ffb4ab"
+animations_enabled = true
 EOF
 
     cat >>"$CONFIG_PATH" <<EOF

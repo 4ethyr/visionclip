@@ -98,6 +98,118 @@ pub struct DocumentOpenJob {
     pub speak: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SearchRequest {
+    pub request_id: String,
+    pub query: String,
+    pub mode: SearchMode,
+    pub root_hint: Option<String>,
+    pub limit: u16,
+    pub include_snippets: bool,
+    pub include_ocr: bool,
+    pub include_semantic: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SearchMode {
+    Auto,
+    Locate,
+    Lexical,
+    Grep,
+    Semantic,
+    Hybrid,
+    Apps,
+    Recent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SearchControlRequest {
+    Status {
+        request_id: String,
+    },
+    AddRoot {
+        request_id: String,
+        path: String,
+    },
+    RemoveRoot {
+        request_id: String,
+        path: String,
+    },
+    Pause {
+        request_id: String,
+    },
+    Resume {
+        request_id: String,
+    },
+    Rebuild {
+        request_id: String,
+        root: Option<String>,
+    },
+    Audit {
+        request_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SearchOpenRequest {
+    pub request_id: String,
+    pub result_id: String,
+    pub action: OpenAction,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum OpenAction {
+    Open,
+    Reveal,
+    AskAbout,
+    Summarize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SearchResponse {
+    pub request_id: String,
+    pub elapsed_ms: u32,
+    pub mode_used: SearchMode,
+    pub hits: Vec<SearchHit>,
+    pub diagnostics: Option<SearchDiagnostics>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SearchHit {
+    pub result_id: String,
+    pub file_id: i64,
+    pub path: String,
+    pub title: String,
+    pub kind: String,
+    pub score: f32,
+    pub source: SearchHitSource,
+    pub snippet: Option<String>,
+    pub modified_at: Option<i64>,
+    pub size_bytes: Option<u64>,
+    pub requires_confirmation: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SearchHitSource {
+    FileName,
+    Path,
+    Content,
+    Ocr,
+    Semantic,
+    Recent,
+    App,
+    Document,
+    Code,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SearchDiagnostics {
+    pub indexed_files: usize,
+    pub indexed_chunks: usize,
+    pub roots: Vec<String>,
+    pub message: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthCheckJob {
     pub request_id: Uuid,
@@ -166,6 +278,9 @@ pub enum VisionRequest {
     DocumentAsk(DocumentAskJob),
     DocumentSummarize(DocumentSummarizeJob),
     OpenDocument(DocumentOpenJob),
+    Search(SearchRequest),
+    SearchControl(SearchControlRequest),
+    SearchOpen(SearchOpenRequest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -199,6 +314,7 @@ pub enum JobResult {
         code: String,
         message: String,
     },
+    Search(SearchResponse),
 }
 
 pub async fn write_message<W, T>(writer: &mut W, value: &T) -> AppResult<()>
@@ -388,6 +504,35 @@ mod tests {
             })),
             11
         );
+        assert_eq!(
+            encoded_variant_tag(&VisionRequest::Search(SearchRequest {
+                request_id: "search_1".into(),
+                query: "docker".into(),
+                mode: SearchMode::Locate,
+                root_hint: None,
+                limit: 10,
+                include_snippets: true,
+                include_ocr: false,
+                include_semantic: false,
+            })),
+            12
+        );
+        assert_eq!(
+            encoded_variant_tag(&VisionRequest::SearchControl(
+                SearchControlRequest::Status {
+                    request_id: "status_1".into()
+                }
+            )),
+            13
+        );
+        assert_eq!(
+            encoded_variant_tag(&VisionRequest::SearchOpen(SearchOpenRequest {
+                request_id: "open_1".into(),
+                result_id: "file:1".into(),
+                action: OpenAction::Open,
+            })),
+            14
+        );
     }
 
     #[test]
@@ -494,6 +639,71 @@ mod tests {
                 assert_eq!(reading_session_id.as_deref(), Some("read_1"));
                 assert_eq!(chunks, Some(3));
                 assert!(spoken);
+            }
+            _ => panic!("unexpected decoded response"),
+        }
+    }
+
+    #[test]
+    fn search_request_roundtrips_through_bincode() {
+        let request = VisionRequest::Search(SearchRequest {
+            request_id: "search_1".into(),
+            query: "auth middleware kind:code".into(),
+            mode: SearchMode::Hybrid,
+            root_hint: Some("./src".into()),
+            limit: 8,
+            include_snippets: true,
+            include_ocr: false,
+            include_semantic: true,
+        });
+        let payload = encode_message_payload(&request).expect("encode search request");
+        let decoded: VisionRequest = decode_message_payload(&payload).expect("decode search");
+
+        match decoded {
+            VisionRequest::Search(job) => {
+                assert_eq!(job.request_id, "search_1");
+                assert_eq!(job.mode, SearchMode::Hybrid);
+                assert_eq!(job.root_hint.as_deref(), Some("./src"));
+                assert!(job.include_semantic);
+            }
+            _ => panic!("unexpected decoded request"),
+        }
+    }
+
+    #[test]
+    fn search_response_roundtrips_through_bincode() {
+        let result = JobResult::Search(SearchResponse {
+            request_id: "search_1".into(),
+            elapsed_ms: 12,
+            mode_used: SearchMode::Locate,
+            hits: vec![SearchHit {
+                result_id: "file:7".into(),
+                file_id: 7,
+                path: "/tmp/docker-compose.yml".into(),
+                title: "docker-compose".into(),
+                kind: "code".into(),
+                score: 42.0,
+                source: SearchHitSource::FileName,
+                snippet: None,
+                modified_at: None,
+                size_bytes: Some(128),
+                requires_confirmation: false,
+            }],
+            diagnostics: Some(SearchDiagnostics {
+                indexed_files: 1,
+                indexed_chunks: 0,
+                roots: vec!["/tmp".into()],
+                message: None,
+            }),
+        });
+        let payload = encode_message_payload(&result).expect("encode search response");
+        let decoded: JobResult = decode_message_payload(&payload).expect("decode search response");
+
+        match decoded {
+            JobResult::Search(response) => {
+                assert_eq!(response.request_id, "search_1");
+                assert_eq!(response.hits[0].source, SearchHitSource::FileName);
+                assert_eq!(response.diagnostics.unwrap().indexed_files, 1);
             }
             _ => panic!("unexpected decoded response"),
         }

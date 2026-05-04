@@ -8,7 +8,10 @@ use std::{
 };
 use tokio::net::UnixStream;
 use visionclip_common::{
-    config::{AudioConfig, DocumentsConfig, ProvidersConfig, SearchConfig, VoiceConfig},
+    config::{
+        AudioConfig, DocumentsConfig, ProvidersConfig, SearchConfig, SearchOverlayConfig,
+        VoiceConfig,
+    },
     discover_capture_backends, discover_rendered_capture_backends, read_message,
     summarize_capture_backends, write_message, AppConfig, HealthCheckJob, JobResult, SessionType,
     VisionRequest,
@@ -21,13 +24,16 @@ const CAPTURE_TRANSLATE_WRAPPER_NAME: &str = "visionclip-capture-translate";
 const VOICE_SEARCH_WRAPPER_NAME: &str = "visionclip-voice-search";
 const BOOK_READ_WRAPPER_NAME: &str = "visionclip-book-read";
 const BOOK_TRANSLATE_READ_WRAPPER_NAME: &str = "visionclip-book-translate-read";
+const SEARCH_OVERLAY_WRAPPER_NAME: &str = "visionclip-search-overlay";
 const CAPTURE_EXPLAIN_SHORTCUT: &str = "<Super>1";
 const CAPTURE_TRANSLATE_SHORTCUT: &str = "<Super>2";
 const VOICE_SEARCH_SHORTCUT: &str = "<Super>3";
 const BOOK_READ_SHORTCUT: &str = "<Super>4";
 const BOOK_TRANSLATE_READ_SHORTCUT: &str = "<Super>5";
 const GNOME_MEDIA_KEYS_SERVICE: &str = "org.gnome.SettingsDaemon.MediaKeys.service";
+const WAKE_LISTENER_SERVICE: &str = "visionclip-wake-listener.service";
 const GNOME_WM_KEYBINDINGS_SCHEMA: &str = "org.gnome.desktop.wm.keybindings";
+const GNOME_SHELL_KEYBINDINGS_SCHEMA: &str = "org.gnome.shell.keybindings";
 const GNOME_MEDIA_KEYS_SCHEMA: &str =
     "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-voice-agent/";
 const GNOME_CAPTURE_EXPLAIN_MEDIA_KEYS_SCHEMA: &str =
@@ -40,6 +46,8 @@ const GNOME_BOOK_READ_MEDIA_KEYS_SCHEMA: &str =
     "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-book-read/";
 const GNOME_BOOK_TRANSLATE_READ_MEDIA_KEYS_SCHEMA: &str =
     "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-book-translate-read/";
+const GNOME_SEARCH_OVERLAY_MEDIA_KEYS_SCHEMA: &str =
+    "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-search-overlay/";
 const STATUS_EXTENSION_UUID: &str = "visionclip-status@visionclip";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +122,9 @@ pub(crate) async fn run(config: &AppConfig) -> Result<bool> {
     checks.push(check_voice_recorder(&config.voice, command_available));
     checks.push(check_voice_source(&config.voice, command_available));
     checks.push(check_voice_transcriber(&config.voice, command_available));
+    checks.push(check_wake_listener_service(&config.voice));
+    checks.push(check_wake_playback_gate(&config.voice, command_available));
+    checks.push(check_speaker_profile(config));
     checks.push(check_tts_player(&config.audio, command_available));
     checks.push(check_tts_endpoint(&config.audio).await);
     checks.push(check_tts_voices(&config.audio).await);
@@ -122,6 +133,7 @@ pub(crate) async fn run(config: &AppConfig) -> Result<bool> {
     checks.push(check_shortcut_environment());
     checks.push(check_media_keys_service());
     checks.extend(check_gnome_shortcuts(&config.voice));
+    checks.extend(check_search_overlay_shortcut(&config.ui.search_overlay));
 
     println!("VisionClip doctor");
     for check in &checks {
@@ -592,6 +604,105 @@ fn check_voice_transcriber(
     check_command("stt", &command, command_exists)
 }
 
+fn check_wake_listener_service(voice: &VoiceConfig) -> DoctorCheck {
+    if !voice.wake_word_enabled {
+        return DoctorCheck::ok("wake-listener", "wake word desabilitado na configuracao");
+    }
+
+    if !command_available("systemctl") {
+        return DoctorCheck::warn(
+            "wake-listener",
+            "systemctl ausente; listener de wake word nao verificado",
+        );
+    }
+
+    let status = Command::new("systemctl")
+        .args(["--user", "is-active", WAKE_LISTENER_SERVICE])
+        .output()
+        .ok()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string());
+
+    match status.as_deref() {
+        Some("active") => DoctorCheck::ok("wake-listener", "listener local de wake word ativo"),
+        Some(value) if !value.is_empty() => DoctorCheck::fail(
+            "wake-listener",
+            format!("wake word habilitado, mas {WAKE_LISTENER_SERVICE} esta {value}"),
+        ),
+        _ => DoctorCheck::warn(
+            "wake-listener",
+            format!("wake word habilitado, mas nao foi possivel ler {WAKE_LISTENER_SERVICE}"),
+        ),
+    }
+}
+
+fn check_wake_playback_gate(
+    voice: &VoiceConfig,
+    command_exists: impl Fn(&str) -> bool,
+) -> DoctorCheck {
+    if !voice.wake_word_enabled {
+        return DoctorCheck::ok(
+            "wake-playback-gate",
+            "wake word desabilitado; gate de playback inativo",
+        );
+    }
+
+    if !voice.wake_block_during_playback {
+        return DoctorCheck::warn(
+            "wake-playback-gate",
+            "wake word habilitado sem bloqueio durante playback; YouTube/musica podem ativar o agente",
+        );
+    }
+
+    if command_exists("pactl") {
+        return DoctorCheck::ok(
+            "wake-playback-gate",
+            "bloqueio de wake word durante playback habilitado via pactl",
+        );
+    }
+
+    DoctorCheck::fail(
+        "wake-playback-gate",
+        "wake word exige pactl para bloquear ativacao por YouTube/musica; instale pulseaudio-utils/libpulse",
+    )
+}
+
+fn check_speaker_profile(config: &AppConfig) -> DoctorCheck {
+    let Ok(path) = config.voice_profile_path() else {
+        return DoctorCheck::warn(
+            "speaker-profile",
+            "nao foi possivel resolver o caminho do perfil de voz",
+        );
+    };
+
+    if !config.voice.speaker_verification_enabled {
+        return DoctorCheck::ok(
+            "speaker-profile",
+            format!(
+                "verificacao de locutor desabilitada; perfil esperado em {}",
+                path.display()
+            ),
+        );
+    }
+
+    if path.exists() {
+        DoctorCheck::ok(
+            "speaker-profile",
+            format!(
+                "verificacao de locutor habilitada com perfil local em {}",
+                path.display()
+            ),
+        )
+    } else {
+        DoctorCheck::warn(
+            "speaker-profile",
+            format!(
+                "verificacao de locutor habilitada, mas perfil ausente; rode `visionclip voice enroll --samples {}`",
+                config.voice.speaker_verification_min_samples
+            ),
+        )
+    }
+}
+
 fn check_tts_player(audio: &AudioConfig, command_exists: impl Fn(&str) -> bool) -> DoctorCheck {
     if !audio.enabled {
         return DoctorCheck::warn("tts", "audio/TTS desabilitado na configuracao");
@@ -848,8 +959,67 @@ fn check_gnome_shortcuts(voice: &VoiceConfig) -> Vec<DoctorCheck> {
         ));
     }
     checks.push(check_gnome_shortcut_conflicts(expected_binding.as_str()));
+    checks.push(check_gnome_shell_shortcut_conflict(
+        "gnome-conflict1",
+        CAPTURE_EXPLAIN_SHORTCUT,
+        "switch-to-application-1",
+    ));
+    checks.push(check_gnome_shell_shortcut_conflict(
+        "gnome-conflict2",
+        CAPTURE_TRANSLATE_SHORTCUT,
+        "switch-to-application-2",
+    ));
+    checks.push(check_gnome_shell_shortcut_conflict(
+        "gnome-conflict3",
+        VOICE_SEARCH_SHORTCUT,
+        "switch-to-application-3",
+    ));
+    checks.push(check_gnome_shell_shortcut_conflict(
+        "gnome-conflict4",
+        BOOK_READ_SHORTCUT,
+        "switch-to-application-4",
+    ));
+    checks.push(check_gnome_shell_shortcut_conflict(
+        "gnome-conflict5",
+        BOOK_TRANSLATE_READ_SHORTCUT,
+        "switch-to-application-5",
+    ));
 
     checks
+}
+
+fn check_search_overlay_shortcut(search_overlay: &SearchOverlayConfig) -> Vec<DoctorCheck> {
+    if !search_overlay.enabled {
+        return vec![DoctorCheck::ok(
+            "search-key",
+            "Search Overlay desativado em ui.search_overlay.enabled",
+        )];
+    }
+    if !command_available("gsettings") {
+        return vec![DoctorCheck::warn(
+            "search-key",
+            "gsettings ausente; atalho do Search Overlay nao verificado",
+        )];
+    }
+
+    let expected_binding = normalize_accelerator_aliases(search_overlay.shortcut.trim());
+    vec![
+        check_gnome_shortcut_binding(
+            "search-key",
+            GNOME_SEARCH_OVERLAY_MEDIA_KEYS_SCHEMA,
+            expected_binding.as_str(),
+        ),
+        check_gnome_shortcut_command(
+            "search-cmd",
+            GNOME_SEARCH_OVERLAY_MEDIA_KEYS_SCHEMA,
+            SEARCH_OVERLAY_WRAPPER_NAME,
+        ),
+        check_gnome_shortcut_conflicts_for_binding(
+            "search-conflict",
+            expected_binding.as_str(),
+            &["activate-window-menu"],
+        ),
+    ]
 }
 
 fn check_gnome_shortcut_binding(
@@ -901,8 +1071,20 @@ fn check_gnome_shortcut_command(
 }
 
 fn check_gnome_shortcut_conflicts(expected_binding: &str) -> DoctorCheck {
+    check_gnome_shortcut_conflicts_for_binding(
+        "gnome-conflict",
+        expected_binding,
+        &["switch-input-source", "switch-input-source-backward"],
+    )
+}
+
+fn check_gnome_shortcut_conflicts_for_binding(
+    check_name: &'static str,
+    expected_binding: &str,
+    wm_keys: &[&str],
+) -> DoctorCheck {
     let mut conflicts = Vec::new();
-    for key in ["switch-input-source", "switch-input-source-backward"] {
+    for key in wm_keys {
         let Ok(value) = gsettings_get(GNOME_WM_KEYBINDINGS_SCHEMA, key) else {
             continue;
         };
@@ -913,15 +1095,51 @@ fn check_gnome_shortcut_conflicts(expected_binding: &str) -> DoctorCheck {
 
     if conflicts.is_empty() {
         DoctorCheck::ok(
-            "gnome-conflict",
-            "sem conflito GNOME para o atalho principal",
+            check_name,
+            format!(
+                "sem conflito GNOME para {}",
+                expected_binding.replace("<Mod4>", "<Super>")
+            ),
         )
     } else {
         DoctorCheck::warn(
-            "gnome-conflict",
+            check_name,
             format!(
-                "atalho principal tambem esta reservado pelo GNOME: {}; rode scripts/install_gnome_voice_shortcut.sh",
+                "atalho tambem esta reservado pelo GNOME: {}; rode scripts/install_gnome_voice_shortcut.sh",
                 conflicts.join(", ")
+            ),
+        )
+    }
+}
+
+fn check_gnome_shell_shortcut_conflict(
+    check_name: &'static str,
+    expected_binding: &str,
+    shell_key: &str,
+) -> DoctorCheck {
+    let Ok(value) = gsettings_get(GNOME_SHELL_KEYBINDINGS_SCHEMA, shell_key) else {
+        return DoctorCheck::ok(
+            check_name,
+            format!(
+                "sem conflito GNOME Shell para {}",
+                expected_binding.replace("<Mod4>", "<Super>")
+            ),
+        );
+    };
+
+    if gsettings_accelerator_list_contains(&value, expected_binding) {
+        DoctorCheck::warn(
+            check_name,
+            format!(
+                "atalho tambem esta reservado pelo GNOME Shell: {shell_key}={value}; rode scripts/install_gnome_voice_shortcut.sh"
+            ),
+        )
+    } else {
+        DoctorCheck::ok(
+            check_name,
+            format!(
+                "sem conflito GNOME Shell para {}",
+                expected_binding.replace("<Mod4>", "<Super>")
             ),
         )
     }
@@ -1075,11 +1293,18 @@ mod tests {
     fn voice_config() -> VoiceConfig {
         VoiceConfig {
             enabled: true,
+            wake_word_enabled: false,
+            wake_block_during_playback: true,
+            speaker_verification_enabled: false,
+            speaker_verification_threshold: 0.72,
+            speaker_verification_min_samples: 3,
             backend: "auto".into(),
             target: String::new(),
             overlay_enabled: true,
             shortcut: "<Super>space".into(),
             record_duration_ms: 4000,
+            wake_record_duration_ms: 3_200,
+            wake_idle_sleep_ms: 250,
             sample_rate_hz: 16000,
             channels: 1,
             record_command: String::new(),
@@ -1162,6 +1387,38 @@ mod tests {
             command == "/opt/visionclip/venv/bin/python"
         });
         assert_eq!(check.status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn wake_playback_gate_requires_pactl_when_enabled() {
+        let mut voice = voice_config();
+        voice.wake_word_enabled = true;
+
+        let check = check_wake_playback_gate(&voice, |_| false);
+
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert!(check.message.contains("pactl"));
+    }
+
+    #[test]
+    fn wake_playback_gate_accepts_pactl_when_enabled() {
+        let mut voice = voice_config();
+        voice.wake_word_enabled = true;
+
+        let check = check_wake_playback_gate(&voice, |command| command == "pactl");
+
+        assert_eq!(check.status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn wake_playback_gate_warns_when_disabled() {
+        let mut voice = voice_config();
+        voice.wake_word_enabled = true;
+        voice.wake_block_during_playback = false;
+
+        let check = check_wake_playback_gate(&voice, |_| true);
+
+        assert_eq!(check.status, CheckStatus::Warn);
     }
 
     #[test]

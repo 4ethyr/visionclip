@@ -32,8 +32,9 @@ pub use ipc::{
     decode_message_payload, encode_message_payload, read_message, read_message_payload,
     write_message, Action, ApplicationLaunchJob, CaptureJob, DocumentAskJob, DocumentControlJob,
     DocumentControlKind, DocumentIngestJob, DocumentOpenJob, DocumentReadJob, DocumentSummarizeJob,
-    DocumentTranslateJob, HealthCheckJob, JobResult, SessionType, UrlOpenJob, VisionRequest,
-    VoiceSearchJob,
+    DocumentTranslateJob, HealthCheckJob, JobResult, OpenAction, SearchControlRequest,
+    SearchDiagnostics, SearchHit, SearchHitSource, SearchMode, SearchOpenRequest, SearchRequest,
+    SearchResponse, SessionType, UrlOpenJob, VisionRequest, VoiceSearchJob,
 };
 pub use language::{normalize_latin_for_language, AssistantLanguage};
 pub use portal::{

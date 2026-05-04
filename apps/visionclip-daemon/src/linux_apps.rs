@@ -306,11 +306,13 @@ fn resolve_desktop_app(query: &str, apps: &[DesktopApp]) -> Option<DesktopApp> {
     apps.iter()
         .filter_map(|app| {
             let score = score_app(&query_norm, &aliases, app);
-            (score > 0).then_some((score, app.clone()))
+            (score >= MIN_DESKTOP_APP_SCORE).then_some((score, app.clone()))
         })
         .max_by_key(|(score, _)| *score)
         .map(|(_, app)| app)
 }
+
+const MIN_DESKTOP_APP_SCORE: u16 = 55;
 
 fn app_aliases(query_norm: &str) -> Vec<String> {
     let mut aliases = vec![query_norm.to_string()];
@@ -391,6 +393,8 @@ fn match_field(query: &str, field: &str, exact_score: u16) -> u16 {
         0
     } else if field == query {
         exact_score
+    } else if query.chars().count() <= 2 {
+        0
     } else if field.starts_with(query) {
         exact_score.saturating_sub(12)
     } else if field.contains(query) {
@@ -547,6 +551,31 @@ mod tests {
                 .expect("settings")
                 .desktop_id,
             "org.gnome.Settings"
+        );
+    }
+
+    #[test]
+    fn rejects_low_confidence_desktop_app_matches() {
+        let apps = vec![parse_desktop_app(
+            Path::new("/usr/share/applications/netmask.desktop"),
+            r#"
+            [Desktop Entry]
+            Type=Application
+            Name=Netmask
+            Exec=netmask
+            Keywords=network;internet;
+            Categories=Network;
+            "#,
+        )
+        .unwrap()];
+
+        assert!(resolve_desktop_app("te mną", &apps).is_none());
+        assert!(resolve_desktop_app("te", &apps).is_none());
+        assert_eq!(
+            resolve_desktop_app("netmask", &apps)
+                .expect("exact app")
+                .desktop_id,
+            "netmask"
         );
     }
 
