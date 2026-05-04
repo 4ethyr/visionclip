@@ -175,18 +175,20 @@ risco >= 3.
 - Prompts de pergunta e resumo de documentos foram parametrizados por idioma.
 - Prompts de RAG agora instruem o modelo a tratar trechos recuperados como dados
   não confiáveis e a não seguir comandos embutidos nesses trechos.
+- A seleção de contexto de documentos agora usa recuperação híbrida quando
+  embeddings existem: ranking semântico e ranking lexical são combinados com
+  Reciprocal Rank Fusion antes do corte de contexto.
 - Foram adicionados testes unitários para garantir idioma parametrizado e guarda
-  de grounding.
+  de grounding e cobertura lexical+semântica no RAG híbrido.
 
 ## Próximas melhorias recomendadas
 
-1. RAG híbrido com RRF: unir lexical e embeddings antes de selecionar contexto.
-2. Citações estruturadas em `JobResult` para respostas de documentos.
-3. `DocumentAskJob`/`DocumentSummarizeJob` com `input_language` opcional em uma
+1. Citações estruturadas em `JobResult` para respostas de documentos.
+2. `DocumentAskJob`/`DocumentSummarizeJob` com `input_language` opcional em uma
    evolução compatível do IPC.
-4. OCR layout-aware com regiões, confiança e bboxes.
-5. Pós-processador ASR guiado por índice local de apps/sites/documentos.
-6. Eval set multilíngue: comandos de voz curtos, comandos code-switched,
+3. OCR layout-aware com regiões, confiança e bboxes.
+4. Pós-processador ASR guiado por índice local de apps/sites/documentos.
+5. Eval set multilíngue: comandos de voz curtos, comandos code-switched,
    perguntas RAG e OCR de tela.
-7. AudioRuntime controlável para pausar/retomar leitura traduzida com baixa
+6. AudioRuntime controlável para pausar/retomar leitura traduzida com baixa
    latência.
