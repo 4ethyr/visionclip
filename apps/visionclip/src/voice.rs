@@ -149,6 +149,7 @@ async fn capture_and_transcribe(config: &VoiceConfig) -> Result<String> {
     let transcript_path = temp_voice_path("txt");
 
     let _overlay = start_listening_overlay(config);
+    interrupt_active_tts_playback().await;
     record_voice_sample(config, &wav_path).await?;
     let transcript = transcribe_voice_sample(config, &wav_path, &transcript_path).await?;
 
@@ -156,6 +157,66 @@ async fn capture_and_transcribe(config: &VoiceConfig) -> Result<String> {
     let _ = fs::remove_file(&transcript_path);
 
     Ok(transcript)
+}
+
+async fn interrupt_active_tts_playback() {
+    let Ok(output) = Command::new("pgrep")
+        .args(["-af", "visionclip-.*\\.wav"])
+        .stdin(Stdio::null())
+        .output()
+        .await
+    else {
+        return;
+    };
+
+    if !output.status.success() {
+        return;
+    }
+
+    let current_pid = std::process::id();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut interrupted = 0_u32;
+    for line in stdout.lines() {
+        let Some((pid, command_line)) = line.split_once(' ') else {
+            continue;
+        };
+        let Ok(pid) = pid.parse::<u32>() else {
+            continue;
+        };
+        if pid == current_pid || !is_visionclip_tts_player_process(command_line) {
+            continue;
+        }
+
+        let status = Command::new("kill")
+            .arg("-INT")
+            .arg(pid.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+        if status.is_ok() {
+            interrupted += 1;
+        }
+    }
+
+    if interrupted > 0 {
+        info!(
+            interrupted,
+            "interrupted active VisionClip TTS playback before voice capture"
+        );
+    }
+}
+
+fn is_visionclip_tts_player_process(command_line: &str) -> bool {
+    let normalized = command_line.to_ascii_lowercase();
+    let is_player = normalized.contains("pw-play ")
+        || normalized.ends_with("pw-play")
+        || normalized.contains("paplay ")
+        || normalized.ends_with("paplay")
+        || normalized.contains("aplay ")
+        || normalized.ends_with("aplay");
+    is_player && normalized.contains("visionclip-") && normalized.contains(".wav")
 }
 
 fn start_listening_overlay(config: &VoiceConfig) -> Option<OverlayGuard> {
@@ -603,6 +664,7 @@ fn resolve_search_query_from_transcript(transcript: &str) -> Result<String> {
     }
 
     let stripped = strip_search_prefix(raw);
+    let has_explicit_search_prefix = stripped.trim() != raw.trim();
     let query = if stripped.trim().is_empty() {
         if normalized_is_search_command_only(&normalized) {
             anyhow::bail!("voice search query is empty");
@@ -621,7 +683,60 @@ fn resolve_search_query_from_transcript(transcript: &str) -> Result<String> {
         anyhow::bail!("voice search query is empty");
     }
 
+    reject_low_information_implicit_search(raw, &query, has_explicit_search_prefix)?;
+
     Ok(query)
+}
+
+fn reject_low_information_implicit_search(
+    transcript: &str,
+    query: &str,
+    has_explicit_search_prefix: bool,
+) -> Result<()> {
+    if has_explicit_search_prefix {
+        return Ok(());
+    }
+
+    if !is_low_information_voice_text(transcript) && !is_low_information_voice_text(query) {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "voice transcript `{}` is too short or looks like ASR filler; not opening a browser. Try a complete command such as `abra o livro Programming TypeScript`, `open the terminal`, or `pesquise Rust async`",
+        transcript.trim()
+    )
+}
+
+fn is_low_information_voice_text(value: &str) -> bool {
+    let normalized = normalize_transcript(value);
+    if normalized.is_empty() {
+        return true;
+    }
+
+    let compact = compact_normalized(&normalized);
+    matches!(
+        compact.as_str(),
+        "a" | "e"
+            | "eh"
+            | "ah"
+            | "uh"
+            | "um"
+            | "huh"
+            | "hum"
+            | "hmm"
+            | "ok"
+            | "okay"
+            | "u"
+            | "you"
+            | "youto"
+            | "youtoo"
+            | "youtwo"
+            | "thankyou"
+            | "thanks"
+            | "obrigado"
+            | "obrigada"
+            | "valeu"
+    )
 }
 
 fn resolve_open_document_query_from_transcript(transcript: &str) -> Option<String> {
@@ -1804,6 +1919,20 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_visionclip_tts_player_processes() {
+        assert!(is_visionclip_tts_player_process(
+            "pw-play /run/user/1000/visionclip-123.wav"
+        ));
+        assert!(is_visionclip_tts_player_process(
+            "/usr/bin/paplay /tmp/visionclip-abc.wav"
+        ));
+        assert!(!is_visionclip_tts_player_process(
+            "pw-play /home/user/music/song.wav"
+        ));
+        assert!(!is_visionclip_tts_player_process("grep visionclip-123.wav"));
+    }
+
+    #[test]
     fn empty_transcript_message_includes_stderr_diagnostics() {
         let message = empty_transcript_message(&[TranscriptionDiagnostic {
             attempt: "primary",
@@ -1865,6 +1994,21 @@ mod tests {
     fn keeps_plain_voice_search_text_when_no_prefix_is_present() {
         let query = resolve_search_query_from_transcript("melhores cafeterias em Recife").unwrap();
         assert_eq!(query, "melhores cafeterias em Recife");
+    }
+
+    #[test]
+    fn rejects_low_information_implicit_voice_search_text() {
+        let error = resolve_search_query_from_transcript("You").unwrap_err();
+        assert!(error.to_string().contains("ASR filler"));
+
+        let error = resolve_search_query_from_transcript("you too").unwrap_err();
+        assert!(error.to_string().contains("not opening a browser"));
+    }
+
+    #[test]
+    fn allows_low_information_text_with_explicit_search_prefix() {
+        let query = resolve_search_query_from_transcript("search for you").unwrap();
+        assert_eq!(query, "you");
     }
 
     #[test]
@@ -2110,5 +2254,16 @@ mod tests {
             }
             other => panic!("unexpected voice agent command: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn voice_agent_rejects_low_information_fallback_search() {
+        let config = test_voice_config("");
+
+        let error = resolve_voice_agent_command(&config, Some("You"))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("ASR filler"));
     }
 }

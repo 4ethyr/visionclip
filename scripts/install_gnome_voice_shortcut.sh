@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SHORTCUT_NAME="${VISIONCLIP_VOICE_SHORTCUT_NAME:-VisionClip Voice Search}"
+SHORTCUT_NAME="${VISIONCLIP_VOICE_SHORTCUT_NAME:-VisionClip Voice Agent}"
 SHORTCUT_BINDING="${1:-${VISIONCLIP_VOICE_SHORTCUT:-<Super>F12}}"
 SECONDARY_SHORTCUT_BINDING="${VISIONCLIP_VOICE_SECONDARY_SHORTCUT:-<Super><Shift>F12}"
 TERTIARY_SHORTCUT_BINDING="${VISIONCLIP_VOICE_TERTIARY_SHORTCUT:-<Super><Alt>v}"
@@ -101,11 +101,36 @@ done
 
 export PATH="\${PATH:-\${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin}"
 
+interrupt_visionclip_tts() {
+    if ! command -v pgrep >/dev/null 2>&1 || ! command -v kill >/dev/null 2>&1; then
+        return
+    fi
+
+    local line pid command_line
+    while IFS= read -r line; do
+        pid="\${line%% *}"
+        command_line="\${line#* }"
+        case "\$pid" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        if [[ "\$pid" == "\$\$" ]]; then
+            continue
+        fi
+        case "\$command_line" in
+            *pw-play*"visionclip-"*.wav*|*paplay*"visionclip-"*.wav*|*aplay*"visionclip-"*.wav*)
+                kill -INT "\$pid" 2>/dev/null || true
+                ;;
+        esac
+    done < <(pgrep -af 'visionclip-.*\\.wav' 2>/dev/null || true)
+}
+
 {
     printf '%s visionclip voice shortcut invoked\n' "\$(date --iso-8601=seconds)"
     printf 'binary=%s\n' "$VISIONCLIP_BIN"
     printf 'env DISPLAY=%s WAYLAND_DISPLAY=%s XDG_SESSION_TYPE=%s XDG_CURRENT_DESKTOP=%s XDG_RUNTIME_DIR=%s\n' "\${DISPLAY:-}" "\${WAYLAND_DISPLAY:-}" "\${XDG_SESSION_TYPE:-}" "\${XDG_CURRENT_DESKTOP:-}" "\${XDG_RUNTIME_DIR:-}"
 } >>"\$LOG_FILE"
+
+interrupt_visionclip_tts
 
 if [[ -t 1 || -t 2 ]]; then
     exec "$VISIONCLIP_BIN" --voice-agent --speak "\$@"
