@@ -9,11 +9,11 @@ VISIONCLIP_BIN="${VISIONCLIP_BIN:-${USER_BIN_DIR}/visionclip}"
 LOG_DIR="${HOME}/.local/state/visionclip"
 
 VOICE_AGENT_BINDING="${1:-${VISIONCLIP_VOICE_SHORTCUT:-<Super>space}}"
-CAPTURE_EXPLAIN_BINDING="${VISIONCLIP_CAPTURE_EXPLAIN_SHORTCUT:-<Super>1}"
-CAPTURE_TRANSLATE_BINDING="${VISIONCLIP_CAPTURE_TRANSLATE_SHORTCUT:-<Super>2}"
-VOICE_SEARCH_BINDING="${VISIONCLIP_VOICE_SEARCH_SHORTCUT:-<Super>3}"
-BOOK_READ_BINDING="${VISIONCLIP_BOOK_READ_SHORTCUT:-<Super>4}"
-BOOK_TRANSLATE_READ_BINDING="${VISIONCLIP_BOOK_TRANSLATE_READ_SHORTCUT:-<Super>5}"
+CAPTURE_EXPLAIN_BINDING="${VISIONCLIP_CAPTURE_EXPLAIN_SHORTCUT:-<Alt>1}"
+CAPTURE_TRANSLATE_BINDING="${VISIONCLIP_CAPTURE_TRANSLATE_SHORTCUT:-<Alt>2}"
+VOICE_SEARCH_BINDING="${VISIONCLIP_VOICE_SEARCH_SHORTCUT:-<Alt>3}"
+BOOK_READ_BINDING="${VISIONCLIP_BOOK_READ_SHORTCUT:-<Alt>4}"
+BOOK_TRANSLATE_READ_BINDING="${VISIONCLIP_BOOK_TRANSLATE_READ_SHORTCUT:-<Alt>5}"
 SEARCH_OVERLAY_BINDING="${VISIONCLIP_SEARCH_OVERLAY_SHORTCUT:-<Alt>space}"
 
 OLD_KEYBINDING_PATHS=(
@@ -42,6 +42,21 @@ normalize_binding() {
         "alt+space"|"option+space")
             echo "<Alt>space"
             ;;
+        "alt+1"|"option+1")
+            echo "<Alt>1"
+            ;;
+        "alt+2"|"option+2")
+            echo "<Alt>2"
+            ;;
+        "alt+3"|"option+3")
+            echo "<Alt>3"
+            ;;
+        "alt+4"|"option+4")
+            echo "<Alt>4"
+            ;;
+        "alt+5"|"option+5")
+            echo "<Alt>5"
+            ;;
         "windows+1"|"win+1"|"super+1"|"meta+1")
             echo "<Mod4>1"
             ;;
@@ -58,19 +73,19 @@ normalize_binding() {
             echo "<Mod4>5"
             ;;
         "windows+space+1"|"win+space+1"|"super+space+1"|"meta+space+1")
-            echo "<Mod4>1"
+            echo "<Alt>1"
             ;;
         "windows+space+2"|"win+space+2"|"super+space+2"|"meta+space+2")
-            echo "<Mod4>2"
+            echo "<Alt>2"
             ;;
         "windows+space+3"|"win+space+3"|"super+space+3"|"meta+space+3")
-            echo "<Mod4>3"
+            echo "<Alt>3"
             ;;
         "windows+space+4"|"win+space+4"|"super+space+4"|"meta+space+4")
-            echo "<Mod4>4"
+            echo "<Alt>4"
             ;;
         "windows+space+5"|"win+space+5"|"super+space+5"|"meta+space+5")
-            echo "<Mod4>5"
+            echo "<Alt>5"
             ;;
         *)
             echo "${value//<Super>/<Mod4>}"
@@ -135,6 +150,9 @@ filtered = [
     value for value in values
     if str(value).replace("<Super>", "<Mod4>").lower() not in remove
 ]
+if filtered == values:
+    print(sys.argv[1])
+    raise SystemExit
 print("[" + ", ".join(repr(value) for value in filtered) + "]")
 PY
 }
@@ -267,7 +285,18 @@ clear_conflicting_gnome_bindings() {
     clear_accelerators_from_schema_keys "$WM_KEYBINDINGS_SCHEMA" \
         switch-input-source \
         switch-input-source-backward \
-        activate-window-menu
+        activate-window-menu \
+        panel-main-menu \
+        switch-to-workspace-1 \
+        switch-to-workspace-2 \
+        switch-to-workspace-3 \
+        switch-to-workspace-4 \
+        switch-to-workspace-5 \
+        move-to-workspace-1 \
+        move-to-workspace-2 \
+        move-to-workspace-3 \
+        move-to-workspace-4 \
+        move-to-workspace-5
 
     clear_accelerators_from_schema_keys "$SHELL_KEYBINDINGS_SCHEMA" \
         switch-to-application-1 \
@@ -289,8 +318,7 @@ fi
 
 if [[ "${VISIONCLIP_ALLOW_CHORD_HINT:-1}" == "1" ]]; then
     echo "Nota: GNOME custom shortcuts nao suportam chording real como Windows+Space+1."
-    echo "Instalando Windows+Space para voz, Alt+Space para busca e Windows+1..5 para os modos."
-    echo "Os atalhos nativos do GNOME Shell Super+1..5 serao liberados para o VisionClip."
+    echo "Instalando Windows+Space para voz, Alt+Space para busca e Alt+1..5 para os modos."
 fi
 
 VOICE_AGENT_WRAPPER="${USER_BIN_DIR}/visionclip-voice-agent"
