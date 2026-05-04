@@ -107,12 +107,13 @@ Se o daemon estiver ativo, teste sem microfone:
 
 ```bash
 visionclip --voice-agent-dry-run --voice-transcript 'Por favor, abra o terminal.'
+visionclip --voice-agent-dry-run --voice-transcript 'Key, quem foi Steve Jobs?'
 visionclip --voice-agent-dry-run --voice-transcript 'Open the book, Programming TypeScript.'
 visionclip --voice-agent-dry-run --voice-transcript 'Pesquise, por Rust async no Linux'
-visionclip --voice-agent --voice-transcript 'Abra o terminal' --speak
-visionclip --voice-agent --voice-transcript 'Open the book Programming TypeScript' --speak
-visionclip --voice-agent --voice-transcript 'abra o livro Grey Hat Python' --speak
-visionclip --voice-agent --voice-transcript 'O que é JavaScript?' --speak
+visionclip --voice-agent --voice-transcript 'Key, Abra o terminal' --speak
+visionclip --voice-agent --voice-transcript 'Key, Open the book Programming TypeScript' --speak
+visionclip --voice-agent --voice-transcript 'Key, abra o livro Grey Hat Python' --speak
+visionclip --voice-agent --voice-transcript 'Key, O que é JavaScript?' --speak
 ```
 
 Teste captura/OCR:
@@ -131,19 +132,19 @@ Comandos comuns:
 ```bash
 # Abrir apps e sites
 visionclip --voice-agent-dry-run --voice-transcript 'Abra o terminal'
-visionclip --voice-agent --voice-transcript 'Abra o terminal' --speak
+visionclip --voice-agent --voice-transcript 'Key, Abra o terminal' --speak
 visionclip --voice-agent --voice-transcript 'Open YouTube' --speak
 visionclip --open-app terminal
 
 # Buscar na web
 visionclip --voice-agent-dry-run --voice-transcript 'Pesquise, por Rust async no Linux'
 visionclip --voice-agent --voice-transcript 'Pesquise Rust async no Linux' --speak
-visionclip --voice-agent --voice-transcript 'Who founded Apple?' --speak
+visionclip --voice-agent --voice-transcript 'Key, who founded Apple?' --speak
 
 # Abrir documentos por voz
 visionclip --voice-agent-dry-run --voice-transcript 'Open the book, Programming TypeScript.'
 visionclip --voice-agent --voice-transcript 'abra o livro Programming TypeScript' --speak
-visionclip --voice-agent --voice-transcript 'Open my book Grey Hat Python' --speak
+visionclip --voice-agent --voice-transcript 'Key, Open my book Grey Hat Python' --speak
 
 # Captura de tela
 visionclip --action explain --speak
@@ -151,7 +152,20 @@ visionclip --action translate_ptbr --speak
 visionclip --action extract_code
 ```
 
-O atalho GNOME padrão instalado pelo script é `Super+F12`, com fallbacks `Super+Shift+F12` e `Super+Alt+V`. Ele chama `visionclip --voice-agent --speak`, não o modo de busca pura. Os logs do atalho ficam em:
+O agente também aceita o prefixo falado `Key` antes do comando, com som de `K` em inglês: `Key, quem foi Steve Jobs?`, `Key, abra o terminal` ou `Key, abra o livro Black Hat Python`.
+
+Os atalhos GNOME padrão instalados pelo script são:
+
+```text
+Super+Space -> agente de voz
+Super+1     -> captura + explain
+Super+2     -> captura + translate_ptbr
+Super+3     -> pesquisa por voz
+Super+4     -> modo de voz para leitura de livro
+Super+5     -> modo de voz para leitura/tradução de livro
+```
+
+O GNOME custom-keybindings não suporta chording real `Super+Space+1`; por isso o instalador usa `Super+1..5` para os modos derivados. Os logs dos atalhos ficam em:
 
 ```text
 ~/.local/state/visionclip/voice-shortcut.log
@@ -231,7 +245,7 @@ http://127.0.0.1:5000
 Vozes baixadas por padrão:
 
 ```text
-pt_BR-faber-medium
+dii_pt-BR
 en_US-lessac-medium
 es_ES-sharvard-medium
 zh_CN-huayan-medium
@@ -239,7 +253,7 @@ ru_RU-ruslan-medium
 hi_IN-pratham-medium
 ```
 
-O daemon escolhe a voz pela língua detectada do comando em `OpenApplication`, `OpenUrl`, `OpenDocument` e `SearchWeb`; para documentos, usa o idioma alvo da leitura/tradução.
+`dii_pt-BR` é a voz feminina pt-BR customizada usada como padrão. O daemon escolhe a voz pela língua detectada do comando em `OpenApplication`, `OpenUrl`, `OpenDocument` e `SearchWeb`; para documentos, usa o idioma alvo da leitura/tradução.
 
 Japonês e coreano são aceitos como idiomas de comando/documento, mas você precisa instalar uma voz Piper compatível ou plugar outro provider TTS local para pronúncia natural nesses idiomas.
 
@@ -326,6 +340,7 @@ scripts/stop_local_stack.sh
 - Gemma 4 no Ollama: https://ollama.com/library/gemma4
 - Piper TTS: https://github.com/rhasspy/piper
 - Piper voices: https://huggingface.co/rhasspy/piper-voices
+- OpenVoiceOS pt-BR Dii Piper voice: https://huggingface.co/OpenVoiceOS/pipertts_pt-BR_dii
 
 ## Licença
 

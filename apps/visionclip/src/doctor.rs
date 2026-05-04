@@ -15,16 +15,31 @@ use visionclip_common::{
 };
 use which::which;
 
-const VOICE_WRAPPER_NAME: &str = "visionclip-voice-search";
-const SECONDARY_VOICE_SHORTCUT: &str = "<Super><Shift>F12";
+const VOICE_AGENT_WRAPPER_NAME: &str = "visionclip-voice-agent";
+const CAPTURE_EXPLAIN_WRAPPER_NAME: &str = "visionclip-capture-explain";
+const CAPTURE_TRANSLATE_WRAPPER_NAME: &str = "visionclip-capture-translate";
+const VOICE_SEARCH_WRAPPER_NAME: &str = "visionclip-voice-search";
+const BOOK_READ_WRAPPER_NAME: &str = "visionclip-book-read";
+const BOOK_TRANSLATE_READ_WRAPPER_NAME: &str = "visionclip-book-translate-read";
+const CAPTURE_EXPLAIN_SHORTCUT: &str = "<Super>1";
+const CAPTURE_TRANSLATE_SHORTCUT: &str = "<Super>2";
+const VOICE_SEARCH_SHORTCUT: &str = "<Super>3";
+const BOOK_READ_SHORTCUT: &str = "<Super>4";
+const BOOK_TRANSLATE_READ_SHORTCUT: &str = "<Super>5";
 const GNOME_MEDIA_KEYS_SERVICE: &str = "org.gnome.SettingsDaemon.MediaKeys.service";
+const GNOME_WM_KEYBINDINGS_SCHEMA: &str = "org.gnome.desktop.wm.keybindings";
 const GNOME_MEDIA_KEYS_SCHEMA: &str =
+    "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-voice-agent/";
+const GNOME_CAPTURE_EXPLAIN_MEDIA_KEYS_SCHEMA: &str =
+    "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-capture-explain/";
+const GNOME_CAPTURE_TRANSLATE_MEDIA_KEYS_SCHEMA: &str =
+    "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-capture-translate/";
+const GNOME_VOICE_SEARCH_MEDIA_KEYS_SCHEMA: &str =
     "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-voice-search/";
-const GNOME_SECONDARY_MEDIA_KEYS_SCHEMA: &str =
-    "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-voice-search-shift/";
-const TERTIARY_VOICE_SHORTCUT: &str = "<Super><Alt>v";
-const GNOME_TERTIARY_MEDIA_KEYS_SCHEMA: &str =
-    "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-voice-search-super-alt-v/";
+const GNOME_BOOK_READ_MEDIA_KEYS_SCHEMA: &str =
+    "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-book-read/";
+const GNOME_BOOK_TRANSLATE_READ_MEDIA_KEYS_SCHEMA: &str =
+    "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-book-translate-read/";
 const STATUS_EXTENSION_UUID: &str = "visionclip-status@visionclip";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -697,7 +712,7 @@ fn check_voice_wrapper() -> DoctorCheck {
     let path = PathBuf::from(home)
         .join(".local")
         .join("bin")
-        .join(VOICE_WRAPPER_NAME);
+        .join(VOICE_AGENT_WRAPPER_NAME);
 
     if is_executable_path(&path) {
         DoctorCheck::ok(
@@ -778,131 +793,138 @@ fn check_gnome_shortcuts(voice: &VoiceConfig) -> Vec<DoctorCheck> {
 
     let expected_binding = voice.shortcut.trim();
     let expected_binding = normalize_accelerator_aliases(expected_binding);
-    let mut checks = vec![
-        match gsettings_get(GNOME_MEDIA_KEYS_SCHEMA, "binding") {
-            Ok(value)
-                if normalize_accelerator_aliases(&strip_gsettings_quotes(&value))
-                    == expected_binding =>
-            {
-                DoctorCheck::ok(
-                    "gnome-key",
-                    format!("binding ativo: {}", strip_gsettings_quotes(&value)),
-                )
-            }
-            Ok(value) => DoctorCheck::warn(
-                "gnome-key",
-                format!(
-                    "binding atual {}, esperado {}",
-                    value.trim(),
-                    expected_binding.replace("<Mod4>", "<Super>")
-                ),
-            ),
-            Err(error) => DoctorCheck::warn("gnome-key", format!("binding nao lido: {error}")),
-        },
-        match gsettings_get(GNOME_MEDIA_KEYS_SCHEMA, "command") {
-            Ok(value) if strip_gsettings_quotes(&value).ends_with(VOICE_WRAPPER_NAME) => {
-                DoctorCheck::ok("gnome-cmd", format!("comando ativo: {}", value.trim()))
-            }
-            Ok(value) => DoctorCheck::warn(
-                "gnome-cmd",
-                format!(
-                    "comando atual nao aponta para {VOICE_WRAPPER_NAME}: {}",
-                    value.trim()
-                ),
-            ),
-            Err(error) => DoctorCheck::warn("gnome-cmd", format!("comando nao lido: {error}")),
-        },
+    let shortcuts = [
+        (
+            "gnome-key",
+            "gnome-cmd",
+            GNOME_MEDIA_KEYS_SCHEMA,
+            expected_binding.as_str(),
+            VOICE_AGENT_WRAPPER_NAME,
+        ),
+        (
+            "gnome-key1",
+            "gnome-cmd1",
+            GNOME_CAPTURE_EXPLAIN_MEDIA_KEYS_SCHEMA,
+            CAPTURE_EXPLAIN_SHORTCUT,
+            CAPTURE_EXPLAIN_WRAPPER_NAME,
+        ),
+        (
+            "gnome-key2",
+            "gnome-cmd2",
+            GNOME_CAPTURE_TRANSLATE_MEDIA_KEYS_SCHEMA,
+            CAPTURE_TRANSLATE_SHORTCUT,
+            CAPTURE_TRANSLATE_WRAPPER_NAME,
+        ),
+        (
+            "gnome-key3",
+            "gnome-cmd3",
+            GNOME_VOICE_SEARCH_MEDIA_KEYS_SCHEMA,
+            VOICE_SEARCH_SHORTCUT,
+            VOICE_SEARCH_WRAPPER_NAME,
+        ),
+        (
+            "gnome-key4",
+            "gnome-cmd4",
+            GNOME_BOOK_READ_MEDIA_KEYS_SCHEMA,
+            BOOK_READ_SHORTCUT,
+            BOOK_READ_WRAPPER_NAME,
+        ),
+        (
+            "gnome-key5",
+            "gnome-cmd5",
+            GNOME_BOOK_TRANSLATE_READ_MEDIA_KEYS_SCHEMA,
+            BOOK_TRANSLATE_READ_SHORTCUT,
+            BOOK_TRANSLATE_READ_WRAPPER_NAME,
+        ),
     ];
 
-    checks.push(
-        match gsettings_get(GNOME_SECONDARY_MEDIA_KEYS_SCHEMA, "binding") {
-            Ok(value)
-                if normalize_accelerator_aliases(&strip_gsettings_quotes(&value))
-                    == normalize_accelerator_aliases(SECONDARY_VOICE_SHORTCUT) =>
-            {
-                DoctorCheck::ok(
-                    "gnome-key2",
-                    format!("fallback ativo: {}", strip_gsettings_quotes(&value)),
-                )
-            }
-            Ok(value) => DoctorCheck::warn(
-                "gnome-key2",
-                format!(
-                    "fallback atual {}, esperado {}",
-                    value.trim(),
-                    SECONDARY_VOICE_SHORTCUT
-                ),
-            ),
-            Err(error) => DoctorCheck::warn("gnome-key2", format!("fallback nao lido: {error}")),
-        },
-    );
-
-    checks.push(
-        match gsettings_get(GNOME_SECONDARY_MEDIA_KEYS_SCHEMA, "command") {
-            Ok(value) if strip_gsettings_quotes(&value).ends_with(VOICE_WRAPPER_NAME) => {
-                DoctorCheck::ok("gnome-cmd2", format!("fallback comando: {}", value.trim()))
-            }
-            Ok(value) => DoctorCheck::warn(
-                "gnome-cmd2",
-                format!(
-                    "fallback nao aponta para {VOICE_WRAPPER_NAME}: {}",
-                    value.trim()
-                ),
-            ),
-            Err(error) => {
-                DoctorCheck::warn("gnome-cmd2", format!("fallback comando nao lido: {error}"))
-            }
-        },
-    );
-
-    checks.push(
-        match gsettings_get(GNOME_TERTIARY_MEDIA_KEYS_SCHEMA, "binding") {
-            Ok(value)
-                if normalize_accelerator_aliases(&strip_gsettings_quotes(&value))
-                    == normalize_accelerator_aliases(TERTIARY_VOICE_SHORTCUT) =>
-            {
-                DoctorCheck::ok(
-                    "gnome-key3",
-                    format!("fallback alt ativo: {}", strip_gsettings_quotes(&value)),
-                )
-            }
-            Ok(value) => DoctorCheck::warn(
-                "gnome-key3",
-                format!(
-                    "fallback alt atual {}, esperado {}",
-                    value.trim(),
-                    TERTIARY_VOICE_SHORTCUT
-                ),
-            ),
-            Err(error) => {
-                DoctorCheck::warn("gnome-key3", format!("fallback alt nao lido: {error}"))
-            }
-        },
-    );
-
-    checks.push(
-        match gsettings_get(GNOME_TERTIARY_MEDIA_KEYS_SCHEMA, "command") {
-            Ok(value) if strip_gsettings_quotes(&value).ends_with(VOICE_WRAPPER_NAME) => {
-                DoctorCheck::ok(
-                    "gnome-cmd3",
-                    format!("fallback alt comando: {}", value.trim()),
-                )
-            }
-            Ok(value) => DoctorCheck::warn(
-                "gnome-cmd3",
-                format!(
-                    "fallback alt nao aponta para {VOICE_WRAPPER_NAME}: {}",
-                    value.trim()
-                ),
-            ),
-            Err(error) => DoctorCheck::warn(
-                "gnome-cmd3",
-                format!("fallback alt comando nao lido: {error}"),
-            ),
-        },
-    );
+    let mut checks = Vec::new();
+    for (binding_check, command_check, schema, binding, wrapper_name) in shortcuts {
+        checks.push(check_gnome_shortcut_binding(binding_check, schema, binding));
+        checks.push(check_gnome_shortcut_command(
+            command_check,
+            schema,
+            wrapper_name,
+        ));
+    }
+    checks.push(check_gnome_shortcut_conflicts(expected_binding.as_str()));
 
     checks
+}
+
+fn check_gnome_shortcut_binding(
+    check_name: &'static str,
+    schema: &str,
+    expected_binding: &str,
+) -> DoctorCheck {
+    let expected_binding = normalize_accelerator_aliases(expected_binding);
+    match gsettings_get(schema, "binding") {
+        Ok(value)
+            if normalize_accelerator_aliases(&strip_gsettings_quotes(&value))
+                == expected_binding =>
+        {
+            DoctorCheck::ok(
+                check_name,
+                format!("binding ativo: {}", strip_gsettings_quotes(&value)),
+            )
+        }
+        Ok(value) => DoctorCheck::warn(
+            check_name,
+            format!(
+                "binding atual {}, esperado {}",
+                value.trim(),
+                expected_binding.replace("<Mod4>", "<Super>")
+            ),
+        ),
+        Err(error) => DoctorCheck::warn(check_name, format!("binding nao lido: {error}")),
+    }
+}
+
+fn check_gnome_shortcut_command(
+    check_name: &'static str,
+    schema: &str,
+    wrapper_name: &str,
+) -> DoctorCheck {
+    match gsettings_get(schema, "command") {
+        Ok(value) if strip_gsettings_quotes(&value).ends_with(wrapper_name) => {
+            DoctorCheck::ok(check_name, format!("comando ativo: {}", value.trim()))
+        }
+        Ok(value) => DoctorCheck::warn(
+            check_name,
+            format!(
+                "comando atual nao aponta para {wrapper_name}: {}",
+                value.trim()
+            ),
+        ),
+        Err(error) => DoctorCheck::warn(check_name, format!("comando nao lido: {error}")),
+    }
+}
+
+fn check_gnome_shortcut_conflicts(expected_binding: &str) -> DoctorCheck {
+    let mut conflicts = Vec::new();
+    for key in ["switch-input-source", "switch-input-source-backward"] {
+        let Ok(value) = gsettings_get(GNOME_WM_KEYBINDINGS_SCHEMA, key) else {
+            continue;
+        };
+        if gsettings_accelerator_list_contains(&value, expected_binding) {
+            conflicts.push(format!("{key}={value}"));
+        }
+    }
+
+    if conflicts.is_empty() {
+        DoctorCheck::ok(
+            "gnome-conflict",
+            "sem conflito GNOME para o atalho principal",
+        )
+    } else {
+        DoctorCheck::warn(
+            "gnome-conflict",
+            format!(
+                "atalho principal tambem esta reservado pelo GNOME: {}; rode scripts/install_gnome_voice_shortcut.sh",
+                conflicts.join(", ")
+            ),
+        )
+    }
 }
 
 fn check_media_keys_service() -> DoctorCheck {
@@ -1002,6 +1024,14 @@ fn normalize_accelerator_aliases(input: &str) -> String {
     input.trim().replace("<Super>", "<Mod4>")
 }
 
+fn gsettings_accelerator_list_contains(value: &str, expected: &str) -> bool {
+    let expected = normalize_accelerator_aliases(expected);
+    value.split(['\'', '"']).any(|part| {
+        let normalized = normalize_accelerator_aliases(part.trim());
+        !normalized.is_empty() && normalized == expected
+    })
+}
+
 fn first_command_token(command: &str) -> Option<String> {
     let trimmed = command.trim();
     if trimmed.is_empty() {
@@ -1048,7 +1078,7 @@ mod tests {
             backend: "auto".into(),
             target: String::new(),
             overlay_enabled: true,
-            shortcut: "<Super><Alt>F12".into(),
+            shortcut: "<Super>space".into(),
             record_duration_ms: 4000,
             sample_rate_hz: 16000,
             channels: 1,
@@ -1251,18 +1281,24 @@ mod tests {
 
     #[test]
     fn gsettings_quote_stripping_handles_single_quotes() {
-        assert_eq!(
-            strip_gsettings_quotes("'<Super><Shift>F12'"),
-            "<Super><Shift>F12"
-        );
+        assert_eq!(strip_gsettings_quotes("'<Super>space'"), "<Super>space");
     }
 
     #[test]
     fn accelerator_aliases_treat_super_as_mod4() {
-        assert_eq!(
-            normalize_accelerator_aliases("<Super><Shift>F12"),
-            "<Mod4><Shift>F12"
-        );
+        assert_eq!(normalize_accelerator_aliases("<Super>space"), "<Mod4>space");
+    }
+
+    #[test]
+    fn accelerator_list_detects_gnome_shortcut_conflict() {
+        assert!(gsettings_accelerator_list_contains(
+            "['<Super>space', 'XF86Keyboard']",
+            "<Mod4>space"
+        ));
+        assert!(!gsettings_accelerator_list_contains(
+            "['<Shift><Super>space', 'XF86Keyboard']",
+            "<Mod4>space"
+        ));
     }
 
     #[test]

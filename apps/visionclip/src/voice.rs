@@ -67,6 +67,7 @@ pub async fn resolve_voice_request(
         } else {
             capture_and_transcribe(config).await?
         };
+    let transcript = normalize_voice_agent_invocation(&transcript);
 
     let action = resolve_action_from_transcript(&transcript)?;
     let language = AssistantLanguage::detect(&transcript);
@@ -87,6 +88,7 @@ pub async fn resolve_voice_search(
         } else {
             capture_and_transcribe(config).await?
         };
+    let transcript = normalize_voice_agent_invocation(&transcript);
     let language = AssistantLanguage::detect(&transcript);
     let query = resolve_search_query_from_transcript(&transcript)?;
     Ok(VoiceSearch {
@@ -106,6 +108,7 @@ pub async fn resolve_voice_agent_command(
         } else {
             capture_and_transcribe(config).await?
         };
+    let transcript = normalize_voice_agent_invocation(&transcript);
     let language = AssistantLanguage::detect(&transcript);
 
     if let Some(query) = resolve_open_document_query_from_transcript(&transcript) {
@@ -160,6 +163,38 @@ async fn capture_and_transcribe(config: &VoiceConfig) -> Result<String> {
     let _ = fs::remove_file(&transcript_path);
 
     Ok(transcript)
+}
+
+fn normalize_voice_agent_invocation(transcript: &str) -> String {
+    strip_agent_wake_prefix(transcript)
+        .unwrap_or_else(|| transcript.trim().to_string())
+        .trim()
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '.' | ',' | ';' | ':'))
+        .trim()
+        .to_string()
+}
+
+fn strip_agent_wake_prefix(transcript: &str) -> Option<String> {
+    let normalized = normalize_transcript(transcript);
+    if normalized.is_empty() {
+        return None;
+    }
+
+    for prefix in [
+        "key", "kay", "k", "kei", "quei", "qui", "ok key", "okay key",
+    ] {
+        if normalized == prefix {
+            return Some(String::new());
+        }
+        if normalized_prefix_match(&normalized, prefix) {
+            return Some(raw_suffix_after_normalized_prefix(
+                transcript.trim(),
+                prefix,
+            ));
+        }
+    }
+
+    None
 }
 
 pub async fn interrupt_active_tts_playback() -> u32 {
@@ -1963,7 +1998,7 @@ mod tests {
             backend: "auto".into(),
             target: String::new(),
             overlay_enabled: true,
-            shortcut: "<Super>F12".into(),
+            shortcut: "<Super>space".into(),
             record_duration_ms: 4_000,
             sample_rate_hz: 16_000,
             channels: 1,
@@ -2020,7 +2055,7 @@ mod tests {
             backend: "auto".into(),
             target: String::new(),
             overlay_enabled: true,
-            shortcut: "<Super>F12".into(),
+            shortcut: "<Super>space".into(),
             record_duration_ms: 4_000,
             sample_rate_hz: 16_000,
             channels: 1,
@@ -2184,6 +2219,26 @@ mod tests {
     }
 
     #[test]
+    fn strips_key_wake_prefix_before_intent_resolution() {
+        assert_eq!(
+            normalize_voice_agent_invocation("Key, abra o terminal"),
+            "abra o terminal"
+        );
+        assert_eq!(
+            normalize_voice_agent_invocation("key: open the terminal"),
+            "open the terminal"
+        );
+        assert_eq!(
+            normalize_voice_agent_invocation("K, abra o livro Black Hat Python"),
+            "abra o livro Black Hat Python"
+        );
+        assert_eq!(
+            normalize_voice_agent_invocation("Okay Key, quem foi Steve Jobs?"),
+            "quem foi Steve Jobs?"
+        );
+    }
+
+    #[test]
     fn resolves_standalone_known_app_from_voice_transcript() {
         let cases = [
             ("terminal", "terminal"),
@@ -2304,7 +2359,7 @@ mod tests {
             backend: "auto".into(),
             target: String::new(),
             overlay_enabled: true,
-            shortcut: "<Super>F12".into(),
+            shortcut: "<Super>space".into(),
             record_duration_ms: 4_000,
             sample_rate_hz: 16_000,
             channels: 1,
@@ -2314,13 +2369,16 @@ mod tests {
         };
 
         let command =
-            resolve_voice_agent_command(&config, Some("Open the book Programming TypeScript"))
+            resolve_voice_agent_command(&config, Some("Key, Open the book Programming TypeScript"))
                 .await
                 .unwrap();
         match command {
             VoiceAgentCommand::OpenDocument {
-                query, language, ..
+                transcript,
+                query,
+                language,
             } => {
+                assert_eq!(transcript, "Open the book Programming TypeScript");
                 assert_eq!(query, "Programming TypeScript");
                 assert_eq!(language, AssistantLanguage::English);
             }
@@ -2388,7 +2446,7 @@ mod tests {
             backend: "auto".into(),
             target: String::new(),
             overlay_enabled: true,
-            shortcut: "<Super>F12".into(),
+            shortcut: "<Super>space".into(),
             record_duration_ms: 4_000,
             sample_rate_hz: 16_000,
             channels: 1,
@@ -2397,12 +2455,18 @@ mod tests {
             transcribe_timeout_ms: 60_000,
         };
 
-        let command = resolve_voice_agent_command(&config, Some("Abra o terminal"))
+        let command = resolve_voice_agent_command(&config, Some("Key, Abra o terminal"))
             .await
             .unwrap();
         match command {
-            VoiceAgentCommand::OpenApplication { app_name, .. } => {
+            VoiceAgentCommand::OpenApplication {
+                transcript,
+                app_name,
+                language,
+            } => {
+                assert_eq!(transcript, "Abra o terminal");
                 assert_eq!(app_name, "terminal");
+                assert_eq!(language, AssistantLanguage::PortugueseBrazil);
             }
             other => panic!("unexpected voice agent command: {other:?}"),
         }
@@ -2415,7 +2479,7 @@ mod tests {
             backend: "auto".into(),
             target: String::new(),
             overlay_enabled: true,
-            shortcut: "<Super>F12".into(),
+            shortcut: "<Super>space".into(),
             record_duration_ms: 4_000,
             sample_rate_hz: 16_000,
             channels: 1,

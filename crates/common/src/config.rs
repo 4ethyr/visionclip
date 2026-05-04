@@ -604,7 +604,7 @@ fn default_voice_backend() -> String {
 }
 
 fn default_voice_shortcut() -> String {
-    "<Super>F12".to_string()
+    "<Super>space".to_string()
 }
 
 fn default_voice_record_duration_ms() -> u64 {
@@ -734,7 +734,7 @@ mod tests {
         assert!(!cfg.voice.enabled);
         assert_eq!(cfg.voice.backend, "auto");
         assert!(!cfg.voice.overlay_enabled);
-        assert_eq!(cfg.voice.shortcut, "<Super>F12");
+        assert_eq!(cfg.voice.shortcut, "<Super>space");
         assert_eq!(cfg.voice.record_duration_ms, 4_000);
         assert!(cfg.documents.enabled);
         assert_eq!(cfg.documents.chunk_chars, 3_200);
@@ -781,9 +781,7 @@ mod tests {
             default_voice: "pt_BR-fallback".into(),
             ..AudioConfig::default()
         };
-        audio
-            .voices
-            .insert("pt-BR".into(), "pt_BR-faber-medium".into());
+        audio.voices.insert("pt-BR".into(), "dii_pt-BR".into());
         audio
             .voices
             .insert("english".into(), "en_US-lessac-medium".into());
@@ -793,7 +791,7 @@ mod tests {
 
         assert_eq!(
             audio.voice_for_language("Portuguese (Brazil)").as_deref(),
-            Some("pt_BR-faber-medium")
+            Some("dii_pt-BR")
         );
         assert_eq!(
             audio.voice_for_language("en-US").as_deref(),
@@ -812,12 +810,10 @@ mod tests {
     #[test]
     fn audio_voice_inventory_is_deduplicated_and_reports_missing() {
         let mut audio = AudioConfig {
-            default_voice: "pt_BR-faber-medium".into(),
+            default_voice: "dii_pt-BR".into(),
             ..AudioConfig::default()
         };
-        audio
-            .voices
-            .insert("pt-BR".into(), "pt_BR-faber-medium".into());
+        audio.voices.insert("pt-BR".into(), "dii_pt-BR".into());
         audio
             .voices
             .insert("en".into(), "en_US-lessac-medium".into());
@@ -828,13 +824,13 @@ mod tests {
         assert_eq!(
             audio.configured_voice_ids(),
             vec![
+                "dii_pt-BR".to_string(),
                 "en_US-lessac-medium".to_string(),
-                "pt_BR-faber-medium".to_string(),
                 "zh_CN-huayan-medium".to_string(),
             ]
         );
         assert_eq!(
-            audio.missing_configured_voice_ids(["pt_BR-faber-medium", "zh_CN-huayan-medium"]),
+            audio.missing_configured_voice_ids(["dii_pt-BR", "zh_CN-huayan-medium"]),
             vec!["en_US-lessac-medium".to_string()]
         );
     }

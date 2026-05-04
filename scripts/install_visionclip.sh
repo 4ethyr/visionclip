@@ -17,9 +17,10 @@ USER_SYSTEMD_DIR="$HOME/.config/systemd/user"
 OLLAMA_MODEL="${VISIONCLIP_MODEL:-gemma4:e2b}"
 HF_MODEL="${VISIONCLIP_HF_MODEL:-google/gemma-4-E2B-it}"
 STT_MODEL="${VISIONCLIP_STT_MODEL:-base}"
-PIPER_DEFAULT_VOICE="${VISIONCLIP_PIPER_DEFAULT_VOICE:-pt_BR-faber-medium}"
-PIPER_VOICES="${VISIONCLIP_PIPER_VOICES:-pt_BR-faber-medium en_US-lessac-medium es_ES-sharvard-medium zh_CN-huayan-medium ru_RU-ruslan-medium hi_IN-pratham-medium}"
-VOICE_SHORTCUT="${VISIONCLIP_VOICE_SHORTCUT:-<Super>F12}"
+PIPER_PTBR_FEMALE_VOICE="${VISIONCLIP_PIPER_PTBR_FEMALE_VOICE:-dii_pt-BR}"
+PIPER_DEFAULT_VOICE="${VISIONCLIP_PIPER_DEFAULT_VOICE:-$PIPER_PTBR_FEMALE_VOICE}"
+PIPER_VOICES="${VISIONCLIP_PIPER_VOICES:-$PIPER_PTBR_FEMALE_VOICE en_US-lessac-medium es_ES-sharvard-medium zh_CN-huayan-medium ru_RU-ruslan-medium hi_IN-pratham-medium}"
+VOICE_SHORTCUT="${VISIONCLIP_VOICE_SHORTCUT:-<Super>space}"
 
 YES=0
 SKIP_SYSTEM_PACKAGES=0
@@ -47,12 +48,14 @@ Options:
   --model NAME              Ollama model used by VisionClip. Default: gemma4:e2b.
   --hf-model REPO           Hugging Face model to cache. Default: google/gemma-4-E2B-it.
   --stt-model NAME          faster-whisper model. Default: base.
-  --voice-shortcut BINDING  GNOME shortcut binding. Default: <Super>F12.
+  --voice-shortcut BINDING  GNOME shortcut binding. Default: <Super>space.
   -h, --help                Show this help.
 
 Environment:
   HF_TOKEN                  Hugging Face token. If absent, the script can ask for it.
   VISIONCLIP_PIPER_VOICES  Space-separated Piper voices to download.
+  VISIONCLIP_PIPER_PTBR_FEMALE_VOICE
+                            Default custom pt-BR Piper voice id. Default: dii_pt-BR.
 EOF
 }
 
@@ -126,6 +129,21 @@ prompt_secret() {
 run() {
     info "running: $*"
     "$@"
+}
+
+wait_for_http() {
+    local url="$1"
+    local label="$2"
+    local attempts="${3:-30}"
+
+    for _ in $(seq 1 "$attempts"); do
+        if curl -fsS "$url" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+
+    die "$label did not respond in time: $url"
 }
 
 parse_args() {
@@ -391,6 +409,10 @@ download_piper_voice() {
         return
     fi
 
+    if download_custom_piper_voice "$voice"; then
+        return
+    fi
+
     info "downloading Piper voice: $voice"
     if ! "$VENV_DIR/bin/python" -m piper.download_voices "$voice" --download_dir "$PIPER_VOICE_DIR"; then
         if [[ "$voice" == "$PIPER_DEFAULT_VOICE" ]]; then
@@ -398,6 +420,35 @@ download_piper_voice() {
         fi
         warn "failed to download optional Piper voice: $voice"
     fi
+}
+
+download_custom_piper_voice() {
+    local voice="$1"
+    local repo=""
+    local model_file=""
+    local config_file=""
+
+    case "$voice" in
+        "dii_pt-BR")
+            repo="OpenVoiceOS/pipertts_pt-BR_dii"
+            model_file="dii_pt-BR.onnx"
+            config_file="dii_pt-BR.onnx.json"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    mkdir -p "$PIPER_VOICE_DIR"
+    local base_url="https://huggingface.co/${repo}/resolve/main"
+    info "downloading custom Piper voice: $voice ($repo)"
+    run curl -fL --retry 3 --retry-delay 2 \
+        "$base_url/$model_file" \
+        -o "$PIPER_VOICE_DIR/$voice.onnx"
+    run curl -fL --retry 3 --retry-delay 2 \
+        "$base_url/$config_file" \
+        -o "$PIPER_VOICE_DIR/$voice.onnx.json"
+    return 0
 }
 
 download_piper_voices() {
@@ -539,7 +590,7 @@ request_timeout_ms = 60000
 playback_timeout_ms = 120000
 
 [audio.voices]
-"pt-BR" = "pt_BR-faber-medium"
+"pt-BR" = "$PIPER_PTBR_FEMALE_VOICE"
 en = "en_US-lessac-medium"
 es = "es_ES-sharvard-medium"
 zh = "zh_CN-huayan-medium"
@@ -609,7 +660,7 @@ EOF
 
 write_fallback_voice_wrapper() {
     mkdir -p "$BIN_DIR"
-    cat >"$BIN_DIR/visionclip-voice-search" <<'EOF'
+    cat >"$BIN_DIR/visionclip-voice-agent" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 LOG_DIR="${HOME}/.local/state/visionclip"
@@ -635,7 +686,7 @@ if command -v pgrep >/dev/null 2>&1 && command -v kill >/dev/null 2>&1; then
 fi
 exec "${HOME}/.local/bin/visionclip" --voice-agent --speak "$@" >>"$LOG_FILE" 2>&1
 EOF
-    chmod +x "$BIN_DIR/visionclip-voice-search"
+    chmod +x "$BIN_DIR/visionclip-voice-agent"
 }
 
 install_systemd_units() {
@@ -646,8 +697,11 @@ install_systemd_units() {
         systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS PATH >/dev/null 2>&1 || true
         run systemctl --user daemon-reload
         if [[ "$SKIP_START" != "1" ]]; then
-            run systemctl --user enable --now piper-http.service
-            run systemctl --user enable --now visionclip-daemon.service
+            run systemctl --user enable piper-http.service
+            run systemctl --user enable visionclip-daemon.service
+            run systemctl --user restart piper-http.service
+            wait_for_http "http://127.0.0.1:${VISIONCLIP_PIPER_PORT:-5000}/voices" "Piper HTTP"
+            run systemctl --user restart visionclip-daemon.service
         fi
     else
         warn "systemctl not found; user services were copied but not enabled"

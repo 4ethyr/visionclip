@@ -4188,7 +4188,7 @@ mod tests {
         config
             .audio
             .voices
-            .insert("pt-BR".into(), "pt_BR-faber-medium".into());
+            .insert("pt-BR".into(), "dii_pt-BR".into());
 
         assert_eq!(
             tts_voice_for_response_language(&config, ResponseLanguage::English).as_deref(),
@@ -4200,7 +4200,7 @@ mod tests {
         );
         assert_eq!(
             document_voice_id(&config, "pt-BR").as_deref(),
-            Some("pt_BR-faber-medium")
+            Some("dii_pt-BR")
         );
         assert_eq!(
             document_voice_id(&config, "ru").as_deref(),
