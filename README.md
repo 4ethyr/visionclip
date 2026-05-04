@@ -24,7 +24,7 @@ O que já funciona no repositório:
 
 ## Segurança
 
-Princípios atuais:
+O **Coddy**, REPL visual/CLI com modo terminal flutuante, modo desktop app, voz, screen understanding foi separado para o repositório coddy.
 
 - O modelo local é o padrão; cloud providers ficam desligados.
 - Dados sensíveis, OCR de tela, documentos e contexto local usam política `local_only`.
