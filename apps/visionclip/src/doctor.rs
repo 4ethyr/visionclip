@@ -246,10 +246,7 @@ fn check_status_indicator() -> DoctorCheck {
     let extension_js = extension_dir.join("extension.js");
 
     if extension_js.exists() {
-        DoctorCheck::ok(
-            "panel-indicator",
-            format!("extensao GNOME instalada em {}", extension_dir.display()),
-        )
+        status_indicator_installed_check(&extension_dir)
     } else if env::var("XDG_CURRENT_DESKTOP")
         .map(|desktop| desktop.to_ascii_lowercase().contains("gnome"))
         .unwrap_or(false)
@@ -264,6 +261,65 @@ fn check_status_indicator() -> DoctorCheck {
             "sessao GNOME nao detectada; indicador de barra sera ignorado",
         )
     }
+}
+
+fn status_indicator_installed_check(extension_dir: &Path) -> DoctorCheck {
+    let enabled_in_settings = gsettings_get("org.gnome.shell", "enabled-extensions")
+        .map(|value| value.contains(STATUS_EXTENSION_UUID))
+        .ok();
+    let loaded_by_shell = gnome_shell_lists_extension(STATUS_EXTENSION_UUID);
+
+    match (loaded_by_shell, enabled_in_settings) {
+        (Some(true), Some(true)) => DoctorCheck::ok(
+            "panel-indicator",
+            format!(
+                "extensao GNOME carregada e habilitada em {}",
+                extension_dir.display()
+            ),
+        ),
+        (Some(true), _) => DoctorCheck::warn(
+            "panel-indicator",
+            "extensao GNOME carregada, mas nao aparece em enabled-extensions; rode scripts/install_gnome_status_indicator.sh",
+        ),
+        (Some(false), Some(true)) => DoctorCheck::warn(
+            "panel-indicator",
+            "extensao GNOME instalada e marcada para habilitar, mas o Shell atual ainda nao reindexou; em Wayland faca logout/login",
+        ),
+        (Some(false), _) => DoctorCheck::warn(
+            "panel-indicator",
+            "extensao GNOME instalada, mas nao carregada; faca logout/login e habilite com gnome-extensions enable visionclip-status@visionclip",
+        ),
+        (None, Some(true)) => DoctorCheck::warn(
+            "panel-indicator",
+            "extensao GNOME instalada e marcada para habilitar; nao foi possivel consultar o Shell atual",
+        ),
+        (None, _) => DoctorCheck::ok(
+            "panel-indicator",
+            format!("extensao GNOME instalada em {}", extension_dir.display()),
+        ),
+    }
+}
+
+fn gnome_shell_lists_extension(uuid: &str) -> Option<bool> {
+    if !command_available("gdbus") {
+        return None;
+    }
+
+    Command::new("gdbus")
+        .args([
+            "call",
+            "--session",
+            "--dest",
+            "org.gnome.Shell",
+            "--object-path",
+            "/org/gnome/Shell",
+            "--method",
+            "org.gnome.Shell.Extensions.ListExtensions",
+        ])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).contains(uuid))
 }
 
 fn current_session_type() -> SessionType {
