@@ -11,7 +11,7 @@ PIPER_PORT="${VISIONCLIP_PIPER_PORT:-5000}"
 OLLAMA_URL="${VISIONCLIP_OLLAMA_URL:-http://127.0.0.1:11434}"
 MODEL_NAME="${VISIONCLIP_MODEL:-gemma4:e2b}"
 OCR_MODEL_NAME="${VISIONCLIP_OCR_MODEL:-$MODEL_NAME}"
-PIPER_VOICE="${VISIONCLIP_PIPER_VOICE:-pt_BR-faber-medium}"
+PIPER_VOICE="${VISIONCLIP_PIPER_VOICE:-dii_pt-BR}"
 PIPER_VOICES="${VISIONCLIP_PIPER_VOICES:-$PIPER_VOICE}"
 PIPER_VOICE_DIR="${VISIONCLIP_PIPER_DIR:-$ROOT_DIR/tools/piper-voices}"
 TTS_VOICE_PT_BR="${VISIONCLIP_TTS_VOICE_PT_BR:-$PIPER_VOICE}"
@@ -27,7 +27,7 @@ CAPTURE_TIMEOUT_MS="${VISIONCLIP_CAPTURE_TIMEOUT_MS:-60000}"
 VOICE_ENABLED="${VISIONCLIP_VOICE_ENABLED:-0}"
 VOICE_BACKEND="${VISIONCLIP_VOICE_BACKEND:-auto}"
 VOICE_OVERLAY_ENABLED="${VISIONCLIP_VOICE_OVERLAY_ENABLED:-0}"
-VOICE_SHORTCUT="${VISIONCLIP_VOICE_SHORTCUT:-<Super>F12}"
+VOICE_SHORTCUT="${VISIONCLIP_VOICE_SHORTCUT:-<Super>space}"
 VOICE_RECORD_DURATION_MS="${VISIONCLIP_VOICE_RECORD_DURATION_MS:-4000}"
 VOICE_SAMPLE_RATE_HZ="${VISIONCLIP_VOICE_SAMPLE_RATE_HZ:-16000}"
 VOICE_CHANNELS="${VISIONCLIP_VOICE_CHANNELS:-1}"
@@ -57,7 +57,7 @@ Variaveis uteis:
   VISIONCLIP_MODEL
   VISIONCLIP_OCR_MODEL
   VISIONCLIP_PIPER_VOICE
-  VISIONCLIP_PIPER_VOICES="pt_BR-faber-medium en_US-lessac-medium"
+  VISIONCLIP_PIPER_VOICES="dii_pt-BR en_US-lessac-medium"
   VISIONCLIP_PIPER_DIR
   VISIONCLIP_TTS_VOICE_PT_BR
   VISIONCLIP_TTS_VOICE_EN
@@ -72,7 +72,7 @@ Variaveis uteis:
   VISIONCLIP_VOICE_ENABLED=1
   VISIONCLIP_VOICE_BACKEND=auto
   VISIONCLIP_VOICE_OVERLAY_ENABLED=0
-  VISIONCLIP_VOICE_SHORTCUT=<Super>F12
+  VISIONCLIP_VOICE_SHORTCUT=<Super>space
   VISIONCLIP_VOICE_RECORD_DURATION_MS=4000
   VISIONCLIP_VOICE_SAMPLE_RATE_HZ=16000
   VISIONCLIP_VOICE_CHANNELS=1
@@ -181,6 +181,17 @@ wait_for_http() {
     return 1
 }
 
+piper_http_has_voice() {
+    local voice="$1"
+    [[ -n "$voice" ]] || return 0
+
+    curl -fsS "http://$PIPER_HOST:$PIPER_PORT/voices" \
+        | "$VENV_PYTHON" -c 'import json, sys
+voice = sys.argv[1]
+data = json.load(sys.stdin)
+raise SystemExit(0 if voice in data else 1)' "$voice"
+}
+
 ensure_build() {
     if [[ "$BUILD_IF_NEEDED" != "1" ]]; then
         return
@@ -214,8 +225,37 @@ ensure_piper_voice() {
         return
     fi
 
+    if download_custom_piper_voice "$voice"; then
+        return
+    fi
+
     echo "Baixando voz Piper $voice para $PIPER_VOICE_DIR..."
     "$VENV_PYTHON" -m piper.download_voices "$voice" --download_dir "$PIPER_VOICE_DIR"
+}
+
+download_custom_piper_voice() {
+    local voice="$1"
+    local repo=""
+    local model_file=""
+    local config_file=""
+
+    case "$voice" in
+        "dii_pt-BR")
+            repo="OpenVoiceOS/pipertts_pt-BR_dii"
+            model_file="dii_pt-BR.onnx"
+            config_file="dii_pt-BR.onnx.json"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    mkdir -p "$PIPER_VOICE_DIR"
+    local base_url="https://huggingface.co/${repo}/resolve/main"
+    echo "Baixando voz Piper customizada $voice de $repo para $PIPER_VOICE_DIR..."
+    curl -fL --retry 3 --retry-delay 2 "$base_url/$model_file" -o "$PIPER_VOICE_DIR/$voice.onnx"
+    curl -fL --retry 3 --retry-delay 2 "$base_url/$config_file" -o "$PIPER_VOICE_DIR/$voice.onnx.json"
+    return 0
 }
 
 ensure_piper_voices() {
@@ -377,6 +417,11 @@ if ! curl -fsS "http://$PIPER_HOST:$PIPER_PORT/voices" >/dev/null 2>&1; then
     wait_for_http "http://$PIPER_HOST:$PIPER_PORT/voices" "Piper HTTP"
 else
     echo "Piper HTTP ja esta respondendo em http://$PIPER_HOST:$PIPER_PORT"
+    if ! piper_http_has_voice "$PIPER_VOICE"; then
+        echo "Erro: Piper HTTP em http://$PIPER_HOST:$PIPER_PORT nao expoe a voz requerida: $PIPER_VOICE" >&2
+        echo "Pare o servico existente ou use VISIONCLIP_PIPER_PORT para iniciar uma instancia isolada." >&2
+        exit 1
+    fi
 fi
 
 warm_model_if_enabled

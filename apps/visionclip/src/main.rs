@@ -49,6 +49,9 @@ struct Cli {
     voice_agent: bool,
 
     #[arg(long, default_value_t = false)]
+    voice_agent_dry_run: bool,
+
+    #[arg(long, default_value_t = false)]
     doctor: bool,
 
     #[arg(long, default_value_t = false)]
@@ -149,6 +152,7 @@ async fn main() -> Result<()> {
 
     if (cli.action.is_some() || cli.open_app.is_some() || cli.open_url.is_some())
         && (cli.voice_agent
+            || cli.voice_agent_dry_run
             || cli.voice_request
             || cli.voice_search
             || cli.voice_transcript.is_some())
@@ -164,7 +168,9 @@ async fn main() -> Result<()> {
         return run_open_url(&config, cli.speak, url, url, None, None).await;
     }
 
-    let resolved_voice_agent = if cli.action.is_none() && cli.open_app.is_none() && cli.voice_agent
+    let resolved_voice_agent = if cli.action.is_none()
+        && cli.open_app.is_none()
+        && (cli.voice_agent || cli.voice_agent_dry_run)
     {
         Some(
             voice::resolve_voice_agent_command(&config.voice, cli.voice_transcript.as_deref())
@@ -173,6 +179,13 @@ async fn main() -> Result<()> {
     } else {
         None
     };
+
+    if cli.voice_agent_dry_run {
+        if let Some(command) = &resolved_voice_agent {
+            println!("{}", voice_agent_dry_run_report(command));
+            return Ok(());
+        }
+    }
 
     if let Some(command) = &resolved_voice_agent {
         match command {
@@ -527,6 +540,53 @@ async fn send_request(config: &AppConfig, request: VisionRequest) -> Result<JobR
     })?;
     write_message(&mut stream, &request).await?;
     Ok(read_message(&mut stream).await?)
+}
+
+fn voice_agent_dry_run_report(command: &voice::VoiceAgentCommand) -> String {
+    match command {
+        voice::VoiceAgentCommand::OpenApplication {
+            transcript,
+            language,
+            app_name,
+        } => format!(
+            "voice_agent_dry_run\nintent=open_application\nlanguage={}\ntranscript={}\napp_name={}",
+            language.tts_language_code(),
+            transcript,
+            app_name
+        ),
+        voice::VoiceAgentCommand::OpenDocument {
+            transcript,
+            language,
+            query,
+        } => format!(
+            "voice_agent_dry_run\nintent=open_document\nlanguage={}\ntranscript={}\nquery={}",
+            language.tts_language_code(),
+            transcript,
+            query
+        ),
+        voice::VoiceAgentCommand::OpenUrl {
+            transcript,
+            language,
+            label,
+            url,
+        } => format!(
+            "voice_agent_dry_run\nintent=open_url\nlanguage={}\ntranscript={}\nlabel={}\nurl={}",
+            language.tts_language_code(),
+            transcript,
+            label,
+            url
+        ),
+        voice::VoiceAgentCommand::SearchWeb {
+            transcript,
+            language,
+            query,
+        } => format!(
+            "voice_agent_dry_run\nintent=search_web\nlanguage={}\ntranscript={}\nquery={}",
+            language.tts_language_code(),
+            transcript,
+            query
+        ),
+    }
 }
 
 async fn run_open_application(
@@ -902,5 +962,29 @@ mod tests {
             localized_voice_search_opened_message(AssistantLanguage::PortugueseBrazil, "Rust"),
             "Consulta por voz aberta no navegador: Rust"
         );
+    }
+
+    #[test]
+    fn voice_agent_dry_run_reports_intent_language_and_slots() {
+        let report = voice_agent_dry_run_report(&voice::VoiceAgentCommand::OpenDocument {
+            transcript: "Open the book, Programming TypeScript.".into(),
+            language: AssistantLanguage::English,
+            query: "Programming TypeScript".into(),
+        });
+
+        assert!(report.contains("intent=open_document"));
+        assert!(report.contains("language=en"));
+        assert!(report.contains("query=Programming TypeScript"));
+
+        let report = voice_agent_dry_run_report(&voice::VoiceAgentCommand::OpenUrl {
+            transcript: "打开油管".into(),
+            language: AssistantLanguage::Chinese,
+            label: "YouTube".into(),
+            url: "https://www.youtube.com/".into(),
+        });
+
+        assert!(report.contains("intent=open_url"));
+        assert!(report.contains("language=zh"));
+        assert!(report.contains("label=YouTube"));
     }
 }

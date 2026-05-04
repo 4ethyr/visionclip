@@ -67,6 +67,7 @@ pub async fn resolve_voice_request(
         } else {
             capture_and_transcribe(config).await?
         };
+    let transcript = normalize_voice_agent_invocation(&transcript);
 
     let action = resolve_action_from_transcript(&transcript)?;
     let language = AssistantLanguage::detect(&transcript);
@@ -87,6 +88,7 @@ pub async fn resolve_voice_search(
         } else {
             capture_and_transcribe(config).await?
         };
+    let transcript = normalize_voice_agent_invocation(&transcript);
     let language = AssistantLanguage::detect(&transcript);
     let query = resolve_search_query_from_transcript(&transcript)?;
     Ok(VoiceSearch {
@@ -106,6 +108,7 @@ pub async fn resolve_voice_agent_command(
         } else {
             capture_and_transcribe(config).await?
         };
+    let transcript = normalize_voice_agent_invocation(&transcript);
     let language = AssistantLanguage::detect(&transcript);
 
     if let Some(query) = resolve_open_document_query_from_transcript(&transcript) {
@@ -160,6 +163,38 @@ async fn capture_and_transcribe(config: &VoiceConfig) -> Result<String> {
     let _ = fs::remove_file(&transcript_path);
 
     Ok(transcript)
+}
+
+fn normalize_voice_agent_invocation(transcript: &str) -> String {
+    strip_agent_wake_prefix(transcript)
+        .unwrap_or_else(|| transcript.trim().to_string())
+        .trim()
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '.' | ',' | ';' | ':'))
+        .trim()
+        .to_string()
+}
+
+fn strip_agent_wake_prefix(transcript: &str) -> Option<String> {
+    let normalized = normalize_transcript(transcript);
+    if normalized.is_empty() {
+        return None;
+    }
+
+    for prefix in [
+        "key", "kay", "k", "kei", "quei", "qui", "ok key", "okay key",
+    ] {
+        if normalized == prefix {
+            return Some(String::new());
+        }
+        if normalized_prefix_match(&normalized, prefix) {
+            return Some(raw_suffix_after_normalized_prefix(
+                transcript.trim(),
+                prefix,
+            ));
+        }
+    }
+
+    None
 }
 
 pub async fn interrupt_active_tts_playback() -> u32 {
@@ -696,6 +731,7 @@ fn resolve_search_query_from_transcript(transcript: &str) -> Result<String> {
     let query = query
         .trim()
         .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '.' | ',' | ';' | ':'))
+        .trim()
         .to_string();
 
     if query.is_empty() {
@@ -1007,6 +1043,10 @@ fn extract_document_subject_from_non_latin_command(raw: &str, normalized: &str) 
 }
 
 fn raw_suffix_after_normalized_prefix(raw: &str, prefix: &str) -> String {
+    if let Some(suffix) = raw_suffix_after_normalized_token_prefix(raw, prefix) {
+        return suffix;
+    }
+
     let prefix_len = prefix.chars().count();
     let start = raw
         .char_indices()
@@ -1014,6 +1054,69 @@ fn raw_suffix_after_normalized_prefix(raw: &str, prefix: &str) -> String {
         .map(|(index, _)| index)
         .unwrap_or(raw.len());
     raw[start..].to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NormalizedTokenSpan {
+    value: String,
+    end: usize,
+}
+
+fn raw_suffix_after_normalized_token_prefix(raw: &str, prefix: &str) -> Option<String> {
+    let prefix_tokens = normalize_transcript(prefix)
+        .split_whitespace()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if prefix_tokens.is_empty() {
+        return None;
+    }
+
+    let raw_tokens = normalized_token_spans(raw);
+    if raw_tokens.len() < prefix_tokens.len() {
+        return None;
+    }
+
+    let matches = prefix_tokens
+        .iter()
+        .zip(raw_tokens.iter())
+        .all(|(prefix_token, raw_token)| prefix_token == &raw_token.value);
+    if !matches {
+        return None;
+    }
+
+    let end = raw_tokens[prefix_tokens.len() - 1].end;
+    Some(raw[end..].to_string())
+}
+
+fn normalized_token_spans(input: &str) -> Vec<NormalizedTokenSpan> {
+    let mut spans = Vec::new();
+    let mut current = String::new();
+    let mut current_end = 0_usize;
+
+    for (index, ch) in input.char_indices() {
+        let next_index = index + ch.len_utf8();
+        let folded = ascii_fold(&ch.to_string());
+        for folded_ch in folded.chars() {
+            if folded_ch.is_alphanumeric() {
+                current.push(folded_ch);
+                current_end = next_index;
+            } else if !current.is_empty() {
+                spans.push(NormalizedTokenSpan {
+                    value: std::mem::take(&mut current),
+                    end: current_end,
+                });
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        spans.push(NormalizedTokenSpan {
+            value: current,
+            end: current_end,
+        });
+    }
+
+    spans
 }
 
 fn document_query_has_marker(normalized: &str) -> bool {
@@ -1236,6 +1339,10 @@ fn trailing_document_query_qualifiers() -> &'static [&'static str] {
 }
 
 fn value_after_normalized_prefix(value: &str, prefix: &str) -> String {
+    if let Some(suffix) = raw_suffix_after_normalized_token_prefix(value, prefix) {
+        return suffix.trim_start().to_string();
+    }
+
     let prefix_len = prefix.chars().count();
     let start = value
         .char_indices()
@@ -1385,13 +1492,7 @@ fn extract_open_subject(raw: &str, normalized: &str) -> Option<String> {
             return Some(String::new());
         }
         if normalized_prefix_match(normalized, prefix) {
-            let prefix_len = prefix.chars().count();
-            let start = raw
-                .char_indices()
-                .nth(prefix_len)
-                .map(|(index, _)| index)
-                .unwrap_or(raw.len());
-            let app_name = raw[start..]
+            let app_name = raw_suffix_after_normalized_prefix(raw, prefix)
                 .trim()
                 .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '.' | ',' | ';' | ':'))
                 .to_string();
@@ -1821,17 +1922,13 @@ fn strip_search_prefix(input: &str) -> String {
     ];
 
     for prefix in prefixes {
-        let prefix_len = prefix.chars().count();
         if normalized == prefix {
             return String::new();
         }
         if normalized_prefix_match(&normalized, prefix) {
-            let start = trimmed
-                .char_indices()
-                .nth(prefix_len)
-                .map(|(index, _)| index)
-                .unwrap_or(trimmed.len());
-            return trimmed[start..].trim_start().to_string();
+            return raw_suffix_after_normalized_prefix(trimmed, prefix)
+                .trim_start()
+                .to_string();
         }
     }
 
@@ -1901,7 +1998,7 @@ mod tests {
             backend: "auto".into(),
             target: String::new(),
             overlay_enabled: true,
-            shortcut: "<Super>F12".into(),
+            shortcut: "<Super>space".into(),
             record_duration_ms: 4_000,
             sample_rate_hz: 16_000,
             channels: 1,
@@ -1958,7 +2055,7 @@ mod tests {
             backend: "auto".into(),
             target: String::new(),
             overlay_enabled: true,
-            shortcut: "<Super>F12".into(),
+            shortcut: "<Super>space".into(),
             record_duration_ms: 4_000,
             sample_rate_hz: 16_000,
             channels: 1,
@@ -2061,6 +2158,19 @@ mod tests {
     }
 
     #[test]
+    fn strips_search_prefix_with_asr_punctuation() {
+        let cases = [
+            ("Pesquise, por Rust async no Linux", "Rust async no Linux"),
+            ("Search for: Rust async on Linux", "Rust async on Linux"),
+        ];
+
+        for (transcript, expected_query) in cases {
+            let query = resolve_search_query_from_transcript(transcript).unwrap();
+            assert_eq!(query, expected_query);
+        }
+    }
+
+    #[test]
     fn strips_chinese_search_prefix_from_voice_transcript() {
         let query = resolve_search_query_from_transcript("搜索Rust async 教程").unwrap();
         assert_eq!(query, "Rust async 教程");
@@ -2109,6 +2219,26 @@ mod tests {
     }
 
     #[test]
+    fn strips_key_wake_prefix_before_intent_resolution() {
+        assert_eq!(
+            normalize_voice_agent_invocation("Key, abra o terminal"),
+            "abra o terminal"
+        );
+        assert_eq!(
+            normalize_voice_agent_invocation("key: open the terminal"),
+            "open the terminal"
+        );
+        assert_eq!(
+            normalize_voice_agent_invocation("K, abra o livro Black Hat Python"),
+            "abra o livro Black Hat Python"
+        );
+        assert_eq!(
+            normalize_voice_agent_invocation("Okay Key, quem foi Steve Jobs?"),
+            "quem foi Steve Jobs?"
+        );
+    }
+
+    #[test]
     fn resolves_standalone_known_app_from_voice_transcript() {
         let cases = [
             ("terminal", "terminal"),
@@ -2131,6 +2261,8 @@ mod tests {
     #[test]
     fn resolves_common_open_application_phrases() {
         let cases = [
+            ("Por favor, abra o terminal.", "terminal"),
+            ("Por favor, abra o aplicativo: VS Code.", "VS Code"),
             ("abra o navegador", "navegador"),
             ("abre o terminal", "terminal"),
             ("abro terminal", "terminal"),
@@ -2156,7 +2288,15 @@ mod tests {
     fn resolves_open_document_phrases() {
         let cases = [
             (
+                "Por favor, abra o livro: Grey Hat Python.",
+                "Grey Hat Python",
+            ),
+            (
                 "abra o livro Programming TypeScript",
+                "Programming TypeScript",
+            ),
+            (
+                "Open the book, Programming TypeScript.",
                 "Programming TypeScript",
             ),
             ("abra o pdf Grey Hat Python", "Grey Hat Python"),
@@ -2219,7 +2359,7 @@ mod tests {
             backend: "auto".into(),
             target: String::new(),
             overlay_enabled: true,
-            shortcut: "<Super>F12".into(),
+            shortcut: "<Super>space".into(),
             record_duration_ms: 4_000,
             sample_rate_hz: 16_000,
             channels: 1,
@@ -2229,13 +2369,16 @@ mod tests {
         };
 
         let command =
-            resolve_voice_agent_command(&config, Some("Open the book Programming TypeScript"))
+            resolve_voice_agent_command(&config, Some("Key, Open the book Programming TypeScript"))
                 .await
                 .unwrap();
         match command {
             VoiceAgentCommand::OpenDocument {
-                query, language, ..
+                transcript,
+                query,
+                language,
             } => {
+                assert_eq!(transcript, "Open the book Programming TypeScript");
                 assert_eq!(query, "Programming TypeScript");
                 assert_eq!(language, AssistantLanguage::English);
             }
@@ -2303,7 +2446,7 @@ mod tests {
             backend: "auto".into(),
             target: String::new(),
             overlay_enabled: true,
-            shortcut: "<Super>F12".into(),
+            shortcut: "<Super>space".into(),
             record_duration_ms: 4_000,
             sample_rate_hz: 16_000,
             channels: 1,
@@ -2312,12 +2455,18 @@ mod tests {
             transcribe_timeout_ms: 60_000,
         };
 
-        let command = resolve_voice_agent_command(&config, Some("Abra o terminal"))
+        let command = resolve_voice_agent_command(&config, Some("Key, Abra o terminal"))
             .await
             .unwrap();
         match command {
-            VoiceAgentCommand::OpenApplication { app_name, .. } => {
+            VoiceAgentCommand::OpenApplication {
+                transcript,
+                app_name,
+                language,
+            } => {
+                assert_eq!(transcript, "Abra o terminal");
                 assert_eq!(app_name, "terminal");
+                assert_eq!(language, AssistantLanguage::PortugueseBrazil);
             }
             other => panic!("unexpected voice agent command: {other:?}"),
         }
@@ -2330,7 +2479,7 @@ mod tests {
             backend: "auto".into(),
             target: String::new(),
             overlay_enabled: true,
-            shortcut: "<Super>F12".into(),
+            shortcut: "<Super>space".into(),
             record_duration_ms: 4_000,
             sample_rate_hz: 16_000,
             channels: 1,

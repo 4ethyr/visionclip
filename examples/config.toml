@@ -51,7 +51,7 @@ playback_timeout_ms = 120000
 [audio.voices]
 # Configure vozes Piper instaladas em tools/piper-voices para pronuncia natural por idioma.
 # O servidor Piper precisa iniciar com --data-dir/--download-dir apontando para esse diretorio.
-"pt-BR" = "pt_BR-faber-medium"
+"pt-BR" = "dii_pt-BR"
 # en = "en_US-lessac-medium"
 # es = "es_ES-sharvard-medium"
 # zh = "zh_CN-huayan-medium"
@@ -64,7 +64,7 @@ enabled = false
 backend = "auto"
 target = ""
 overlay_enabled = false
-shortcut = "<Super>F12"
+shortcut = "<Super>space"
 record_duration_ms = 4000
 sample_rate_hz = 16000
 channels = 1

@@ -48,14 +48,14 @@ request_timeout_ms = 60000
 playback_timeout_ms = 120000
 
 [audio.voices]
-"pt-BR" = "pt_BR-faber-medium"
+"pt-BR" = "dii_pt-BR"
 
 [voice]
 enabled = true
 backend = "auto"
 target = ""
 overlay_enabled = false
-shortcut = "<Super>F12"
+shortcut = "<Super>space"
 record_duration_ms = 4000
 sample_rate_hz = 16000
 channels = 1
