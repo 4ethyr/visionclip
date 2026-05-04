@@ -4,7 +4,7 @@
 
 ```bash
 cargo fmt --all
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features
 cargo test --workspace
 cargo build --workspace --release
 ```
@@ -36,17 +36,17 @@ visionclip-config doctor
 1. Inicie o daemon:
 
 ```bash
-VISIONCLIP_CONFIG=/home/aethyr/Documents/visionclip/visionclip/tools/visionclip-hybrid.toml visionclip-daemon
+VISIONCLIP_CONFIG="$PWD/tools/visionclip-hybrid.toml" visionclip-daemon
 ```
 
 2. Exercite as ações principais com uma captura já existente:
 
 ```bash
-VISIONCLIP_CONFIG=/home/aethyr/Documents/visionclip/visionclip/tools/visionclip-hybrid.toml visionclip --action translate_ptbr --image /caminho/captura.png
-VISIONCLIP_CONFIG=/home/aethyr/Documents/visionclip/visionclip/tools/visionclip-hybrid.toml visionclip --action explain --image /caminho/captura.png
-VISIONCLIP_CONFIG=/home/aethyr/Documents/visionclip/visionclip/tools/visionclip-hybrid.toml visionclip --action search_web --image /caminho/captura.png
-VISIONCLIP_CONFIG=/home/aethyr/Documents/visionclip/visionclip/tools/visionclip-hybrid.toml visionclip --action copy_text --image /caminho/captura.png
-VISIONCLIP_CONFIG=/home/aethyr/Documents/visionclip/visionclip/tools/visionclip-hybrid.toml visionclip --action extract_code --image /caminho/captura.png
+VISIONCLIP_CONFIG="$PWD/tools/visionclip-hybrid.toml" visionclip --action translate_ptbr --image /caminho/captura.png
+VISIONCLIP_CONFIG="$PWD/tools/visionclip-hybrid.toml" visionclip --action explain --image /caminho/captura.png
+VISIONCLIP_CONFIG="$PWD/tools/visionclip-hybrid.toml" visionclip --action search_web --image /caminho/captura.png
+VISIONCLIP_CONFIG="$PWD/tools/visionclip-hybrid.toml" visionclip --action copy_text --image /caminho/captura.png
+VISIONCLIP_CONFIG="$PWD/tools/visionclip-hybrid.toml" visionclip --action extract_code --image /caminho/captura.png
 ```
 
 Em `search_web`, valide tambem se:
@@ -58,20 +58,20 @@ Em `search_web`, valide tambem se:
 3. Valide a captura nativa automática sem `--image`:
 
 ```bash
-VISIONCLIP_CONFIG=/home/aethyr/Documents/visionclip/visionclip/tools/visionclip-hybrid.toml visionclip --action explain
+VISIONCLIP_CONFIG="$PWD/tools/visionclip-hybrid.toml" visionclip --action explain
 ```
 
 4. Valide o caminho de captura por comando:
 
 ```bash
-VISIONCLIP_CONFIG=/home/aethyr/Documents/visionclip/visionclip/tools/visionclip-hybrid.toml visionclip --action explain --capture-command 'maim -s -u'
+VISIONCLIP_CONFIG="$PWD/tools/visionclip-hybrid.toml" visionclip --action explain --capture-command 'maim -s -u'
 ```
 
 5. Se o Piper HTTP estiver ativo, valide áudio:
 
 ```bash
-VISIONCLIP_CONFIG=/home/aethyr/Documents/visionclip/visionclip/tools/visionclip-hybrid.toml visionclip --action explain --image /caminho/captura.png --speak
-VISIONCLIP_CONFIG=/home/aethyr/Documents/visionclip/visionclip/tools/visionclip-hybrid.toml visionclip --action search_web --image /caminho/captura.png --speak
+VISIONCLIP_CONFIG="$PWD/tools/visionclip-hybrid.toml" visionclip --action explain --image /caminho/captura.png --speak
+VISIONCLIP_CONFIG="$PWD/tools/visionclip-hybrid.toml" visionclip --action search_web --image /caminho/captura.png --speak
 ```
 
 ## Scripts de apoio
