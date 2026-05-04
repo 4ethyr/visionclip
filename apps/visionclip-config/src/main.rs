@@ -11,7 +11,6 @@ use visionclip_common::{
 use visionclip_infer::{list_ollama_models, OllamaModelSummary};
 
 const OLLAMA_PROBE_TIMEOUT_MS: u64 = 180_000;
-const GTK_OVERLAY_ENABLED: bool = cfg!(feature = "gtk-overlay");
 
 #[derive(Debug, Parser)]
 #[command(name = "visionclip-config")]
@@ -77,15 +76,11 @@ async fn run_doctor() -> Result<()> {
     );
     println!("Voice backend: {}", config.voice.backend);
     println!(
-        "Legacy voice overlay enabled: {}",
-        yes_no(config.voice.overlay_enabled)
-    );
-    println!(
-        "Legacy voice overlay runtime: {}",
-        if GTK_OVERLAY_ENABLED {
-            "gtk-overlay compiled"
+        "Legacy voice overlay: {}",
+        if config.voice.overlay_enabled {
+            "configured true, ignored; panel indicator is used"
         } else {
-            "gtk-overlay not compiled"
+            "disabled; panel indicator is used"
         }
     );
     println!("Voice shortcut: {}", config.voice.shortcut);

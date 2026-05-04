@@ -1,4 +1,3 @@
-use crate::voice_overlay;
 use anyhow::{Context, Result};
 use std::{
     collections::HashSet,
@@ -105,14 +104,7 @@ pub(crate) async fn run(config: &AppConfig) -> Result<bool> {
     checks.push(check_config_path()?);
     checks.push(check_daemon_socket(config).await);
     checks.push(check_status_indicator());
-    if config.voice.overlay_enabled {
-        checks.push(check_overlay_runtime());
-    } else {
-        checks.push(DoctorCheck::ok(
-            "overlay",
-            "overlay central legado desativado; usando indicador de barra",
-        ));
-    }
+    checks.push(check_legacy_overlay_status(config.voice.overlay_enabled));
     checks.push(check_capture_system(command_available));
     checks.push(check_provider_policy(&config.providers));
     checks.push(check_rendered_ai_overview_listener(
@@ -239,22 +231,18 @@ async fn check_daemon_socket(config: &AppConfig) -> DoctorCheck {
     }
 }
 
-fn check_overlay_runtime() -> DoctorCheck {
-    if !voice_overlay::is_overlay_available() {
-        return DoctorCheck::fail(
+fn check_legacy_overlay_status(configured_enabled: bool) -> DoctorCheck {
+    if configured_enabled {
+        DoctorCheck::ok(
             "overlay",
-            "binario sem feature gtk-overlay; recompile com --features gtk-overlay",
-        );
-    }
-
-    if env::var_os("WAYLAND_DISPLAY").is_none() && env::var_os("DISPLAY").is_none() {
-        return DoctorCheck::warn(
+            "overlay central legado ignorado; usando indicador de barra",
+        )
+    } else {
+        DoctorCheck::ok(
             "overlay",
-            "sem WAYLAND_DISPLAY/DISPLAY; overlay so abrira dentro da sessao grafica",
-        );
+            "overlay central legado desativado; usando indicador de barra",
+        )
     }
-
-    DoctorCheck::ok("overlay", "runtime grafico disponivel")
 }
 
 fn check_status_indicator() -> DoctorCheck {

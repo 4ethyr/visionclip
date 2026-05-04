@@ -1,10 +1,7 @@
-use crate::voice_overlay;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
-    env,
-    ffi::OsString,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     process::{Output, Stdio},
     time::{SystemTime, UNIX_EPOCH},
@@ -490,35 +487,10 @@ impl Drop for AssistantStatusGuard {
 }
 
 fn start_listening_overlay(config: &VoiceConfig) -> Option<OverlayGuard> {
-    if !config.overlay_enabled {
-        return None;
+    if config.overlay_enabled {
+        warn!("legacy centered voice overlay is disabled; using panel status indicator instead");
     }
-
-    if !voice_overlay::is_overlay_available() {
-        warn!("voice overlay is enabled in config, but this build does not include the `gtk-overlay` feature");
-        return None;
-    }
-
-    if env::var_os("WAYLAND_DISPLAY").is_none() && env::var_os("DISPLAY").is_none() {
-        return None;
-    }
-
-    let current_exe = env::current_exe().ok()?;
-    let mut child = Command::new(current_exe);
-    child
-        .args(overlay_cli_args(config.record_duration_ms))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-
-    match child.spawn() {
-        Ok(child) => Some(OverlayGuard { child: Some(child) }),
-        Err(error) => {
-            warn!(?error, "failed to spawn listening overlay");
-            None
-        }
-    }
+    None
 }
 
 async fn record_voice_sample(config: &VoiceConfig, wav_path: &Path) -> Result<()> {
@@ -2604,25 +2576,7 @@ fn normalized_is_search_command_only(normalized: &str) -> bool {
     .contains(&normalized)
 }
 
-pub fn overlay_cli_args(duration_ms: u64) -> Vec<OsString> {
-    vec![
-        OsString::from("--voice-overlay-listening"),
-        OsString::from("--voice-overlay-duration-ms"),
-        OsString::from(duration_ms.to_string()),
-    ]
-}
-
-struct OverlayGuard {
-    child: Option<tokio::process::Child>,
-}
-
-impl Drop for OverlayGuard {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.start_kill();
-        }
-    }
-}
+struct OverlayGuard;
 
 fn render_command(program: &str, args: &[String]) -> String {
     if args.is_empty() {
@@ -2675,6 +2629,13 @@ mod tests {
     fn resolves_extract_code_from_specific_phrase() {
         let action = resolve_action_from_transcript("extraia o codigo dessa tela").unwrap();
         assert_eq!(action, Action::ExtractCode);
+    }
+
+    #[test]
+    fn legacy_listening_overlay_is_ignored_even_when_configured() {
+        let config = test_voice_config("");
+        assert!(config.overlay_enabled);
+        assert!(start_listening_overlay(&config).is_none());
     }
 
     #[test]

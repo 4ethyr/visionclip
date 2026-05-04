@@ -2,7 +2,6 @@ mod capture;
 mod doctor;
 mod search_overlay;
 mod voice;
-mod voice_overlay;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -219,7 +218,10 @@ enum DocumentCommand {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     if cli.voice_overlay_listening {
-        return voice_overlay::run_listening_overlay(cli.voice_overlay_duration_ms);
+        let _duration_ms = cli.voice_overlay_duration_ms;
+        // The old centered GTK voice overlay is intentionally disabled.
+        // Voice feedback now lives in the GNOME panel/status indicator.
+        return Ok(());
     }
 
     let config = AppConfig::load()?;
