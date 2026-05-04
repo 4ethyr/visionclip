@@ -246,7 +246,7 @@ install_system_packages() {
                 python3 python3-venv python3-pip \
                 libgtk-4-dev libglib2.0-bin xdg-utils libnotify-bin \
                 espeak-ng libsndfile1
-            for package in pipewire pipewire-bin wireplumber xdg-desktop-portal xdg-desktop-portal-gnome poppler-utils ffmpeg grim maim gnome-screenshot wl-clipboard; do
+            for package in pipewire pipewire-bin wireplumber xdg-desktop-portal xdg-desktop-portal-gnome poppler-utils mupdf-tools ffmpeg grim maim gnome-screenshot wl-clipboard; do
                 install_optional_package "$manager" "$package"
             done
             ;;
@@ -256,7 +256,7 @@ install_system_packages() {
                 python3 python3-pip python3-virtualenv \
                 gtk4-devel glib2 xdg-utils libnotify \
                 espeak-ng libsndfile
-            for package in pipewire-utils wireplumber xdg-desktop-portal xdg-desktop-portal-gnome poppler-utils ffmpeg grim maim gnome-screenshot wl-clipboard; do
+            for package in pipewire-utils wireplumber xdg-desktop-portal xdg-desktop-portal-gnome poppler-utils mupdf-tools ffmpeg grim maim gnome-screenshot wl-clipboard; do
                 install_optional_package "$manager" "$package"
             done
             ;;
@@ -266,7 +266,7 @@ install_system_packages() {
                 python python-pip python-virtualenv \
                 gtk4 glib2 xdg-utils libnotify \
                 espeak-ng libsndfile
-            for package in pipewire wireplumber xdg-desktop-portal xdg-desktop-portal-gnome poppler ffmpeg grim maim wl-clipboard; do
+            for package in pipewire wireplumber xdg-desktop-portal xdg-desktop-portal-gnome poppler mupdf-tools ffmpeg grim maim wl-clipboard; do
                 install_optional_package "$manager" "$package"
             done
             ;;
@@ -276,7 +276,7 @@ install_system_packages() {
                 python3 python3-pip python3-virtualenv \
                 gtk4-devel glib2-tools xdg-utils libnotify-tools \
                 espeak-ng libsndfile1
-            for package in pipewire wireplumber xdg-desktop-portal poppler-tools ffmpeg grim maim wl-clipboard; do
+            for package in pipewire wireplumber xdg-desktop-portal poppler-tools mupdf-tools ffmpeg grim maim wl-clipboard; do
                 install_optional_package "$manager" "$package"
             done
             ;;

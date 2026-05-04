@@ -180,7 +180,7 @@ pt-BR, en, es, zh, ru, ja, ko, hi
 Notas:
 
 - TXT e Markdown funcionam sem dependências extras.
-- PDF textual precisa de `pdftotext`/`poppler-utils`.
+- PDF textual usa `pdftotext`/`poppler-utils` ou `mutool`/`mupdf-tools`.
 - PDF escaneado ainda depende de OCR de documento futuro.
 - EPUB ainda pode ser aberto por voz como arquivo local, mas ingestão textual de EPUB ainda não está implementada.
 - A leitura incremental usa backpressure, cache de tradução e cache de áudio quando habilitado.

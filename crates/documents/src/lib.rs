@@ -172,10 +172,33 @@ fn document_format(path: &Path) -> Result<DocumentFormat> {
 }
 
 fn extract_pdf_text(path: &Path) -> Result<String> {
-    extract_pdf_text_with_command(path, Path::new("pdftotext"))
+    extract_pdf_text_with_extractors(path, Path::new("pdftotext"), Path::new("mutool"))
 }
 
-fn extract_pdf_text_with_command(path: &Path, extractor: &Path) -> Result<String> {
+fn extract_pdf_text_with_extractors(
+    path: &Path,
+    pdftotext: &Path,
+    mutool: &Path,
+) -> Result<String> {
+    let mut failures = Vec::new();
+    match extract_pdf_text_with_pdftotext(path, pdftotext) {
+        Ok(text) => return Ok(text),
+        Err(error) => failures.push(format!("pdftotext: {error:#}")),
+    }
+
+    match extract_pdf_text_with_mutool(path, mutool) {
+        Ok(text) => return Ok(text),
+        Err(error) => failures.push(format!("mutool: {error:#}")),
+    }
+
+    bail!(
+        "failed to extract PDF text from `{}`; install poppler-utils (`pdftotext`) or mupdf-tools (`mutool`). Attempts:\n- {}",
+        path.display(),
+        failures.join("\n- ")
+    );
+}
+
+fn extract_pdf_text_with_pdftotext(path: &Path, extractor: &Path) -> Result<String> {
     let output = Command::new(extractor)
         .args(["-layout", "-enc", "UTF-8"])
         .arg(path)
@@ -198,9 +221,45 @@ fn extract_pdf_text_with_command(path: &Path, extractor: &Path) -> Result<String
         );
     }
 
-    let text = String::from_utf8(output.stdout)
-        .context("pdftotext returned non-UTF-8 output despite UTF-8 encoding request")?;
-    let text = normalize_pdf_text(&text);
+    let text = normalize_pdf_text(
+        &String::from_utf8(output.stdout)
+            .context("pdftotext returned non-UTF-8 output despite UTF-8 encoding request")?,
+    );
+    if text.trim().is_empty() {
+        bail!(
+            "PDF text extraction produced no text for `{}`; scanned PDFs need OCR support",
+            path.display()
+        );
+    }
+    Ok(text)
+}
+
+fn extract_pdf_text_with_mutool(path: &Path, extractor: &Path) -> Result<String> {
+    let output = Command::new(extractor)
+        .args(["draw", "-q", "-F", "txt", "-o", "-"])
+        .arg(path)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to execute `mutool`; install mupdf-tools to ingest PDF `{}`",
+                path.display()
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "`mutool` failed for `{}` with status {}: {}",
+            path.display(),
+            output.status,
+            stderr.trim()
+        );
+    }
+
+    let text = normalize_pdf_text(
+        &String::from_utf8(output.stdout)
+            .context("mutool returned non-UTF-8 output for PDF text extraction")?,
+    );
     if text.trim().is_empty() {
         bail!(
             "PDF text extraction produced no text for `{}`; scanned PDFs need OCR support",
@@ -1689,13 +1748,50 @@ mod tests {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&script_path, permissions).unwrap();
 
-        let text = extract_pdf_text_with_command(&pdf_path, &script_path).unwrap();
+        let text = extract_pdf_text_with_pdftotext(&pdf_path, &script_path).unwrap();
         let args = std::fs::read_to_string(&args_path).unwrap();
 
         assert_eq!(text, "First page\n\nSecond page");
         assert_eq!(
             args,
             format!("-layout\n-enc\nUTF-8\n{}\n-\n", pdf_path.display())
+        );
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn pdf_loader_falls_back_to_mutool_when_pdftotext_is_missing() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "visionclip-pdf-mutool-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let missing_pdftotext = temp_dir.join("missing-pdftotext");
+        let mutool_path = temp_dir.join("mutool-test");
+        let args_path = temp_dir.join("mutool-args.txt");
+        let pdf_path = temp_dir.join("book.pdf");
+        std::fs::write(&pdf_path, b"%PDF test placeholder").unwrap();
+        std::fs::write(
+            &mutool_path,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf 'Chapter one\\fChapter two\\n'\n",
+                args_path.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&mutool_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&mutool_path, permissions).unwrap();
+
+        let text =
+            extract_pdf_text_with_extractors(&pdf_path, &missing_pdftotext, &mutool_path).unwrap();
+        let args = std::fs::read_to_string(&args_path).unwrap();
+
+        assert_eq!(text, "Chapter one\n\nChapter two");
+        assert_eq!(
+            args,
+            format!("draw\n-q\n-F\ntxt\n-o\n-\n{}\n", pdf_path.display())
         );
 
         let _ = std::fs::remove_dir_all(temp_dir);
