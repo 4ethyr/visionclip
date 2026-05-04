@@ -25,6 +25,7 @@ const GNOME_SECONDARY_MEDIA_KEYS_SCHEMA: &str =
 const TERTIARY_VOICE_SHORTCUT: &str = "<Super><Alt>v";
 const GNOME_TERTIARY_MEDIA_KEYS_SCHEMA: &str =
     "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-voice-search-super-alt-v/";
+const STATUS_EXTENSION_UUID: &str = "visionclip-status@visionclip";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CheckStatus {
@@ -80,7 +81,15 @@ pub(crate) async fn run(config: &AppConfig) -> Result<bool> {
     let mut checks = Vec::new();
     checks.push(check_config_path()?);
     checks.push(check_daemon_socket(config).await);
-    checks.push(check_overlay_runtime());
+    checks.push(check_status_indicator());
+    if config.voice.overlay_enabled {
+        checks.push(check_overlay_runtime());
+    } else {
+        checks.push(DoctorCheck::ok(
+            "overlay",
+            "overlay central legado desativado; usando indicador de barra",
+        ));
+    }
     checks.push(check_capture_system(command_available));
     checks.push(check_provider_policy(&config.providers));
     checks.push(check_rendered_ai_overview_listener(
@@ -219,6 +228,42 @@ fn check_overlay_runtime() -> DoctorCheck {
     }
 
     DoctorCheck::ok("overlay", "runtime grafico disponivel")
+}
+
+fn check_status_indicator() -> DoctorCheck {
+    let Some(home) = env::var_os("HOME") else {
+        return DoctorCheck::warn(
+            "panel-indicator",
+            "HOME nao definido; indicador nao verificado",
+        );
+    };
+    let extension_dir = PathBuf::from(home)
+        .join(".local")
+        .join("share")
+        .join("gnome-shell")
+        .join("extensions")
+        .join(STATUS_EXTENSION_UUID);
+    let extension_js = extension_dir.join("extension.js");
+
+    if extension_js.exists() {
+        DoctorCheck::ok(
+            "panel-indicator",
+            format!("extensao GNOME instalada em {}", extension_dir.display()),
+        )
+    } else if env::var("XDG_CURRENT_DESKTOP")
+        .map(|desktop| desktop.to_ascii_lowercase().contains("gnome"))
+        .unwrap_or(false)
+    {
+        DoctorCheck::warn(
+            "panel-indicator",
+            "extensao GNOME ausente; instale com scripts/install_gnome_status_indicator.sh",
+        )
+    } else {
+        DoctorCheck::warn(
+            "panel-indicator",
+            "sessao GNOME nao detectada; indicador de barra sera ignorado",
+        )
+    }
 }
 
 fn current_session_type() -> SessionType {

@@ -220,7 +220,7 @@ pub struct VoiceConfig {
     pub backend: String,
     #[serde(default)]
     pub target: String,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub overlay_enabled: bool,
     #[serde(default = "default_voice_shortcut")]
     pub shortcut: String,
@@ -435,7 +435,7 @@ impl Default for VoiceConfig {
             enabled: false,
             backend: default_voice_backend(),
             target: String::new(),
-            overlay_enabled: default_true(),
+            overlay_enabled: false,
             shortcut: default_voice_shortcut(),
             record_duration_ms: default_voice_record_duration_ms(),
             sample_rate_hz: default_voice_sample_rate_hz(),
@@ -659,7 +659,7 @@ fn default_tts_playback_timeout_ms() -> u64 {
 }
 
 fn default_overlay() -> String {
-    "compact".to_string()
+    "panel".to_string()
 }
 
 fn explicit_config_path_from_env() -> Option<PathBuf> {
@@ -733,12 +733,13 @@ mod tests {
         assert!(cfg.audio.voices.is_empty());
         assert!(!cfg.voice.enabled);
         assert_eq!(cfg.voice.backend, "auto");
-        assert!(cfg.voice.overlay_enabled);
+        assert!(!cfg.voice.overlay_enabled);
         assert_eq!(cfg.voice.shortcut, "<Super>F12");
         assert_eq!(cfg.voice.record_duration_ms, 4_000);
         assert!(cfg.documents.enabled);
         assert_eq!(cfg.documents.chunk_chars, 3_200);
         assert_eq!(cfg.documents.chunk_overlap_chars, 320);
+        assert_eq!(cfg.ui.overlay, "panel");
     }
 
     #[test]

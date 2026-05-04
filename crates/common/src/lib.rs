@@ -11,6 +11,7 @@ pub mod portal;
 pub mod router;
 pub mod security;
 pub mod session;
+pub mod status;
 pub mod tools;
 
 pub use actions::{
@@ -47,5 +48,8 @@ pub use security::{
 pub use session::{
     AgentContext, ConversationMessage, DocumentContext, MessageRole, SessionId, SessionManager,
     SessionState,
+};
+pub use status::{
+    assistant_status_path, write_assistant_status, AssistantStatusKind, AssistantStatusSnapshot,
 };
 pub use tools::{ToolCall, ToolDefinition, ToolRegistry, ToolResult, ToolValidationError};

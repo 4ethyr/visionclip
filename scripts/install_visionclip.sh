@@ -551,7 +551,7 @@ hi = "hi_IN-pratham-medium"
 enabled = true
 backend = "auto"
 target = ""
-overlay_enabled = true
+overlay_enabled = false
 shortcut = "$VOICE_SHORTCUT"
 record_duration_ms = 4000
 sample_rate_hz = 16000
@@ -568,7 +568,7 @@ cache_translations = true
 cache_audio = true
 
 [ui]
-overlay = "compact"
+overlay = "panel"
 show_notification = true
 EOF
 }
@@ -666,6 +666,17 @@ install_gnome_shortcut() {
     run bash "$ROOT_DIR/scripts/install_gnome_voice_shortcut.sh" "$VOICE_SHORTCUT"
 }
 
+install_gnome_status_indicator() {
+    if [[ "$SKIP_SHORTCUT" == "1" ]]; then
+        return
+    fi
+    if [[ "${XDG_CURRENT_DESKTOP:-}" != *GNOME* ]] && ! command -v gnome-extensions >/dev/null 2>&1; then
+        warn "GNOME Shell extension tooling not found; skipping status indicator"
+        return
+    fi
+    run bash "$ROOT_DIR/scripts/install_gnome_status_indicator.sh"
+}
+
 run_doctor_checks() {
     if [[ "$SKIP_START" == "1" ]]; then
         return
@@ -697,6 +708,7 @@ main() {
     write_fallback_voice_wrapper
     install_systemd_units
     install_gnome_shortcut
+    install_gnome_status_indicator
     run_doctor_checks
 
     echo
