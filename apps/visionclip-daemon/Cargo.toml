@@ -13,6 +13,7 @@ visionclip-common = { path = "../../crates/common" }
 visionclip-documents = { path = "../../crates/documents" }
 visionclip-infer = { path = "../../crates/infer" }
 visionclip-output = { path = "../../crates/output" }
+visionclip-search = { path = "../../crates/search" }
 visionclip-tts = { path = "../../crates/tts" }
 anyhow.workspace = true
 async-trait.workspace = true

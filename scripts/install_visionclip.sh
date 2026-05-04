@@ -21,6 +21,11 @@ PIPER_PTBR_FEMALE_VOICE="${VISIONCLIP_PIPER_PTBR_FEMALE_VOICE:-dii_pt-BR}"
 PIPER_DEFAULT_VOICE="${VISIONCLIP_PIPER_DEFAULT_VOICE:-$PIPER_PTBR_FEMALE_VOICE}"
 PIPER_VOICES="${VISIONCLIP_PIPER_VOICES:-$PIPER_PTBR_FEMALE_VOICE en_US-lessac-medium es_ES-sharvard-medium zh_CN-huayan-medium ru_RU-ruslan-medium hi_IN-pratham-medium}"
 VOICE_SHORTCUT="${VISIONCLIP_VOICE_SHORTCUT:-<Super>space}"
+SEARCH_OVERLAY_SHORTCUT="${VISIONCLIP_SEARCH_OVERLAY_SHORTCUT:-<Alt>space}"
+WAKE_LISTENER_ENABLED="${VISIONCLIP_WAKE_WORD_ENABLED:-0}"
+WAKE_BLOCK_DURING_PLAYBACK="${VISIONCLIP_WAKE_BLOCK_DURING_PLAYBACK:-1}"
+WAKE_RECORD_DURATION_MS="${VISIONCLIP_WAKE_RECORD_DURATION_MS:-3200}"
+WAKE_IDLE_SLEEP_MS="${VISIONCLIP_WAKE_IDLE_SLEEP_MS:-250}"
 
 YES=0
 SKIP_SYSTEM_PACKAGES=0
@@ -42,13 +47,17 @@ Options:
   --skip-ollama-install     Do not install Ollama if it is missing.
   --skip-ollama-pull        Do not pull the Ollama runtime model.
   --skip-hf-download        Do not download the official Hugging Face model cache.
-  --no-shortcut             Do not install the GNOME voice shortcut.
+  --no-shortcut             Do not install GNOME shortcuts.
+  --enable-wake-listener    Enable and start the local "Key" wake word listener.
+  --disable-wake-listener   Keep the wake word listener disabled.
   --no-start                Install files but do not start systemd user services.
   --overwrite-config        Replace ~/.config/visionclip/config.toml after backing it up.
   --model NAME              Ollama model used by VisionClip. Default: gemma4:e2b.
   --hf-model REPO           Hugging Face model to cache. Default: google/gemma-4-E2B-it.
   --stt-model NAME          faster-whisper model. Default: base.
   --voice-shortcut BINDING  GNOME shortcut binding. Default: <Super>space.
+  --search-overlay-shortcut BINDING
+                            GNOME shortcut for the Search Overlay. Default: <Alt>space.
   -h, --help                Show this help.
 
 Environment:
@@ -56,6 +65,12 @@ Environment:
   VISIONCLIP_PIPER_VOICES  Space-separated Piper voices to download.
   VISIONCLIP_PIPER_PTBR_FEMALE_VOICE
                             Default custom pt-BR Piper voice id. Default: dii_pt-BR.
+  VISIONCLIP_WAKE_WORD_ENABLED
+                            Set to 1 to enable the local "Key" wake listener.
+  VISIONCLIP_WAKE_BLOCK_DURING_PLAYBACK
+                            Set to 0 to allow wake listener while YouTube/music is playing.
+  VISIONCLIP_SEARCH_OVERLAY_SHORTCUT
+                            Shortcut for the local Search Overlay. Default: <Alt>space.
 EOF
 }
 
@@ -167,6 +182,12 @@ parse_args() {
             --no-shortcut)
                 SKIP_SHORTCUT=1
                 ;;
+            --enable-wake-listener)
+                WAKE_LISTENER_ENABLED=1
+                ;;
+            --disable-wake-listener)
+                WAKE_LISTENER_ENABLED=0
+                ;;
             --no-start)
                 SKIP_START=1
                 ;;
@@ -192,6 +213,11 @@ parse_args() {
                 shift
                 [[ $# -gt 0 ]] || die "--voice-shortcut requires a value"
                 VOICE_SHORTCUT="$1"
+                ;;
+            --search-overlay-shortcut)
+                shift
+                [[ $# -gt 0 ]] || die "--search-overlay-shortcut requires a value"
+                SEARCH_OVERLAY_SHORTCUT="$1"
                 ;;
             -h|--help)
                 usage
@@ -264,7 +290,7 @@ install_system_packages() {
                 python3 python3-venv python3-pip \
                 libgtk-4-dev libglib2.0-bin xdg-utils libnotify-bin \
                 espeak-ng libsndfile1
-            for package in pipewire pipewire-bin wireplumber xdg-desktop-portal xdg-desktop-portal-gnome poppler-utils mupdf-tools ffmpeg grim maim gnome-screenshot wl-clipboard; do
+            for package in pipewire pipewire-bin wireplumber pulseaudio-utils xdg-desktop-portal xdg-desktop-portal-gnome poppler-utils mupdf-tools ffmpeg grim maim gnome-screenshot wl-clipboard; do
                 install_optional_package "$manager" "$package"
             done
             ;;
@@ -274,7 +300,7 @@ install_system_packages() {
                 python3 python3-pip python3-virtualenv \
                 gtk4-devel glib2 xdg-utils libnotify \
                 espeak-ng libsndfile
-            for package in pipewire-utils wireplumber xdg-desktop-portal xdg-desktop-portal-gnome poppler-utils mupdf-tools ffmpeg grim maim gnome-screenshot wl-clipboard; do
+            for package in pipewire-utils wireplumber pulseaudio-utils xdg-desktop-portal xdg-desktop-portal-gnome poppler-utils mupdf-tools ffmpeg grim maim gnome-screenshot wl-clipboard; do
                 install_optional_package "$manager" "$package"
             done
             ;;
@@ -284,7 +310,7 @@ install_system_packages() {
                 python python-pip python-virtualenv \
                 gtk4 glib2 xdg-utils libnotify \
                 espeak-ng libsndfile
-            for package in pipewire wireplumber xdg-desktop-portal xdg-desktop-portal-gnome poppler mupdf-tools ffmpeg grim maim wl-clipboard; do
+            for package in pipewire wireplumber libpulse xdg-desktop-portal xdg-desktop-portal-gnome poppler mupdf-tools ffmpeg grim maim wl-clipboard; do
                 install_optional_package "$manager" "$package"
             done
             ;;
@@ -294,7 +320,7 @@ install_system_packages() {
                 python3 python3-pip python3-virtualenv \
                 gtk4-devel glib2-tools xdg-utils libnotify-tools \
                 espeak-ng libsndfile1
-            for package in pipewire wireplumber xdg-desktop-portal poppler-tools mupdf-tools ffmpeg grim maim wl-clipboard; do
+            for package in pipewire wireplumber pulseaudio-utils xdg-desktop-portal poppler-tools mupdf-tools ffmpeg grim maim wl-clipboard; do
                 install_optional_package "$manager" "$package"
             done
             ;;
@@ -535,8 +561,9 @@ write_config() {
         cp "$CONFIG_PATH" "$CONFIG_PATH.bak.$(date +%Y%m%d%H%M%S)"
     fi
 
-    local escaped_model escaped_transcribe escaped_player
+    local escaped_model escaped_search_overlay_shortcut escaped_transcribe escaped_player
     escaped_model="$(toml_escape "$OLLAMA_MODEL")"
+    escaped_search_overlay_shortcut="$(toml_escape "$SEARCH_OVERLAY_SHORTCUT")"
     escaped_player="$(toml_escape "$(detect_player_command)")"
     escaped_transcribe="$(toml_escape "$VENV_DIR/bin/python $ROOT_DIR/tools/stt/faster_whisper_transcribe.py {wav_path} --model $STT_MODEL --language auto --beam-size 5 --vad-filter true --cache-dir $STT_CACHE_DIR")"
 
@@ -599,11 +626,18 @@ hi = "hi_IN-pratham-medium"
 
 [voice]
 enabled = true
+wake_word_enabled = $( [[ "$WAKE_LISTENER_ENABLED" == "1" ]] && echo true || echo false )
+wake_block_during_playback = $( [[ "$WAKE_BLOCK_DURING_PLAYBACK" == "1" ]] && echo true || echo false )
+speaker_verification_enabled = false
+speaker_verification_threshold = 0.72
+speaker_verification_min_samples = 3
 backend = "auto"
 target = ""
 overlay_enabled = false
 shortcut = "$VOICE_SHORTCUT"
 record_duration_ms = 4000
+wake_record_duration_ms = $WAKE_RECORD_DURATION_MS
+wake_idle_sleep_ms = $WAKE_IDLE_SLEEP_MS
 sample_rate_hz = 16000
 channels = 1
 record_command = ""
@@ -620,6 +654,33 @@ cache_audio = true
 [ui]
 overlay = "panel"
 show_notification = true
+
+[ui.search_overlay]
+enabled = true
+shortcut = "$escaped_search_overlay_shortcut"
+liquid_glass_enabled = true
+glass_style = "liquid_crystal"
+blur_radius_px = 32
+panel_opacity = 0.04
+corner_radius_px = 28
+border_opacity = 0.30
+shadow_intensity = 0.28
+highlight_intensity = 0.42
+saturation = 1.18
+contrast = 1.06
+brightness = 1.00
+refraction_strength = 0.86
+chromatic_aberration = 0.28
+liquid_noise = 0.52
+background = "#16111b"
+surface = "#110c15"
+text_primary = "#ffffff"
+text_secondary = "#e0e6ed"
+primary = "#3b82f6"
+secondary = "#0053db"
+ai_glow = "#2fd9f4"
+error = "#ffb4ab"
+animations_enabled = true
 EOF
 }
 
@@ -693,6 +754,7 @@ install_systemd_units() {
     mkdir -p "$USER_SYSTEMD_DIR"
     run cp "$ROOT_DIR/deploy/systemd/visionclip-daemon.service" "$USER_SYSTEMD_DIR/visionclip-daemon.service"
     run cp "$ROOT_DIR/deploy/systemd/piper-http.service" "$USER_SYSTEMD_DIR/piper-http.service"
+    run cp "$ROOT_DIR/deploy/systemd/visionclip-wake-listener.service" "$USER_SYSTEMD_DIR/visionclip-wake-listener.service"
     if command -v systemctl >/dev/null 2>&1; then
         systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS PATH >/dev/null 2>&1 || true
         run systemctl --user daemon-reload
@@ -702,6 +764,12 @@ install_systemd_units() {
             run systemctl --user restart piper-http.service
             wait_for_http "http://127.0.0.1:${VISIONCLIP_PIPER_PORT:-5000}/voices" "Piper HTTP"
             run systemctl --user restart visionclip-daemon.service
+            if [[ "$WAKE_LISTENER_ENABLED" == "1" ]]; then
+                run systemctl --user enable visionclip-wake-listener.service
+                run systemctl --user restart visionclip-wake-listener.service
+            else
+                systemctl --user disable --now visionclip-wake-listener.service >/dev/null 2>&1 || true
+            fi
         fi
     else
         warn "systemctl not found; user services were copied but not enabled"
@@ -716,7 +784,10 @@ install_gnome_shortcut() {
         warn "gsettings not found; skipping GNOME shortcut"
         return
     fi
-    run bash "$ROOT_DIR/scripts/install_gnome_voice_shortcut.sh" "$VOICE_SHORTCUT"
+    (
+        export VISIONCLIP_SEARCH_OVERLAY_SHORTCUT="$SEARCH_OVERLAY_SHORTCUT"
+        run bash "$ROOT_DIR/scripts/install_gnome_voice_shortcut.sh" "$VOICE_SHORTCUT"
+    )
 }
 
 install_gnome_status_indicator() {
@@ -769,6 +840,7 @@ main() {
     info "Binaries: $BIN_DIR"
     info "Config: $CONFIG_PATH"
     info "Piper voices: $PIPER_VOICE_DIR"
+    info "Search overlay shortcut: $SEARCH_OVERLAY_SHORTCUT"
     info "Try: visionclip --voice-agent --voice-transcript 'Abra o terminal' --speak"
 }
 

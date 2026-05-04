@@ -4,7 +4,12 @@
 }
 
 .visionclip-listening-icon {
-  spacing: 2px;
+  spacing: 3px;
+}
+
+.visionclip-mic-icon {
+  color: #ff9f0a;
+  icon-size: 16px;
 }
 
 .visionclip-listening-dot {

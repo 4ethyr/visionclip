@@ -29,6 +29,11 @@ class VisionClipIndicator extends PanelMenu.Button {
             y_align: Clutter.ActorAlign.CENTER,
             x_align: Clutter.ActorAlign.CENTER,
         });
+        this._micIcon = new St.Icon({
+            icon_name: 'audio-input-microphone-symbolic',
+            style_class: 'system-status-icon visionclip-mic-icon',
+        });
+        this._listeningIcon.add_child(this._micIcon);
         this._dots = ['a', 'b', 'c'].map(name => {
             const dot = new St.Widget({
                 style_class: `visionclip-listening-dot visionclip-listening-dot-${name}`,

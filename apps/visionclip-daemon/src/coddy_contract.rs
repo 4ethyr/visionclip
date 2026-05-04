@@ -1187,7 +1187,7 @@ fn is_known_standalone_application(normalized: &str) -> bool {
 fn known_website(normalized: &str) -> Option<KnownWebsite> {
     let compact = compact_normalized(normalized);
     let target = match compact.as_str() {
-        "youtube" | "youtubecom" => KnownWebsite {
+        "youtube" | "youtubecom" | "youto" | "youtoo" | "youtwo" => KnownWebsite {
             label: "YouTube",
             url: "https://www.youtube.com/",
         },

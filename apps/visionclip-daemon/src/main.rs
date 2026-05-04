@@ -18,9 +18,11 @@ use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     collections::{HashMap, HashSet},
+    ffi::OsStr,
     fs,
     future::Future,
-    path::PathBuf,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
     sync::{Arc, Mutex as StdMutex},
     time::Instant,
 };
@@ -32,9 +34,11 @@ use visionclip_common::{
     write_assistant_status, write_message, Action, AppConfig, ApplicationLaunchJob,
     AssistantLanguage, AssistantStatusKind, AuditEvent, AuditLog, CaptureJob, DocumentAskJob,
     DocumentControlJob, DocumentControlKind, DocumentIngestJob, DocumentOpenJob, DocumentReadJob,
-    DocumentSummarizeJob, DocumentTranslateJob, HealthCheckJob, JobResult, PermissionEngine,
-    PolicyDecision, PolicyInput, RiskContext, RiskLevel, SessionId, SessionManager, ToolCall,
-    ToolRegistry, UrlOpenJob, VisionRequest, VoiceSearchJob,
+    DocumentSummarizeJob, DocumentTranslateJob, HealthCheckJob, JobResult, OpenAction,
+    PermissionEngine, PolicyDecision, PolicyInput, RiskContext, RiskLevel, SearchControlRequest,
+    SearchDiagnostics, SearchHit, SearchHitSource, SearchMode, SearchOpenRequest, SearchRequest,
+    SearchResponse, SessionId, SessionManager, ToolCall, ToolRegistry, UrlOpenJob, VisionRequest,
+    VoiceSearchJob,
 };
 use visionclip_documents::{
     AudioCacheEntry, AudioCacheLookup, AudioCacheStore, AudioChunk, AudioSink, ChunkerConfig,
@@ -51,6 +55,10 @@ use visionclip_infer::{
     VisionRequest as ProviderVisionRequest, VisionResponse,
 };
 use visionclip_output::{notify, open_search_query, open_url, ClipboardOwner};
+use visionclip_search::{
+    LocalSearchMode, LocalSearchRequest, RankingConfig as LocalSearchRankingConfig,
+    SearchRuntimeConfig, SearchService,
+};
 use visionclip_tts::PiperHttpClient;
 
 #[tokio::main]
@@ -92,6 +100,15 @@ async fn main() -> Result<()> {
 
     let infer = OllamaBackend::new(config.infer.clone());
     let provider_router = Arc::new(build_provider_router(&config, infer.clone())?);
+    let local_search_path = config.search_sqlite_path()?;
+    let local_search_config = local_search_runtime_config(&config);
+    let local_search = match SearchService::open(&local_search_path, local_search_config.clone()) {
+        Ok(service) => Some(Mutex::new(service)),
+        Err(error) => {
+            warn!(?error, "failed to initialize local search service");
+            None
+        }
+    };
 
     let state = Arc::new(AppState {
         config: config.clone(),
@@ -103,6 +120,7 @@ async fn main() -> Result<()> {
         } else {
             None
         },
+        local_search,
         piper: if config.audio.enabled {
             Some(PiperHttpClient::new(config.audio.clone()))
         } else {
@@ -118,6 +136,26 @@ async fn main() -> Result<()> {
         #[cfg(feature = "coddy-protocol")]
         repl: Mutex::new(coddy_bridge::ReplRuntimeState::new(&config)),
     });
+
+    if config.search.enabled && config.search.index_on_startup {
+        let background_search_path = local_search_path.clone();
+        let background_search_config = local_search_config;
+        tokio::task::spawn_blocking(move || {
+            match SearchService::open(background_search_path, background_search_config)
+                .and_then(|mut service| service.rebuild_startup_index_if_needed())
+            {
+                Ok(Some(summary)) => {
+                    info!(?summary, "local search startup indexing completed");
+                }
+                Ok(None) => {
+                    info!("local search startup indexing skipped; catalog is populated");
+                }
+                Err(error) => {
+                    warn!(?error, "local search startup indexing failed");
+                }
+            }
+        });
+    }
 
     loop {
         let (stream, _) = listener.accept().await?;
@@ -136,6 +174,7 @@ struct AppState {
     infer: OllamaBackend,
     provider_router: Arc<ProviderRouter>,
     search: Option<GoogleSearchClient>,
+    local_search: Option<Mutex<SearchService>>,
     piper: Option<PiperHttpClient>,
     tts_gate: TtsPlaybackGate,
     tools: ToolRegistry,
@@ -214,6 +253,35 @@ fn provider_route_mode(config: &AppConfig) -> ProviderMode {
 
 fn sensitive_provider_mode(config: &AppConfig) -> ProviderMode {
     provider_mode_from_policy_value(&config.providers.sensitive_data_mode)
+}
+
+fn local_search_runtime_config(config: &AppConfig) -> SearchRuntimeConfig {
+    SearchRuntimeConfig {
+        enabled: config.search.enabled,
+        index_on_startup: config.search.index_on_startup,
+        watch_enabled: config.search.watch_enabled,
+        debounce_ms: config.search.debounce_ms,
+        max_file_size_mb: config.search.max_file_size_mb,
+        max_text_bytes: config.search.max_text_bytes,
+        max_workers: config.search.max_workers,
+        content_index: config.search.content_index,
+        semantic_index: config.search.semantic_index,
+        ocr_index: config.search.ocr_index,
+        vector_backend: config.search.vector_backend.clone(),
+        roots: config.search.roots.clone(),
+        exclude_dirs: config.search.exclude_dirs.clone(),
+        exclude_sensitive_dirs: config.search.exclude_sensitive_dirs.clone(),
+        exclude_globs: config.search.exclude_globs.clone(),
+        ranking: LocalSearchRankingConfig {
+            prefer_filename_for_short_queries: config
+                .search
+                .ranking
+                .prefer_filename_for_short_queries,
+            recency_boost: config.search.ranking.recency_boost,
+            frecency_boost: config.search.ranking.frecency_boost,
+            hybrid_fusion: config.search.ranking.hybrid_fusion.clone(),
+        },
+    }
 }
 
 fn provider_mode_from_policy_value(value: &str) -> ProviderMode {
@@ -808,6 +876,9 @@ async fn process_request(state: &AppState, request: VisionRequest) -> Result<Job
         VisionRequest::DocumentControl(job) => process_document_control(state, job).await,
         VisionRequest::DocumentAsk(job) => process_document_ask(state, job).await,
         VisionRequest::DocumentSummarize(job) => process_document_summarize(state, job).await,
+        VisionRequest::Search(job) => process_local_search(state, job).await,
+        VisionRequest::SearchControl(job) => process_local_search_control(state, job).await,
+        VisionRequest::SearchOpen(job) => process_local_search_open(state, job).await,
     }
 }
 
@@ -817,6 +888,399 @@ async fn process_health_check(job: HealthCheckJob) -> Result<JobResult> {
         message: "VisionClip daemon ativo.".to_string(),
         spoken: false,
     })
+}
+
+async fn process_local_search(state: &AppState, job: SearchRequest) -> Result<JobResult> {
+    let total_started_at = Instant::now();
+    let tool_name = local_search_tool_for_request(&job);
+
+    authorize_ephemeral_tool_call(
+        state,
+        ToolCall::new(
+            format!("{}-local-search", job.request_id),
+            tool_name,
+            json!({
+                "query": job.query.clone(),
+                "mode": format!("{:?}", job.mode).to_ascii_lowercase(),
+                "max_results": job.limit.clamp(1, 100),
+            }),
+        ),
+        RiskContext::user_initiated(),
+    )?;
+
+    let Some(local_search) = &state.local_search else {
+        anyhow::bail!("local search service is unavailable");
+    };
+    let mut service = local_search.lock().await;
+    let hits = service.search(LocalSearchRequest {
+        query: job.query.clone(),
+        mode: local_search_mode(job.mode),
+        root_hint: job
+            .root_hint
+            .as_deref()
+            .and_then(visionclip_search::config::expand_home),
+        limit: usize::from(job.limit.clamp(1, 100)),
+    })?;
+
+    Ok(JobResult::Search(SearchResponse {
+        request_id: job.request_id,
+        elapsed_ms: elapsed_ms(total_started_at) as u32,
+        mode_used: job.mode,
+        hits: hits.into_iter().map(search_hit_from_record).collect(),
+        diagnostics: None,
+    }))
+}
+
+async fn process_local_search_control(
+    state: &AppState,
+    request: SearchControlRequest,
+) -> Result<JobResult> {
+    let total_started_at = Instant::now();
+    let request_id = search_control_request_id(&request).to_string();
+    let request_uuid = uuid_from_search_request_id(&request_id);
+    let session_id = ensure_request_session(state, request_uuid).await;
+    let tool_name = match &request {
+        SearchControlRequest::AddRoot { .. } => "index_add_root",
+        SearchControlRequest::Rebuild { .. } => "index_add_root",
+        SearchControlRequest::Status { .. }
+        | SearchControlRequest::RemoveRoot { .. }
+        | SearchControlRequest::Pause { .. }
+        | SearchControlRequest::Resume { .. }
+        | SearchControlRequest::Audit { .. } => "search_files",
+    };
+    let arguments = match &request {
+        SearchControlRequest::AddRoot { path, .. } => json!({"path": path, "sensitive": false}),
+        SearchControlRequest::RemoveRoot { path, .. } => {
+            json!({"query": path, "mode": "control", "max_results": 1})
+        }
+        SearchControlRequest::Rebuild { root, .. } => {
+            json!({"path": root.as_deref().unwrap_or("*"), "sensitive": false})
+        }
+        SearchControlRequest::Status { .. }
+        | SearchControlRequest::Pause { .. }
+        | SearchControlRequest::Resume { .. }
+        | SearchControlRequest::Audit { .. } => {
+            json!({"query": "index-control", "mode": "control", "max_results": 1})
+        }
+    };
+    let authorized_tool = authorize_tool_call(
+        state,
+        &session_id,
+        ToolCall::new(format!("{request_id}-search-control"), tool_name, arguments),
+        RiskContext::user_initiated(),
+    )?;
+
+    let Some(local_search) = &state.local_search else {
+        anyhow::bail!("local search service is unavailable");
+    };
+    let mut service = local_search.lock().await;
+    let message = match request {
+        SearchControlRequest::Status { .. } => {
+            let report = service.status()?;
+            format!(
+                "Local search index: {} files, {} chunks, {} roots, paused={}.",
+                report.status.file_count,
+                report.status.chunk_count,
+                report.status.root_count,
+                report.status.paused
+            )
+        }
+        SearchControlRequest::AddRoot { path, .. } => {
+            let root = visionclip_search::config::expand_home(&path)
+                .unwrap_or_else(|| PathBuf::from(&path));
+            service.add_root(root)?;
+            "Search root added.".to_string()
+        }
+        SearchControlRequest::RemoveRoot { path, .. } => {
+            let root = visionclip_search::config::expand_home(&path)
+                .unwrap_or_else(|| PathBuf::from(&path));
+            service.remove_root(&root)?;
+            "Search root disabled.".to_string()
+        }
+        SearchControlRequest::Pause { .. } => {
+            service.pause()?;
+            "Local search indexing paused.".to_string()
+        }
+        SearchControlRequest::Resume { .. } => {
+            service.resume()?;
+            "Local search indexing resumed.".to_string()
+        }
+        SearchControlRequest::Rebuild { .. } => {
+            let summary = service.rebuild()?;
+            format!(
+                "Local search index rebuilt: {} files indexed, {} files skipped, {} errors.",
+                summary.files_indexed, summary.files_skipped, summary.errors
+            )
+        }
+        SearchControlRequest::Audit { .. } => {
+            let audit = service.audit()?;
+            format!(
+                "Local search audit: {} roots, {} files, {} chunks, {} sensitive skipped, {} failed jobs.",
+                audit.roots.len(),
+                audit.file_count,
+                audit.chunk_count,
+                audit.sensitive_skipped_count,
+                audit.failed_jobs.len()
+            )
+        }
+    };
+    let audit = service.audit()?;
+
+    record_tool_executed(
+        state,
+        &session_id,
+        &authorized_tool,
+        json!({
+            "message": message,
+            "elapsed_ms": elapsed_ms(total_started_at),
+        }),
+    );
+
+    Ok(JobResult::Search(SearchResponse {
+        request_id,
+        elapsed_ms: elapsed_ms(total_started_at) as u32,
+        mode_used: SearchMode::Auto,
+        hits: Vec::new(),
+        diagnostics: Some(SearchDiagnostics {
+            indexed_files: audit.file_count,
+            indexed_chunks: audit.chunk_count,
+            roots: audit.roots,
+            message: Some(message),
+        }),
+    }))
+}
+
+async fn process_local_search_open(
+    state: &AppState,
+    request: SearchOpenRequest,
+) -> Result<JobResult> {
+    let request_uuid = uuid_from_search_request_id(&request.request_id);
+    let session_id = ensure_request_session(state, request_uuid).await;
+    let authorized_tool = authorize_tool_call(
+        state,
+        &session_id,
+        ToolCall::new(
+            format!("{}-open-search-result", request.request_id),
+            "open_search_result",
+            json!({
+                "result_id": request.result_id.clone(),
+                "action": open_action_name(request.action),
+            }),
+        ),
+        RiskContext::user_initiated(),
+    )?;
+    let file_id = parse_search_file_result_id(&request.result_id)?;
+
+    let Some(local_search) = &state.local_search else {
+        anyhow::bail!("local search service is unavailable");
+    };
+    let mut service = local_search.lock().await;
+    let Some(path) = service.file_path(file_id)? else {
+        anyhow::bail!(
+            "search result {} is no longer in the catalog",
+            request.result_id
+        );
+    };
+
+    let message = match request.action {
+        OpenAction::Open => {
+            open_local_path(&path)?;
+            service.record_open(file_id)?;
+            format!("Opened {}.", path.display())
+        }
+        OpenAction::Reveal => {
+            reveal_local_path(&path)?;
+            service.record_open(file_id)?;
+            format!("Revealed {}.", path.display())
+        }
+        OpenAction::AskAbout => {
+            format!(
+                "AskAbout is queued for integration with the document runtime: {}.",
+                path.display()
+            )
+        }
+        OpenAction::Summarize => {
+            format!(
+                "Summarize is queued for integration with the document runtime: {}.",
+                path.display()
+            )
+        }
+    };
+
+    record_tool_executed(
+        state,
+        &session_id,
+        &authorized_tool,
+        json!({
+            "result_id": request.result_id.clone(),
+            "path": path.display().to_string(),
+            "action": open_action_name(request.action),
+            "message": message.clone(),
+        }),
+    );
+
+    Ok(JobResult::ActionStatus {
+        request_id: request_uuid,
+        message,
+        spoken: false,
+    })
+}
+
+fn uuid_from_search_request_id(request_id: &str) -> uuid::Uuid {
+    uuid::Uuid::parse_str(request_id).unwrap_or_else(|_| uuid::Uuid::new_v4())
+}
+
+fn local_search_tool_for_request(job: &SearchRequest) -> &'static str {
+    match job.mode {
+        SearchMode::Grep | SearchMode::Semantic | SearchMode::Hybrid if job.include_snippets => {
+            "search_file_content"
+        }
+        _ => "search_files",
+    }
+}
+
+fn local_search_mode(mode: SearchMode) -> LocalSearchMode {
+    match mode {
+        SearchMode::Auto => LocalSearchMode::Auto,
+        SearchMode::Locate => LocalSearchMode::Locate,
+        SearchMode::Lexical => LocalSearchMode::Lexical,
+        SearchMode::Grep => LocalSearchMode::Grep,
+        SearchMode::Semantic => LocalSearchMode::Semantic,
+        SearchMode::Hybrid => LocalSearchMode::Hybrid,
+        SearchMode::Apps => LocalSearchMode::Apps,
+        SearchMode::Recent => LocalSearchMode::Recent,
+    }
+}
+
+fn search_hit_from_record(hit: visionclip_search::SearchHitRecord) -> SearchHit {
+    SearchHit {
+        result_id: format!("file:{}", hit.file_id),
+        file_id: hit.file_id,
+        path: hit.path.display().to_string(),
+        title: hit.title,
+        kind: hit.kind,
+        score: hit.score,
+        source: match hit.source.as_str() {
+            "path" => SearchHitSource::Path,
+            "content" => SearchHitSource::Content,
+            "ocr" => SearchHitSource::Ocr,
+            "semantic" => SearchHitSource::Semantic,
+            "recent" => SearchHitSource::Recent,
+            "app" => SearchHitSource::App,
+            "document" => SearchHitSource::Document,
+            "code" => SearchHitSource::Code,
+            _ => SearchHitSource::FileName,
+        },
+        snippet: hit.snippet,
+        modified_at: hit.modified_at,
+        size_bytes: hit.size_bytes,
+        requires_confirmation: hit.requires_confirmation,
+    }
+}
+
+fn search_control_request_id(request: &SearchControlRequest) -> &str {
+    match request {
+        SearchControlRequest::Status { request_id }
+        | SearchControlRequest::AddRoot { request_id, .. }
+        | SearchControlRequest::RemoveRoot { request_id, .. }
+        | SearchControlRequest::Pause { request_id }
+        | SearchControlRequest::Resume { request_id }
+        | SearchControlRequest::Rebuild { request_id, .. }
+        | SearchControlRequest::Audit { request_id } => request_id,
+    }
+}
+
+fn parse_search_file_result_id(result_id: &str) -> Result<i64> {
+    let Some(raw) = result_id.strip_prefix("file:") else {
+        anyhow::bail!("unsupported search result id `{result_id}`");
+    };
+    raw.parse::<i64>()
+        .with_context(|| format!("invalid search result id `{result_id}`"))
+}
+
+fn open_action_name(action: OpenAction) -> &'static str {
+    match action {
+        OpenAction::Open => "open",
+        OpenAction::Reveal => "reveal",
+        OpenAction::AskAbout => "ask_about",
+        OpenAction::Summarize => "summarize",
+    }
+}
+
+fn open_local_path(path: &Path) -> Result<()> {
+    if should_launch_desktop_entry(path) {
+        launch_desktop_entry(path)?;
+        return Ok(());
+    }
+    if let Some(program) = first_available_command(&["xdg-open"]) {
+        spawn_detached(&program, [path.as_os_str()])?;
+        return Ok(());
+    }
+    if let Some(program) = first_available_command(&["gio"]) {
+        spawn_detached(&program, [OsStr::new("open"), path.as_os_str()])?;
+        return Ok(());
+    }
+    anyhow::bail!("no safe opener found; install `xdg-open` or `gio`");
+}
+
+fn should_launch_desktop_entry(path: &Path) -> bool {
+    if path.extension().and_then(|value| value.to_str()) != Some("desktop") {
+        return false;
+    }
+    let trusted_roots = [
+        Path::new("/usr/share/applications"),
+        Path::new("/usr/local/share/applications"),
+        Path::new("/var/lib/flatpak/exports/share/applications"),
+    ];
+    if trusted_roots.iter().any(|root| path.starts_with(root)) {
+        return true;
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| path.starts_with(home.join(".local/share/applications")))
+        .unwrap_or(false)
+}
+
+fn launch_desktop_entry(path: &Path) -> Result<()> {
+    if let Some(program) = first_available_command(&["gio"]) {
+        spawn_detached(&program, [OsStr::new("launch"), path.as_os_str()])?;
+        return Ok(());
+    }
+    if let Some(program) = first_available_command(&["gtk-launch"]) {
+        let desktop_id = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| anyhow::anyhow!("invalid desktop entry path {}", path.display()))?;
+        spawn_detached(&program, [OsStr::new(desktop_id)])?;
+        return Ok(());
+    }
+    anyhow::bail!("no safe desktop launcher found; install `gio` or `gtk-launch`");
+}
+
+fn reveal_local_path(path: &Path) -> Result<()> {
+    let target = path.parent().unwrap_or(path);
+    open_local_path(target)
+}
+
+fn first_available_command(commands: &[&str]) -> Option<String> {
+    commands
+        .iter()
+        .find(|command| which::which(command).is_ok())
+        .map(|command| (*command).to_string())
+}
+
+fn spawn_detached<'a>(
+    program: &str,
+    args: impl IntoIterator<Item = &'a std::ffi::OsStr>,
+) -> Result<()> {
+    Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("failed to spawn `{program}`"))?;
+    Ok(())
 }
 
 async fn process_open_application(
@@ -2856,6 +3320,41 @@ fn authorize_tool_call(
     }
 }
 
+fn authorize_ephemeral_tool_call(
+    state: &AppState,
+    call: ToolCall,
+    context: RiskContext,
+) -> Result<AuthorizedTool> {
+    let definition = state
+        .tools
+        .validate_call(&call)
+        .map_err(|error| anyhow::anyhow!("tool call rejected: {error}"))?;
+    let policy_input = PolicyInput {
+        tool_name: definition.name.clone(),
+        risk_level: definition.risk_level,
+        permissions: definition.permissions.clone(),
+        confirmation: definition.confirmation,
+        arguments: call.arguments,
+        context,
+    };
+
+    match state.permission_engine.evaluate(&policy_input) {
+        PolicyDecision::Allow => Ok(AuthorizedTool {
+            name: definition.name.clone(),
+            risk_level: definition.risk_level,
+        }),
+        PolicyDecision::RequireConfirmation(_) => {
+            anyhow::bail!(
+                "tool `{}` requires confirmation before execution",
+                definition.name
+            );
+        }
+        PolicyDecision::Deny(reason) => {
+            anyhow::bail!("tool `{}` denied by policy: {reason}", definition.name);
+        }
+    }
+}
+
 fn record_tool_executed(
     state: &AppState,
     session_id: &SessionId,
@@ -3990,6 +4489,22 @@ mod tests {
             provider_mode_from_policy_value("unexpected"),
             ProviderMode::LocalOnly
         );
+    }
+
+    #[test]
+    fn desktop_entry_launch_policy_only_trusts_application_dirs() {
+        assert!(should_launch_desktop_entry(Path::new(
+            "/usr/share/applications/org.gnome.Terminal.desktop"
+        )));
+        assert!(should_launch_desktop_entry(Path::new(
+            "/var/lib/flatpak/exports/share/applications/com.example.App.desktop"
+        )));
+        assert!(!should_launch_desktop_entry(Path::new(
+            "/home/aethyr/Downloads/suspicious.desktop"
+        )));
+        assert!(!should_launch_desktop_entry(Path::new(
+            "/usr/share/applications/readme.txt"
+        )));
     }
 
     #[test]

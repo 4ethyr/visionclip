@@ -1,20 +1,26 @@
 mod capture;
 mod doctor;
+mod search_overlay;
 mod voice;
 mod voice_overlay;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 use std::time::Instant;
-use tokio::net::UnixStream;
-use tracing::{info, warn};
+use tokio::{
+    net::UnixStream,
+    process::Command,
+    time::{sleep, Duration},
+};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 use visionclip_common::{
     read_message, write_assistant_status, write_message, AppConfig, ApplicationLaunchJob,
     AssistantLanguage, AssistantStatusKind, CaptureJob, DocumentAskJob, DocumentControlJob,
     DocumentControlKind, DocumentIngestJob, DocumentOpenJob, DocumentReadJob, DocumentSummarizeJob,
-    DocumentTranslateJob, JobResult, SessionType, UrlOpenJob, VisionRequest, VoiceSearchJob,
+    DocumentTranslateJob, JobResult, SearchControlRequest, SearchHit, SearchMode, SearchRequest,
+    SearchResponse, SessionType, UrlOpenJob, VisionRequest, VoiceSearchJob,
 };
 
 #[derive(Debug, Parser)]
@@ -52,6 +58,12 @@ struct Cli {
     voice_agent_dry_run: bool,
 
     #[arg(long, default_value_t = false)]
+    wake_listener: bool,
+
+    #[arg(long, hide = true, default_value_t = false)]
+    wake_listener_once: bool,
+
+    #[arg(long, default_value_t = false)]
     doctor: bool,
 
     #[arg(long, default_value_t = false)]
@@ -71,12 +83,103 @@ struct Cli {
 
     #[arg(long, hide = true, default_value_t = 4000)]
     voice_overlay_duration_ms: u64,
+
+    #[arg(long, default_value_t = false)]
+    search_overlay: bool,
 }
 
 #[derive(Debug, Subcommand)]
 enum Commands {
     #[command(subcommand)]
     Document(DocumentCommand),
+    #[command(subcommand)]
+    Voice(VoiceCommand),
+    Search(SearchCommand),
+    Locate(LocateCommand),
+    Grep(GrepCommand),
+    #[command(subcommand)]
+    Index(IndexCommand),
+}
+
+#[derive(Debug, Args)]
+struct SearchCommand {
+    query: String,
+    #[arg(long, default_value_t = false)]
+    semantic: bool,
+    #[arg(long, default_value_t = false)]
+    hybrid: bool,
+    #[arg(long, default_value_t = 10)]
+    limit: u16,
+    #[arg(long, default_value_t = false)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct LocateCommand {
+    filename: String,
+    #[arg(long, default_value_t = 10)]
+    limit: u16,
+    #[arg(long, default_value_t = false)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct GrepCommand {
+    query: String,
+    root: Option<PathBuf>,
+    #[arg(long, default_value_t = false)]
+    semantic: bool,
+    #[arg(long, default_value_t = 20)]
+    limit: u16,
+    #[arg(long, default_value_t = false)]
+    json: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum IndexCommand {
+    Status {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Add {
+        path: PathBuf,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Remove {
+        path: PathBuf,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Rebuild {
+        root: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Audit {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Pause {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    Resume {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum VoiceCommand {
+    Enroll {
+        #[arg(long, default_value_t = 3)]
+        samples: usize,
+        #[arg(long, default_value = "default")]
+        label: String,
+    },
+    Status,
+    Clear,
 }
 
 #[derive(Debug, Subcommand)]
@@ -121,6 +224,10 @@ async fn main() -> Result<()> {
 
     let config = AppConfig::load()?;
 
+    if cli.search_overlay {
+        return search_overlay::run_search_overlay(&config);
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             std::env::var("RUST_LOG").unwrap_or_else(|_| config.general.log_level.clone()),
@@ -144,6 +251,10 @@ async fn main() -> Result<()> {
             println!("No active VisionClip speech playback was found.");
         }
         return Ok(());
+    }
+
+    if cli.wake_listener {
+        return run_wake_listener(&config, cli.speak, cli.wake_listener_once).await;
     }
 
     if let Some(command) = &cli.command {
@@ -188,64 +299,7 @@ async fn main() -> Result<()> {
     }
 
     if let Some(command) = &resolved_voice_agent {
-        match command {
-            voice::VoiceAgentCommand::OpenApplication {
-                transcript,
-                language,
-                app_name,
-            } => {
-                return run_open_application(
-                    &config,
-                    cli.speak,
-                    app_name,
-                    Some(transcript),
-                    Some(*language),
-                )
-                .await;
-            }
-            voice::VoiceAgentCommand::OpenUrl {
-                transcript,
-                language,
-                label,
-                url,
-            } => {
-                return run_open_url(
-                    &config,
-                    cli.speak,
-                    label,
-                    url,
-                    Some(transcript),
-                    Some(*language),
-                )
-                .await;
-            }
-            voice::VoiceAgentCommand::OpenDocument {
-                transcript,
-                language,
-                query,
-            } => {
-                return run_open_document(
-                    &config,
-                    cli.speak,
-                    query,
-                    Some(transcript),
-                    Some(*language),
-                )
-                .await;
-            }
-            voice::VoiceAgentCommand::SearchWeb {
-                transcript,
-                language,
-                query,
-            } => {
-                let voice_search = voice::VoiceSearch {
-                    transcript: transcript.clone(),
-                    language: *language,
-                    query: query.clone(),
-                };
-                return run_voice_search(&config, cli.speak, &voice_search).await;
-            }
-        }
+        return run_voice_agent_command(&config, cli.speak, command).await;
     }
 
     let resolved_voice_request = if cli.action.is_none() && cli.voice_request {
@@ -400,6 +454,9 @@ async fn main() -> Result<()> {
         JobResult::DocumentStatus { .. } => {
             anyhow::bail!("daemon returned unexpected document response for capture request");
         }
+        JobResult::Search(_) => {
+            anyhow::bail!("daemon returned unexpected search response for capture request");
+        }
     }
 
     Ok(())
@@ -408,6 +465,477 @@ async fn main() -> Result<()> {
 async fn run_command(config: &AppConfig, command: &Commands, speak: bool) -> Result<()> {
     match command {
         Commands::Document(command) => run_document_command(config, command, speak).await,
+        Commands::Voice(command) => run_voice_command(config, command).await,
+        Commands::Search(command) => run_search_command(config, command).await,
+        Commands::Locate(command) => run_locate_command(config, command).await,
+        Commands::Grep(command) => run_grep_command(config, command).await,
+        Commands::Index(command) => run_index_command(config, command).await,
+    }
+}
+
+async fn run_voice_command(config: &AppConfig, command: &VoiceCommand) -> Result<()> {
+    let profile_path = config.voice_profile_path()?;
+    match command {
+        VoiceCommand::Enroll { samples, label } => {
+            let profile =
+                voice::enroll_speaker_profile(&config.voice, &profile_path, *samples, label)
+                    .await?;
+            println!(
+                "Perfil de voz salvo em {}\nlabel={}\nsamples={}\nthreshold={:.2}",
+                profile_path.display(),
+                profile.label,
+                profile.sample_count,
+                profile.threshold
+            );
+        }
+        VoiceCommand::Status => {
+            let status = voice::speaker_profile_status(&profile_path)?;
+            if status.exists {
+                println!(
+                    "speaker_profile=ready\npath={}\nlabel={}\nsamples={}\nthreshold={:.2}\ncreated_at_ms={}",
+                    status.path.display(),
+                    status.label.as_deref().unwrap_or("default"),
+                    status.sample_count,
+                    status.threshold.unwrap_or_default(),
+                    status.created_at_ms.unwrap_or_default()
+                );
+            } else {
+                println!(
+                    "speaker_profile=missing\npath={}\nrun=visionclip voice enroll --samples {}",
+                    status.path.display(),
+                    config.voice.speaker_verification_min_samples
+                );
+            }
+        }
+        VoiceCommand::Clear => {
+            if voice::clear_speaker_profile(&profile_path)? {
+                println!("Perfil de voz removido: {}", profile_path.display());
+            } else {
+                println!(
+                    "Nenhum perfil de voz encontrado em {}",
+                    profile_path.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn run_wake_listener(config: &AppConfig, speak: bool, once: bool) -> Result<()> {
+    if !config.voice.wake_word_enabled {
+        anyhow::bail!(
+            "wake listener is disabled; set [voice].wake_word_enabled = true or run the installer with --enable-wake-listener"
+        );
+    }
+
+    info!(
+        wake_record_duration_ms = config.voice.wake_record_duration_ms,
+        wake_idle_sleep_ms = config.voice.wake_idle_sleep_ms,
+        "VisionClip wake listener started"
+    );
+
+    let voice_profile_path = config.voice_profile_path()?;
+    let speaker_gate_ready = config.voice.speaker_verification_enabled
+        && voice::speaker_profile_exists(&voice_profile_path);
+    if config.voice.speaker_verification_enabled && !speaker_gate_ready {
+        warn!(
+            path = %voice_profile_path.display(),
+            "speaker verification is enabled but no usable voice profile exists; playback blocking remains active"
+        );
+    }
+
+    let mut playback_blocked = false;
+    let mut last_playback_block_log: Option<Instant> = None;
+    let mut playback_clear_since: Option<Instant> = None;
+    let playback_resume_grace = Duration::from_millis(2_500);
+
+    loop {
+        if wake_should_skip_for_playback(config, speaker_gate_ready).await {
+            playback_clear_since = None;
+            let should_log = last_playback_block_log
+                .map(|logged_at| logged_at.elapsed() >= Duration::from_secs(60))
+                .unwrap_or(true);
+            if should_log {
+                warn!(
+                    "wake listener paused while system playback is active; passive `Key` is ignored until playback stops"
+                );
+                last_playback_block_log = Some(Instant::now());
+            }
+            if !playback_blocked {
+                let _ = write_assistant_status(
+                    AssistantStatusKind::Idle,
+                    Some("wake_blocked_by_playback"),
+                    None,
+                );
+                playback_blocked = true;
+            }
+            if once {
+                break;
+            }
+            sleep(Duration::from_millis(
+                config.voice.wake_idle_sleep_ms.max(1_000),
+            ))
+            .await;
+            continue;
+        }
+
+        if playback_blocked {
+            let clear_since = playback_clear_since.get_or_insert_with(Instant::now);
+            if clear_since.elapsed() < playback_resume_grace {
+                if once {
+                    break;
+                }
+                sleep(Duration::from_millis(
+                    config.voice.wake_idle_sleep_ms.max(1_000),
+                ))
+                .await;
+                continue;
+            }
+            warn!("wake listener resumed after system playback stopped");
+            playback_blocked = false;
+            last_playback_block_log = None;
+            playback_clear_since = None;
+        }
+
+        let _ = write_assistant_status(AssistantStatusKind::Listening, Some("wake_passive"), None);
+
+        let speaker_profile = speaker_gate_ready.then_some(voice_profile_path.as_path());
+        match voice::listen_for_wake_agent_activation(&config.voice, speaker_profile).await {
+            Ok(Some(voice::WakeAgentActivation::Command(command))) => {
+                let _ = write_assistant_status(
+                    AssistantStatusKind::Listening,
+                    Some("wake_word_detected"),
+                    None,
+                );
+                if let Err(error) = run_voice_agent_command(config, speak, &command).await {
+                    let _ = write_assistant_status(AssistantStatusKind::Idle, None, None);
+                    warn!(?error, "wake listener failed to run detected command");
+                }
+            }
+            Ok(Some(voice::WakeAgentActivation::AwaitingCommand { transcript })) => {
+                info!(
+                    transcript_chars = transcript.chars().count(),
+                    "wake word detected; capturing follow-up command"
+                );
+                let _ = write_assistant_status(
+                    AssistantStatusKind::Listening,
+                    Some("wake_word_detected"),
+                    None,
+                );
+                match voice::resolve_voice_agent_command(&config.voice, None).await {
+                    Ok(command) => {
+                        if let Err(error) = run_voice_agent_command(config, speak, &command).await {
+                            let _ = write_assistant_status(AssistantStatusKind::Idle, None, None);
+                            warn!(?error, "wake listener failed to run follow-up command");
+                        }
+                    }
+                    Err(error) => {
+                        let _ = write_assistant_status(AssistantStatusKind::Idle, None, None);
+                        warn!(?error, "wake listener could not resolve follow-up command");
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                if is_empty_voice_transcript_error(&error) {
+                    debug!("wake listener polling turn did not produce a transcript");
+                } else {
+                    warn!(?error, "wake listener polling turn failed");
+                    let _ = write_assistant_status(AssistantStatusKind::Idle, None, None);
+                }
+            }
+        }
+
+        if once {
+            break;
+        }
+
+        sleep(Duration::from_millis(
+            config.voice.wake_idle_sleep_ms.max(1_000),
+        ))
+        .await;
+    }
+
+    Ok(())
+}
+
+async fn wake_should_skip_for_playback(config: &AppConfig, speaker_gate_ready: bool) -> bool {
+    if !config.voice.wake_block_during_playback {
+        return false;
+    }
+    if speaker_gate_ready {
+        return false;
+    }
+
+    match Command::new("pactl")
+        .args(["list", "sink-inputs"])
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => {
+            pactl_sink_inputs_have_active_playback(&String::from_utf8_lossy(&output.stdout))
+        }
+        Ok(output) => {
+            debug!(
+                status = ?output.status.code(),
+                stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+                "wake playback gate could not inspect sink inputs; skipping wake polling"
+            );
+            true
+        }
+        Err(error) => {
+            debug!(
+                ?error,
+                "wake playback gate could not execute pactl; skipping wake polling"
+            );
+            true
+        }
+    }
+}
+
+fn pactl_sink_inputs_have_active_playback(output: &str) -> bool {
+    output
+        .split("\nSink Input #")
+        .filter(|block| !block.trim().is_empty())
+        .any(|block| {
+            let mut saw_playback_status = false;
+            for line in block.lines().map(str::trim) {
+                if let Some(state) = line.strip_prefix("State:") {
+                    saw_playback_status = true;
+                    if state.trim().eq_ignore_ascii_case("RUNNING") {
+                        return true;
+                    }
+                }
+                if let Some(corked) = line.strip_prefix("Corked:") {
+                    saw_playback_status = true;
+                    if corked.trim().eq_ignore_ascii_case("no") {
+                        return true;
+                    }
+                }
+                if line == "pulse.corked = \"false\"" {
+                    return true;
+                }
+                if line == "pulse.corked = \"true\"" {
+                    saw_playback_status = true;
+                }
+            }
+
+            !saw_playback_status
+        })
+}
+
+fn is_empty_voice_transcript_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    message.contains("voice transcript is empty")
+        || message.contains("transcript is empty")
+        || message.contains("produced no transcript")
+        || message.contains("no usable transcript")
+        || message.contains("wake audio below speech threshold")
+        || message.contains("wake speaker verification rejected sample")
+}
+
+async fn run_search_command(config: &AppConfig, command: &SearchCommand) -> Result<()> {
+    let mode = if command.hybrid {
+        SearchMode::Hybrid
+    } else if command.semantic {
+        SearchMode::Semantic
+    } else {
+        SearchMode::Auto
+    };
+    run_search_request(
+        config,
+        SearchRequest {
+            request_id: Uuid::new_v4().to_string(),
+            query: command.query.clone(),
+            mode,
+            root_hint: None,
+            limit: command.limit,
+            include_snippets: true,
+            include_ocr: true,
+            include_semantic: command.semantic || command.hybrid,
+        },
+        command.json,
+    )
+    .await
+}
+
+async fn run_locate_command(config: &AppConfig, command: &LocateCommand) -> Result<()> {
+    run_search_request(
+        config,
+        SearchRequest {
+            request_id: Uuid::new_v4().to_string(),
+            query: command.filename.clone(),
+            mode: SearchMode::Locate,
+            root_hint: None,
+            limit: command.limit,
+            include_snippets: false,
+            include_ocr: false,
+            include_semantic: false,
+        },
+        command.json,
+    )
+    .await
+}
+
+async fn run_grep_command(config: &AppConfig, command: &GrepCommand) -> Result<()> {
+    run_search_request(
+        config,
+        SearchRequest {
+            request_id: Uuid::new_v4().to_string(),
+            query: command.query.clone(),
+            mode: if command.semantic {
+                SearchMode::Hybrid
+            } else {
+                SearchMode::Grep
+            },
+            root_hint: command.root.as_ref().map(|path| {
+                path.canonicalize()
+                    .unwrap_or_else(|_| path.clone())
+                    .display()
+                    .to_string()
+            }),
+            limit: command.limit,
+            include_snippets: true,
+            include_ocr: false,
+            include_semantic: command.semantic,
+        },
+        command.json,
+    )
+    .await
+}
+
+async fn run_search_request(
+    config: &AppConfig,
+    request: SearchRequest,
+    json_output: bool,
+) -> Result<()> {
+    let response = send_request(config, VisionRequest::Search(request)).await?;
+    match response {
+        JobResult::Search(response) => print_search_response(&response, json_output),
+        JobResult::Error { code, message, .. } => {
+            anyhow::bail!("daemon returned error {code}: {message}");
+        }
+        JobResult::ActionStatus { .. }
+        | JobResult::ClipboardText { .. }
+        | JobResult::BrowserQuery { .. }
+        | JobResult::DocumentStatus { .. } => {
+            anyhow::bail!("daemon returned unexpected response for search request");
+        }
+    }
+}
+
+async fn run_index_command(config: &AppConfig, command: &IndexCommand) -> Result<()> {
+    let request_id = Uuid::new_v4().to_string();
+    let (request, json_output) = match command {
+        IndexCommand::Status { json } => (SearchControlRequest::Status { request_id }, *json),
+        IndexCommand::Add { path, json } => (
+            SearchControlRequest::AddRoot {
+                request_id,
+                path: path.display().to_string(),
+            },
+            *json,
+        ),
+        IndexCommand::Remove { path, json } => (
+            SearchControlRequest::RemoveRoot {
+                request_id,
+                path: path.display().to_string(),
+            },
+            *json,
+        ),
+        IndexCommand::Rebuild { root, json } => (
+            SearchControlRequest::Rebuild {
+                request_id,
+                root: root.as_ref().map(|path| path.display().to_string()),
+            },
+            *json,
+        ),
+        IndexCommand::Audit { json } => (SearchControlRequest::Audit { request_id }, *json),
+        IndexCommand::Pause { json } => (SearchControlRequest::Pause { request_id }, *json),
+        IndexCommand::Resume { json } => (SearchControlRequest::Resume { request_id }, *json),
+    };
+
+    let response = send_request(config, VisionRequest::SearchControl(request)).await?;
+    match response {
+        JobResult::Search(response) => print_search_response(&response, json_output),
+        JobResult::ActionStatus { message, .. } => {
+            if json_output {
+                println!("{}", serde_json::json!({ "message": message }));
+            } else {
+                println!("{}", message);
+            }
+            Ok(())
+        }
+        JobResult::Error { code, message, .. } => {
+            anyhow::bail!("daemon returned error {code}: {message}");
+        }
+        JobResult::ClipboardText { .. }
+        | JobResult::BrowserQuery { .. }
+        | JobResult::DocumentStatus { .. } => {
+            anyhow::bail!("daemon returned unexpected response for index command");
+        }
+    }
+}
+
+fn print_search_response(response: &SearchResponse, json_output: bool) -> Result<()> {
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(response)?);
+        return Ok(());
+    }
+
+    if let Some(message) = response
+        .diagnostics
+        .as_ref()
+        .and_then(|diagnostics| diagnostics.message.as_deref())
+    {
+        println!("{}", message);
+    }
+
+    if response.hits.is_empty() {
+        if response
+            .diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.message.as_ref())
+            .is_none()
+        {
+            println!("No local results.");
+        }
+        return Ok(());
+    }
+
+    for (index, hit) in response.hits.iter().enumerate() {
+        print_search_hit(index + 1, hit);
+    }
+    Ok(())
+}
+
+fn print_search_hit(index: usize, hit: &SearchHit) {
+    let size = hit
+        .size_bytes
+        .map(format_size)
+        .unwrap_or_else(|| "-".to_string());
+    println!(
+        "{index}. {}  [{} | score {:.1} | {}]",
+        hit.title, hit.kind, hit.score, size
+    );
+    println!("   {}", hit.path);
+    if let Some(snippet) = &hit.snippet {
+        println!("   {}", snippet);
+    }
+}
+
+fn format_size(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let bytes = bytes as f64;
+    if bytes >= GB {
+        format!("{:.1}GB", bytes / GB)
+    } else if bytes >= MB {
+        format!("{:.1}MB", bytes / MB)
+    } else if bytes >= KB {
+        format!("{:.1}KB", bytes / KB)
+    } else {
+        format!("{}B", bytes as u64)
     }
 }
 
@@ -525,9 +1053,49 @@ async fn run_document_command(
         JobResult::BrowserQuery { .. } => {
             anyhow::bail!("daemon returned unexpected browser query for document command");
         }
+        JobResult::Search(_) => {
+            anyhow::bail!("daemon returned unexpected search response for document command");
+        }
     }
 
     Ok(())
+}
+
+async fn run_voice_agent_command(
+    config: &AppConfig,
+    speak: bool,
+    command: &voice::VoiceAgentCommand,
+) -> Result<()> {
+    match command {
+        voice::VoiceAgentCommand::OpenApplication {
+            transcript,
+            language,
+            app_name,
+        } => run_open_application(config, speak, app_name, Some(transcript), Some(*language)).await,
+        voice::VoiceAgentCommand::OpenUrl {
+            transcript,
+            language,
+            label,
+            url,
+        } => run_open_url(config, speak, label, url, Some(transcript), Some(*language)).await,
+        voice::VoiceAgentCommand::OpenDocument {
+            transcript,
+            language,
+            query,
+        } => run_open_document(config, speak, query, Some(transcript), Some(*language)).await,
+        voice::VoiceAgentCommand::SearchWeb {
+            transcript,
+            language,
+            query,
+        } => {
+            let voice_search = voice::VoiceSearch {
+                transcript: transcript.clone(),
+                language: *language,
+                query: query.clone(),
+            };
+            run_voice_search(config, speak, &voice_search).await
+        }
+    }
 }
 
 async fn send_request(config: &AppConfig, request: VisionRequest) -> Result<JobResult> {
@@ -656,7 +1224,8 @@ async fn run_open_application(
         }
         JobResult::ClipboardText { .. }
         | JobResult::BrowserQuery { .. }
-        | JobResult::DocumentStatus { .. } => {
+        | JobResult::DocumentStatus { .. }
+        | JobResult::Search(_) => {
             anyhow::bail!("daemon returned unexpected response for open application");
         }
     }
@@ -734,7 +1303,8 @@ async fn run_open_url(
         }
         JobResult::ClipboardText { .. }
         | JobResult::BrowserQuery { .. }
-        | JobResult::DocumentStatus { .. } => {
+        | JobResult::DocumentStatus { .. }
+        | JobResult::Search(_) => {
             anyhow::bail!("daemon returned unexpected response for open url");
         }
     }
@@ -809,7 +1379,8 @@ async fn run_open_document(
         }
         JobResult::ClipboardText { .. }
         | JobResult::BrowserQuery { .. }
-        | JobResult::DocumentStatus { .. } => {
+        | JobResult::DocumentStatus { .. }
+        | JobResult::Search(_) => {
             anyhow::bail!("daemon returned unexpected response for open document");
         }
     }
@@ -896,7 +1467,9 @@ async fn run_voice_search(
         JobResult::ClipboardText { .. } => {
             anyhow::bail!("daemon returned unexpected clipboard response for voice search");
         }
-        JobResult::ActionStatus { .. } | JobResult::DocumentStatus { .. } => {
+        JobResult::ActionStatus { .. }
+        | JobResult::DocumentStatus { .. }
+        | JobResult::Search(_) => {
             anyhow::bail!("daemon returned unexpected action status for voice search");
         }
     }
@@ -986,5 +1559,73 @@ mod tests {
         assert!(report.contains("intent=open_url"));
         assert!(report.contains("language=zh"));
         assert!(report.contains("label=YouTube"));
+    }
+
+    #[test]
+    fn detects_active_pactl_sink_input_for_wake_gate() {
+        let output = r#"
+Sink Input #93
+    Driver: PipeWire
+    Owner Module: n/a
+    State: RUNNING
+    Properties:
+        application.name = "Firefox"
+"#;
+
+        assert!(pactl_sink_inputs_have_active_playback(output));
+    }
+
+    #[test]
+    fn detects_pipewire_corked_no_sink_input_for_wake_gate() {
+        let output = r#"
+Sink Input #3836
+    Driver: PipeWire
+    Corked: no
+    Properties:
+        application.name = "Google Chrome"
+        pulse.corked = "false"
+"#;
+
+        assert!(pactl_sink_inputs_have_active_playback(output));
+    }
+
+    #[test]
+    fn ignores_inactive_pactl_sink_input_for_wake_gate() {
+        let output = r#"
+Sink Input #94
+    Driver: PipeWire
+    State: CORKED
+    Properties:
+        application.name = "VisionClip"
+"#;
+
+        assert!(!pactl_sink_inputs_have_active_playback(output));
+        assert!(!pactl_sink_inputs_have_active_playback(""));
+    }
+
+    #[test]
+    fn ignores_pipewire_corked_yes_sink_input_for_wake_gate() {
+        let output = r#"
+Sink Input #96
+    Driver: PipeWire
+    Corked: yes
+    Properties:
+        application.name = "Paused Player"
+        pulse.corked = "true"
+"#;
+
+        assert!(!pactl_sink_inputs_have_active_playback(output));
+    }
+
+    #[test]
+    fn treats_unknown_pactl_sink_input_state_as_active_for_wake_gate() {
+        let output = r#"
+Sink Input #95
+    Driver: PipeWire
+    Properties:
+        application.name = "Unknown Player"
+"#;
+
+        assert!(pactl_sink_inputs_have_active_playback(output));
     }
 }

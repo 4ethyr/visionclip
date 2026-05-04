@@ -1,0 +1,15 @@
+[Unit]
+Description=VisionClip Wake Word Listener
+PartOf=graphical-session.target
+After=graphical-session.target visionclip-daemon.service
+Wants=visionclip-daemon.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/visionclip --wake-listener --speak
+Restart=on-failure
+RestartSec=2
+Environment=RUST_LOG=warn
+
+[Install]
+WantedBy=default.target

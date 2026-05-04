@@ -2731,6 +2731,7 @@ dependencies = [
  "clap",
  "gtk4",
  "reqwest",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
@@ -2789,6 +2790,7 @@ dependencies = [
  "visionclip-documents",
  "visionclip-infer",
  "visionclip-output",
+ "visionclip-search",
  "visionclip-tts",
  "which",
 ]
@@ -2830,6 +2832,19 @@ dependencies = [
  "urlencoding",
  "visionclip-common",
  "which",
+]
+
+[[package]]
+name = "visionclip-search"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "directories",
+ "rusqlite",
+ "serde",
+ "thiserror 2.0.18",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

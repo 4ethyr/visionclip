@@ -59,6 +59,22 @@ async fn run_doctor() -> Result<()> {
         summarize_portal_backends(&screenshot_portal_backends_for_current_desktop())
     );
     println!("Voice input enabled: {}", yes_no(config.voice.enabled));
+    println!(
+        "Wake word listener enabled: {}",
+        yes_no(config.voice.wake_word_enabled)
+    );
+    println!(
+        "Wake playback gate enabled: {}",
+        yes_no(config.voice.wake_block_during_playback)
+    );
+    println!(
+        "Speaker verification enabled: {}",
+        yes_no(config.voice.speaker_verification_enabled)
+    );
+    println!(
+        "Speaker profile path: {}",
+        config.voice_profile_path()?.display()
+    );
     println!("Voice backend: {}", config.voice.backend);
     println!(
         "Legacy voice overlay enabled: {}",
@@ -74,8 +90,16 @@ async fn run_doctor() -> Result<()> {
     );
     println!("Voice shortcut: {}", config.voice.shortcut);
     println!(
+        "Search overlay shortcut: {}",
+        config.ui.search_overlay.shortcut
+    );
+    println!(
         "Voice record duration: {} ms",
         config.voice.record_duration_ms
+    );
+    println!(
+        "Wake record duration: {} ms",
+        config.voice.wake_record_duration_ms
     );
     println!(
         "Voice transcribe command: {}",
