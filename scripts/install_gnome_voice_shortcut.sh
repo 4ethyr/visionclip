@@ -16,6 +16,43 @@ BOOK_READ_BINDING="${VISIONCLIP_BOOK_READ_SHORTCUT:-<Alt>4}"
 BOOK_TRANSLATE_READ_BINDING="${VISIONCLIP_BOOK_TRANSLATE_READ_SHORTCUT:-<Alt>5}"
 SEARCH_OVERLAY_BINDING="${VISIONCLIP_SEARCH_OVERLAY_SHORTCUT:-<Alt>space}"
 
+usage() {
+    cat <<'EOF'
+Uso:
+  scripts/install_gnome_voice_shortcut.sh [voice-agent-binding]
+
+Instala atalhos GNOME do VisionClip. Sem argumentos, usa:
+  Super+Space -> agente de voz
+  Alt+1       -> captura + explain
+  Alt+2       -> captura + translate_ptbr
+  Alt+3       -> pesquisa por voz
+  Alt+4       -> modo de voz para leitura de livro
+  Alt+5       -> modo de voz para leitura/traducao de livro
+  Alt+Space   -> Search Overlay
+
+Variaveis uteis:
+  VISIONCLIP_VOICE_SHORTCUT
+  VISIONCLIP_CAPTURE_EXPLAIN_SHORTCUT
+  VISIONCLIP_CAPTURE_TRANSLATE_SHORTCUT
+  VISIONCLIP_VOICE_SEARCH_SHORTCUT
+  VISIONCLIP_BOOK_READ_SHORTCUT
+  VISIONCLIP_BOOK_TRANSLATE_READ_SHORTCUT
+  VISIONCLIP_SEARCH_OVERLAY_SHORTCUT
+EOF
+}
+
+case "${1:-}" in
+    -h|--help)
+        usage
+        exit 0
+        ;;
+    --*)
+        echo "Erro: opcao invalida: $1" >&2
+        usage >&2
+        exit 1
+        ;;
+esac
+
 OLD_KEYBINDING_PATHS=(
     "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-voice-search/"
     "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/visionclip-voice-search-shift/"

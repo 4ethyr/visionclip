@@ -10,7 +10,7 @@ use visionclip_common::{
 };
 use visionclip_infer::{list_ollama_models, OllamaModelSummary};
 
-const OLLAMA_PROBE_TIMEOUT_MS: u64 = 180_000;
+const OLLAMA_PROBE_TIMEOUT_MS: u64 = 20_000;
 
 #[derive(Debug, Parser)]
 #[command(name = "visionclip-config")]
@@ -179,7 +179,11 @@ async fn run_doctor() -> Result<()> {
                     Err(error) => println!("Configured model probe: failed ({error})"),
                 }
             }
-            if ocr_available {
+            if ocr_available
+                && !should_probe_ocr_model(&config.infer.model, &config.infer.ocr_model)
+            {
+                println!("Configured OCR model probe: same as configured model");
+            } else if ocr_available {
                 match probe_ollama_model_with_timeout(
                     &config.infer.base_url,
                     &config.infer.ocr_model,
@@ -376,6 +380,10 @@ fn model_available(models: &[OllamaModelSummary], configured_model: &str) -> boo
         model.name.eq_ignore_ascii_case(configured_model)
             || model.model.eq_ignore_ascii_case(configured_model)
     })
+}
+
+fn should_probe_ocr_model(primary_model: &str, ocr_model: &str) -> bool {
+    !ocr_model.trim().is_empty() && !primary_model.eq_ignore_ascii_case(ocr_model)
 }
 
 fn detect_session_type() -> &'static str {
@@ -637,5 +645,13 @@ mod tests {
 
         assert!(error.to_string().contains("timed out"));
         let _ = server.finish();
+    }
+
+    #[test]
+    fn doctor_skips_duplicate_ocr_model_probe() {
+        assert!(!should_probe_ocr_model("gemma4:e2b", "gemma4:e2b"));
+        assert!(!should_probe_ocr_model("Gemma4:E2B", "gemma4:e2b"));
+        assert!(!should_probe_ocr_model("gemma4:e2b", ""));
+        assert!(should_probe_ocr_model("gemma4:e2b", "llava:latest"));
     }
 }

@@ -602,7 +602,7 @@ fallback_base_url = "https://html.duckduckgo.com/html/"
 request_timeout_ms = 10000
 max_results = 3
 open_browser = true
-rendered_ai_overview_listener = true
+rendered_ai_overview_listener = false
 rendered_ai_overview_wait_ms = 12000
 rendered_ai_overview_poll_interval_ms = 3000
 

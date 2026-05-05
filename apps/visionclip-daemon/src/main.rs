@@ -29,6 +29,7 @@ use std::{
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
+use visionclip_common::config::SearchConfig;
 use visionclip_common::{
     decode_message_payload, normalize_latin_for_language, read_message_payload, redact_for_audit,
     write_assistant_status, write_message, Action, AppConfig, ApplicationLaunchJob,
@@ -3886,7 +3887,11 @@ async fn execute_search_query(
     }
     if state.config.search.open_browser {
         open_search_query(query)?;
-        if ai_overview_chars == 0 {
+        if should_spawn_rendered_ai_overview_listener(
+            &state.config.search,
+            ai_overview_chars,
+            speak_requested,
+        ) {
             spawn_rendered_ai_overview_listener(
                 state,
                 request_id,
@@ -3958,6 +3963,14 @@ async fn execute_search_query(
         output_ms,
         tts_enqueue_ms,
     })
+}
+
+fn should_spawn_rendered_ai_overview_listener(
+    search: &SearchConfig,
+    ai_overview_chars: usize,
+    speak_requested: bool,
+) -> bool {
+    search.rendered_ai_overview_listener && ai_overview_chars == 0 && !speak_requested
 }
 
 fn spawn_rendered_ai_overview_listener(
@@ -4517,6 +4530,32 @@ mod tests {
         assert_eq!(request.task, AiTask::Chat);
         assert_eq!(request.mode, ProviderMode::LocalFirst);
         assert!(request.sensitive);
+    }
+
+    #[test]
+    fn rendered_ai_overview_listener_never_spawns_while_speaking() {
+        let search = SearchConfig {
+            rendered_ai_overview_listener: true,
+            ..Default::default()
+        };
+
+        assert!(!should_spawn_rendered_ai_overview_listener(
+            &search, 0, true
+        ));
+        assert!(should_spawn_rendered_ai_overview_listener(
+            &search, 0, false
+        ));
+        assert!(!should_spawn_rendered_ai_overview_listener(
+            &search, 10, false
+        ));
+
+        let search = SearchConfig {
+            rendered_ai_overview_listener: false,
+            ..Default::default()
+        };
+        assert!(!should_spawn_rendered_ai_overview_listener(
+            &search, 0, false
+        ));
     }
 
     #[test]
