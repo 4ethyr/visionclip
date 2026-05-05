@@ -126,7 +126,7 @@ pub struct SearchConfig {
     pub max_results: usize,
     #[serde(default = "default_true")]
     pub open_browser: bool,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub rendered_ai_overview_listener: bool,
     #[serde(default = "default_rendered_ai_overview_wait_ms")]
     pub rendered_ai_overview_wait_ms: u64,
@@ -546,7 +546,7 @@ impl Default for SearchConfig {
             request_timeout_ms: default_search_request_timeout_ms(),
             max_results: default_search_max_results(),
             open_browser: default_true(),
-            rendered_ai_overview_listener: default_true(),
+            rendered_ai_overview_listener: default_false(),
             rendered_ai_overview_wait_ms: default_rendered_ai_overview_wait_ms(),
             rendered_ai_overview_poll_interval_ms: default_rendered_ai_overview_poll_interval_ms(),
             index_on_startup: default_true(),
@@ -866,6 +866,10 @@ fn default_backend() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_false() -> bool {
+    false
 }
 
 fn default_capture_timeout_ms() -> u64 {
@@ -1347,6 +1351,7 @@ mod tests {
         assert!(cfg.search.watch_enabled);
         assert_eq!(cfg.search.debounce_ms, 800);
         assert_eq!(cfg.search.max_workers, 2);
+        assert!(!cfg.search.rendered_ai_overview_listener);
         assert!(!cfg.search.semantic_index);
         assert!(!cfg.search.ocr_index);
         assert_eq!(cfg.search.vector_backend, "sqlite_vec");

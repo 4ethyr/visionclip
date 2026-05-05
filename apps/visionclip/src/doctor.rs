@@ -468,9 +468,9 @@ fn check_rendered_ai_overview_listener_with(
     gnome_shell_available: bool,
 ) -> DoctorCheck {
     if !search.rendered_ai_overview_listener {
-        return DoctorCheck::warn(
+        return DoctorCheck::ok(
             "render-ai",
-            "listener da AI Overview renderizada desabilitado em [search]",
+            "listener visual da AI Overview renderizada desabilitado; evita capturas automáticas e flicker durante TTS",
         );
     }
 
@@ -1453,8 +1453,12 @@ mod tests {
 
     #[test]
     fn rendered_ai_overview_listener_accepts_gnome_screenshot() {
+        let search = SearchConfig {
+            rendered_ai_overview_listener: true,
+            ..Default::default()
+        };
         let check = check_rendered_ai_overview_listener_with(
-            &SearchConfig::default(),
+            &search,
             |command| command == "gnome-screenshot",
             false,
         );
@@ -1464,18 +1468,32 @@ mod tests {
 
     #[test]
     fn rendered_ai_overview_listener_accepts_gnome_shell_dbus() {
-        let check =
-            check_rendered_ai_overview_listener_with(&SearchConfig::default(), |_| false, true);
+        let search = SearchConfig {
+            rendered_ai_overview_listener: true,
+            ..Default::default()
+        };
+        let check = check_rendered_ai_overview_listener_with(&search, |_| false, true);
         assert_eq!(check.status, CheckStatus::Ok);
         assert!(check.message.contains("GNOME Shell Screenshot"));
     }
 
     #[test]
     fn rendered_ai_overview_listener_warns_without_capture_backend() {
-        let check =
-            check_rendered_ai_overview_listener_with(&SearchConfig::default(), |_| false, false);
+        let search = SearchConfig {
+            rendered_ai_overview_listener: true,
+            ..Default::default()
+        };
+        let check = check_rendered_ai_overview_listener_with(&search, |_| false, false);
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.message.contains("AI Overview"));
+    }
+
+    #[test]
+    fn rendered_ai_overview_listener_disabled_is_ok() {
+        let check =
+            check_rendered_ai_overview_listener_with(&SearchConfig::default(), |_| true, true);
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(check.message.contains("desabilitado"));
     }
 
     #[test]

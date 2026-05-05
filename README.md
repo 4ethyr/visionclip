@@ -63,6 +63,8 @@ O script faz, em ordem:
 - instala o indicador GNOME `visionclip-status@visionclip` para mostrar escuta/fala na barra superior;
 - roda diagnósticos no final.
 
+Por padrão, o listener visual de Google AI Overview renderizada fica desligado (`search.rendered_ai_overview_listener = false`). Esse listener fazia capturas repetidas da tela após buscas abertas no navegador e podia causar flashes/quadrados brancos durante a fala do TTS em alguns ambientes GNOME/Wayland.
+
 Durante a instalação, o `sudo` pode pedir sua senha para pacotes do sistema. O Hugging Face token pode ser informado por variável de ambiente ou digitado quando o script pedir:
 
 ```bash
@@ -105,6 +107,8 @@ systemctl --user status piper-http.service
 systemctl --user status visionclip-wake-listener.service
 ```
 
+O `visionclip-config doctor` limita o probe direto do modelo Ollama a 20 segundos. Se ele reportar `Configured model probe: failed (timed out...)`, o serviço ainda pode estar saudável, mas o modelo local demorou demais para responder ao diagnóstico curto.
+
 Se o daemon estiver ativo, teste sem microfone:
 
 ```bash
@@ -126,6 +130,8 @@ visionclip --action translate_ptbr --speak
 ```
 
 Em Wayland, a captura via portal pode abrir uma confirmação do sistema. Se ela expirar, o doctor mostra quais backends foram detectados.
+
+Para evitar artefatos visuais, o VisionClip nunca inicia capturas renderizadas de busca enquanto uma resposta por voz está tocando, mesmo se uma configuração antiga ainda tiver `search.rendered_ai_overview_listener = true`.
 
 ## Uso Diário
 
