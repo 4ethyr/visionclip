@@ -4,6 +4,13 @@ VisionClip é um assistente de AI local-first para Linux. Ele roda como daemon d
 
 O objetivo do projeto é evoluir para um assistente desktop multimodal no estilo Siri, mas com privacidade por padrão, execução local, validação de ferramentas, auditoria e integração real com ambientes Linux.
 
+### Após a instalação, você conseguirá utilizar comandos:
+
+Alt+Space para abrir o buscador
+Windows+Space / Super+Space para abrir comando de voz
+Alt+1 Para captura de tela com explicação
+Alt+2 Para captura de tela e tradução de texto, e assim por diante.
+
 ## Estado Atual
 
 O que já funciona no repositório:
