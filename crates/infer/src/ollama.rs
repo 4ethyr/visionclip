@@ -1191,7 +1191,7 @@ mod tests {
         assert!(json["messages"][1]["content"]
             .as_str()
             .unwrap()
-            .contains("SEARCH_CONTEXT"));
+            .contains("<search_context>"));
     }
 
     #[tokio::test]
@@ -1350,7 +1350,7 @@ mod tests {
         assert!(json["messages"][1]["content"]
             .as_str()
             .unwrap()
-            .contains("SEARCH_CONTEXT"));
+            .contains("<search_context>"));
     }
 
     #[tokio::test]
