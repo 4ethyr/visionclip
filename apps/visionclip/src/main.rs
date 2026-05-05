@@ -172,10 +172,14 @@ enum IndexCommand {
 #[derive(Debug, Subcommand)]
 enum VoiceCommand {
     Enroll {
-        #[arg(long, default_value_t = 3)]
+        #[arg(long, default_value_t = 10)]
         samples: usize,
         #[arg(long, default_value = "default")]
         label: String,
+        #[arg(long, default_value_t = 10_000)]
+        sample_duration_ms: u64,
+        #[arg(long = "phrase")]
+        phrases: Vec<String>,
     },
     Status,
     Clear,
@@ -478,10 +482,22 @@ async fn run_command(config: &AppConfig, command: &Commands, speak: bool) -> Res
 async fn run_voice_command(config: &AppConfig, command: &VoiceCommand) -> Result<()> {
     let profile_path = config.voice_profile_path()?;
     match command {
-        VoiceCommand::Enroll { samples, label } => {
-            let profile =
-                voice::enroll_speaker_profile(&config.voice, &profile_path, *samples, label)
-                    .await?;
+        VoiceCommand::Enroll {
+            samples,
+            label,
+            sample_duration_ms,
+            phrases,
+        } => {
+            let mut voice_config = config.voice.clone();
+            voice_config.record_duration_ms = (*sample_duration_ms).clamp(1_000, 30_000);
+            let profile = voice::enroll_speaker_profile(
+                &voice_config,
+                &profile_path,
+                *samples,
+                label,
+                phrases,
+            )
+            .await?;
             println!(
                 "Perfil de voz salvo em {}\nlabel={}\nsamples={}\nthreshold={:.2}",
                 profile_path.display(),

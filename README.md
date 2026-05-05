@@ -115,7 +115,7 @@ O script:
 - explica o que será gravado e onde o perfil será salvo;
 - habilita `[voice].enabled`, `wake_word_enabled` e `speaker_verification_enabled` quando você aceitar;
 - mantém `wake_block_during_playback = true` para reduzir ativações por YouTube/música enquanto não houver perfil válido;
-- grava frases curtas via `visionclip voice enroll`;
+- grava até 10 frases guiadas via `visionclip voice enroll`, com 10 segundos por frase por padrão;
 - salva backup do `~/.config/visionclip/config.toml` antes de alterar;
 - reinicia `visionclip-wake-listener.service` quando a escuta passiva estiver ativa.
 
@@ -128,11 +128,11 @@ bash scripts/setup_voice_profile.sh --dry-run --enable-wake --no-enroll --no-sta
 Fluxo recomendado para cadastrar a voz:
 
 ```bash
-bash scripts/setup_voice_profile.sh --samples 5 --label main --enable-wake
+bash scripts/setup_voice_profile.sh --samples 10 --sample-seconds 10 --label main --enable-wake
 visionclip voice status
 ```
 
-Durante a gravação, pause vídeos/músicas, fale perto do microfone e use frases naturais com `Key`, por exemplo `Key, abra o terminal`, `Key, quem foi Steve Jobs?` e `Key, open the book Black Hat Python`. O perfil fica em `~/.local/share/visionclip/voice-profile.json`, contém vetores acústicos derivados e pode ser removido com:
+Durante a gravação, pause vídeos/músicas, fale perto do microfone e leia uma frase por vez quando o terminal pedir. O onboarding sugere frases como `Key, abra o terminal`, `Key, abra o YouTube`, `Key, abra o livro Black Hat Python`, `Key, abra o livro Programming TypeScript`, `Key, traduza essa tela` e `Key, continue a leitura do livro`. O perfil fica em `~/.local/share/visionclip/voice-profile.json`, contém vetores acústicos derivados e pode ser removido com:
 
 ```bash
 visionclip voice clear
@@ -264,7 +264,7 @@ wake_block_during_playback = false
 Também existe um gate local de locutor para reduzir ativações por áudio externo sem desligar a proteção de playback. O caminho recomendado é:
 
 ```bash
-bash scripts/setup_voice_profile.sh --samples 5 --label main --enable-wake
+bash scripts/setup_voice_profile.sh --samples 10 --sample-seconds 10 --label main --enable-wake
 visionclip voice status
 ```
 

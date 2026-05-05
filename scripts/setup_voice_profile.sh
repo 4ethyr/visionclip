@@ -8,7 +8,8 @@ DATA_DIR="${VISIONCLIP_DATA_DIR:-$HOME/.local/share/visionclip}"
 USER_SYSTEMD_DIR="$HOME/.config/systemd/user"
 
 VISIONCLIP_BIN="${VISIONCLIP_BIN:-}"
-SAMPLES="${VISIONCLIP_VOICE_PROFILE_SAMPLES:-5}"
+SAMPLES="${VISIONCLIP_VOICE_PROFILE_SAMPLES:-10}"
+SAMPLE_SECONDS="${VISIONCLIP_VOICE_PROFILE_SAMPLE_SECONDS:-10}"
 LABEL="${VISIONCLIP_VOICE_PROFILE_LABEL:-main}"
 THRESHOLD="${VISIONCLIP_SPEAKER_VERIFICATION_THRESHOLD:-0.72}"
 MIN_SAMPLES="${VISIONCLIP_SPEAKER_VERIFICATION_MIN_SAMPLES:-3}"
@@ -20,6 +21,19 @@ DRY_RUN=0
 NO_ENROLL=0
 NO_START=0
 
+ENROLLMENT_PHRASES=(
+    "Key, abra o terminal."
+    "Key, abra o YouTube."
+    "Key, abra o livro Black Hat Python."
+    "Key, abra o livro Programming TypeScript."
+    "Key, pesquise sobre Rust async no Linux."
+    "Key, traduza essa tela."
+    "Key, explique esse erro."
+    "Key, continue a leitura do livro."
+    "Key, pause a leitura."
+    "Key, open the book Grey Hat Python."
+)
+
 usage() {
     cat <<'EOF'
 Usage:
@@ -30,7 +44,8 @@ Onboarding guiado de perfil de voz local para o VisionClip.
 Options:
   -y, --yes                         Aceita padrões seguros em modo não interativo.
   --dry-run                         Mostra mudanças sem gravar config nem áudio.
-  --samples N                       Número de frases para gravar. Padrão: 5.
+  --samples N                       Número de frases para gravar, 1..10. Padrão: 10.
+  --sample-seconds N                Tempo por frase, 3..20 segundos. Padrão: 10.
   --label NAME                      Rótulo do perfil. Padrão: main.
   --threshold VALUE                 Limiar do gate de locutor, 0.50..0.99. Padrão: 0.72.
   --min-samples N                   Mínimo de amostras salvo na config. Padrão: 3.
@@ -46,6 +61,8 @@ Environment:
   VISIONCLIP_BIN                    Caminho do binário visionclip.
   VISIONCLIP_CONFIG                 Caminho do config.toml.
   VISIONCLIP_VOICE_PROFILE_SAMPLES  Número padrão de amostras.
+  VISIONCLIP_VOICE_PROFILE_SAMPLE_SECONDS
+                                  Tempo padrão por frase.
   VISIONCLIP_ALLOW_NONINTERACTIVE_ENROLL=1
                                   Permite gravar mesmo sem TTY interativo.
 
@@ -103,7 +120,9 @@ confirm() {
 
 run() {
     if [[ "$DRY_RUN" == "1" ]]; then
-        info "dry-run: $*"
+        printf '[visionclip-voice-setup] dry-run:'
+        printf ' %q' "$@"
+        printf '\n'
     else
         info "running: $*"
         "$@"
@@ -121,6 +140,10 @@ parse_args() {
                 ;;
             --samples)
                 SAMPLES="${2:?missing value for --samples}"
+                shift
+                ;;
+            --sample-seconds)
+                SAMPLE_SECONDS="${2:?missing value for --sample-seconds}"
                 shift
                 ;;
             --label)
@@ -167,9 +190,11 @@ parse_args() {
 
 validate_number_config() {
     [[ "$SAMPLES" =~ ^[0-9]+$ ]] || die "--samples must be an integer"
+    [[ "$SAMPLE_SECONDS" =~ ^[0-9]+$ ]] || die "--sample-seconds must be an integer"
     [[ "$MIN_SAMPLES" =~ ^[0-9]+$ ]] || die "--min-samples must be an integer"
-    (( SAMPLES >= 1 && SAMPLES <= 20 )) || die "--samples must be between 1 and 20"
-    (( MIN_SAMPLES >= 1 && MIN_SAMPLES <= 20 )) || die "--min-samples must be between 1 and 20"
+    (( SAMPLES >= 1 && SAMPLES <= 10 )) || die "--samples deve ficar entre 1 e 10"
+    (( SAMPLE_SECONDS >= 3 && SAMPLE_SECONDS <= 20 )) || die "--sample-seconds deve ficar entre 3 e 20"
+    (( MIN_SAMPLES >= 1 && MIN_SAMPLES <= 10 )) || die "--min-samples deve ficar entre 1 e 10"
     if ! python3 - "$THRESHOLD" <<'PY'
 import sys
 try:
@@ -211,7 +236,7 @@ Onboarding de voz do VisionClip
 Este fluxo guiado vai:
   1. habilitar input de voz local no ~/.config/visionclip/config.toml;
   2. opcionalmente habilitar escuta passiva por "Key";
-  3. opcionalmente gravar frases curtas com a sua voz;
+  3. opcionalmente gravar ate 10 frases curtas com a sua voz;
   4. habilitar verificação local de locutor para reduzir ativações por
      pessoas próximas ou áudio/vídeo tocando no sistema.
 
@@ -220,7 +245,8 @@ Orientações para gravação:
   - fale naturalmente, perto do microfone;
   - use frases com "Key" e comandos reais em mais de um idioma se esse for
     seu uso normal;
-  - cada amostra deve ser curta, em torno de dois a quatro segundos.
+  - cada amostra tera ate 10 segundos por padrao;
+  - leia uma frase por vez e aguarde o pedido da proxima frase.
 
 O perfil é local-first. Este script não envia áudio nem perfil para provedores
 cloud. Isso não é autenticação biométrica forte; é um gate local prático.
@@ -413,23 +439,42 @@ record_profile() {
         return
     fi
 
+    print_enrollment_phrases
+
     cat <<EOF
 
-Frases sugeridas:
-  1. Key, abra o terminal.
-  2. Key, quem foi Steve Jobs?
-  3. Key, open the book Black Hat Python.
-  4. Key, traduza essa tela.
-  5. Key, continue a leitura do livro.
-
-A CLI vai gravar $SAMPLES amostra(s). Se alguma amostra ficar baixa ou curta
-demais, rode o script novamente em um ambiente mais silencioso ou aumente o
-ganho do microfone.
+A CLI vai gravar $SAMPLES amostra(s), com ate $SAMPLE_SECONDS segundos por frase.
+Depois que cada amostra for validada, ela pedira a proxima frase no terminal.
+Se alguma amostra ficar baixa ou curta demais, rode o script novamente em um
+ambiente mais silencioso ou aumente o ganho do microfone.
 
 EOF
 
-    run "$VISIONCLIP_BIN" voice enroll --samples "$SAMPLES" --label "$LABEL"
+    local enroll_args=(
+        voice
+        enroll
+        --samples "$SAMPLES"
+        --label "$LABEL"
+        --sample-duration-ms "$((SAMPLE_SECONDS * 1000))"
+    )
+    local index
+    for ((index = 0; index < SAMPLES && index < ${#ENROLLMENT_PHRASES[@]}; index++)); do
+        enroll_args+=(--phrase "${ENROLLMENT_PHRASES[$index]}")
+    done
+
+    run "$VISIONCLIP_BIN" "${enroll_args[@]}"
     run "$VISIONCLIP_BIN" voice status
+}
+
+print_enrollment_phrases() {
+    cat <<EOF
+
+Frases que serao usadas para afinar a escuta local:
+EOF
+    local index
+    for ((index = 0; index < SAMPLES && index < ${#ENROLLMENT_PHRASES[@]}; index++)); do
+        printf '  %2d. %s\n' "$((index + 1))" "${ENROLLMENT_PHRASES[$index]}"
+    done
 }
 
 print_summary() {

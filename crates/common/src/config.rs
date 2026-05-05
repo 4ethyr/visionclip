@@ -686,10 +686,10 @@ impl VoiceConfig {
                 "voice.speaker_verification_threshold must be between 0.50 and 0.99".into(),
             ));
         }
-        if self.speaker_verification_min_samples == 0 || self.speaker_verification_min_samples > 20
+        if self.speaker_verification_min_samples == 0 || self.speaker_verification_min_samples > 10
         {
             return Err(AppError::Config(
-                "voice.speaker_verification_min_samples must be between 1 and 20".into(),
+                "voice.speaker_verification_min_samples must be between 1 and 10".into(),
             ));
         }
         Ok(())
@@ -1419,6 +1419,18 @@ mod tests {
         let error = cfg.validate().unwrap_err();
 
         assert!(error.to_string().contains("speaker_verification_threshold"));
+    }
+
+    #[test]
+    fn voice_config_caps_speaker_enrollment_samples_at_ten() {
+        let mut cfg = AppConfig::default();
+        cfg.voice.speaker_verification_min_samples = 11;
+
+        let error = cfg.validate().unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("speaker_verification_min_samples"));
     }
 
     #[test]
