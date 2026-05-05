@@ -841,6 +841,7 @@ main() {
     info "Config: $CONFIG_PATH"
     info "Piper voices: $PIPER_VOICE_DIR"
     info "Search overlay shortcut: $SEARCH_OVERLAY_SHORTCUT"
+    info "Voice onboarding: bash $ROOT_DIR/scripts/setup_voice_profile.sh"
     info "Try: visionclip --voice-agent --voice-transcript 'Abra o terminal' --speak"
 }
 
