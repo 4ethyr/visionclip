@@ -49,3 +49,6 @@ jobs:
 
       - name: Guard secrets
         run: bash scripts/guard_no_secrets.sh
+
+      - name: Run shell script checks
+        run: bash scripts/test_voice_profile_setup.sh

@@ -102,6 +102,44 @@ bash scripts/install_visionclip.sh --no-start
 bash scripts/install_visionclip.sh --enable-wake-listener
 ```
 
+## Onboarding de voz e wake word
+
+Depois da instalação, use o onboarding guiado para configurar a escuta passiva por `Key` e gravar um perfil local de locutor:
+
+```bash
+bash scripts/setup_voice_profile.sh
+```
+
+O script:
+
+- explica o que será gravado e onde o perfil será salvo;
+- habilita `[voice].enabled`, `wake_word_enabled` e `speaker_verification_enabled` quando você aceitar;
+- mantém `wake_block_during_playback = true` para reduzir ativações por YouTube/música enquanto não houver perfil válido;
+- grava até 10 frases guiadas via `visionclip voice enroll`, com 10 segundos por frase por padrão;
+- salva backup do `~/.config/visionclip/config.toml` antes de alterar;
+- reinicia `visionclip-wake-listener.service` quando a escuta passiva estiver ativa.
+
+Modo de simulação:
+
+```bash
+bash scripts/setup_voice_profile.sh --dry-run --enable-wake --no-enroll --no-start
+```
+
+Fluxo recomendado para cadastrar a voz:
+
+```bash
+bash scripts/setup_voice_profile.sh --samples 10 --sample-seconds 10 --label main --enable-wake
+visionclip voice status
+```
+
+Durante a gravação, pause vídeos/músicas, fale perto do microfone e leia uma frase por vez quando o terminal pedir. O onboarding sugere frases como `Key, abra o terminal`, `Key, abra o YouTube`, `Key, abra o livro Black Hat Python`, `Key, abra o livro Programming TypeScript`, `Key, traduza essa tela` e `Key, continue a leitura do livro`. O perfil fica em `~/.local/share/visionclip/voice-profile.json`, contém vetores acústicos derivados e pode ser removido com:
+
+```bash
+visionclip voice clear
+```
+
+Isso é um filtro local de conveniência para wake word, não autenticação biométrica forte. Ele reduz falsos acionamentos por outras vozes e áudio externo, mas permissões sensíveis continuam passando pelo `PermissionEngine`.
+
 ## Verificação
 
 Após instalar:
@@ -207,9 +245,10 @@ liquid_noise = 0.52
 
 O agente também aceita o prefixo falado `Key` antes do comando, com som de `K` em inglês: `Key, quem foi Steve Jobs?`, `Key, abra o terminal` ou `Key, abra o livro Black Hat Python`.
 
-Wake word contínua é opcional por privacidade. Para acionar o agente apenas falando `Key`, instale ou reinstale com:
+Wake word contínua é opcional por privacidade. Para acionar o agente apenas falando `Key`, rode o onboarding de voz ou instale/reinstale com:
 
 ```bash
+bash scripts/setup_voice_profile.sh --enable-wake
 bash scripts/install_visionclip.sh --enable-wake-listener
 ```
 
@@ -222,20 +261,11 @@ Por padrão, o listener ignora ativações enquanto existir playback ativo no Pi
 wake_block_during_playback = false
 ```
 
-Também existe um gate local de locutor para reduzir ativações por áudio externo sem desligar a proteção de playback. Primeiro grave um perfil de voz local:
+Também existe um gate local de locutor para reduzir ativações por áudio externo sem desligar a proteção de playback. O caminho recomendado é:
 
 ```bash
-visionclip voice enroll --samples 3 --label main
+bash scripts/setup_voice_profile.sh --samples 10 --sample-seconds 10 --label main --enable-wake
 visionclip voice status
-```
-
-Depois habilite a verificação no `~/.config/visionclip/config.toml`:
-
-```toml
-[voice]
-speaker_verification_enabled = true
-speaker_verification_threshold = 0.72
-speaker_verification_min_samples = 3
 ```
 
 Com um perfil válido, o wake listener pode continuar ouvindo durante YouTube/música, mas só aceita o comando `Key` quando a amostra capturada se parece com o perfil cadastrado. O perfil fica em `~/.local/share/visionclip/voice-profile.json`, contém apenas vetores acústicos derivados e pode ser removido com `visionclip voice clear`. Isso é um filtro de conveniência local, não autenticação biométrica forte.
@@ -390,6 +420,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 cargo build --release --workspace --all-features
+scripts/test_voice_profile_setup.sh
 scripts/guard_no_secrets.sh
 ```
 

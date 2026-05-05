@@ -65,6 +65,18 @@ pub enum WakeAgentActivation {
 const SPEAKER_PROFILE_VERSION: u32 = 1;
 const SPEAKER_VECTOR_LEN: usize = 13;
 const SPEAKER_BANDS_HZ: [f32; 8] = [120.0, 200.0, 320.0, 500.0, 800.0, 1_300.0, 2_200.0, 3_500.0];
+const DEFAULT_SPEAKER_ENROLLMENT_PHRASES: &[&str] = &[
+    "Key, abra o terminal.",
+    "Key, abra o YouTube.",
+    "Key, abra o livro Black Hat Python.",
+    "Key, abra o livro Programming TypeScript.",
+    "Key, pesquise sobre Rust async no Linux.",
+    "Key, traduza essa tela.",
+    "Key, explique esse erro.",
+    "Key, continue a leitura do livro.",
+    "Key, pause a leitura.",
+    "Key, open the book Grey Hat Python.",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpeakerProfile {
@@ -324,6 +336,7 @@ pub async fn enroll_speaker_profile(
     profile_path: &Path,
     requested_samples: usize,
     label: &str,
+    phrases: &[String],
 ) -> Result<SpeakerProfile> {
     if !config.enabled {
         anyhow::bail!("voice input is disabled; enable [voice].enabled before enrolling a speaker");
@@ -331,17 +344,27 @@ pub async fn enroll_speaker_profile(
 
     let sample_count = requested_samples
         .max(config.speaker_verification_min_samples)
-        .clamp(1, 20);
+        .clamp(1, DEFAULT_SPEAKER_ENROLLMENT_PHRASES.len());
     let label = label.trim();
     let label = if label.is_empty() { "default" } else { label };
     let mut vectors = Vec::with_capacity(sample_count);
     let mut sample_rate_hz = config.sample_rate_hz;
 
     for index in 0..sample_count {
+        println!();
         println!(
-            "Amostra {}/{}: fale uma frase curta e natural depois do bip visual.",
-            index + 1,
-            sample_count
+            "{}",
+            speaker_enrollment_prompt(index, sample_count, config.record_duration_ms, phrases)
+        );
+        println!(
+            "Quando a captura iniciar, fale uma vez com naturalidade e aguarde a proxima instrucao."
+        );
+        if index > 0 {
+            println!("Esta e a proxima frase do cadastro; continue no mesmo tom de voz.");
+        }
+        println!(
+            "A janela de gravacao desta frase e de ate {} segundos.",
+            enrollment_duration_seconds(config.record_duration_ms)
         );
         let wav_path = temp_voice_path("speaker.wav");
         let _status =
@@ -354,6 +377,19 @@ pub async fn enroll_speaker_profile(
         sample_rate_hz = wav.sample_rate_hz;
         vectors.push(vector);
         let _ = fs::remove_file(&wav_path);
+        if index + 1 < sample_count {
+            println!(
+                "Amostra {}/{} gravada. Prepare-se para gravar a proxima frase.",
+                index + 1,
+                sample_count
+            );
+        } else {
+            println!(
+                "Amostra {}/{} gravada. Finalizando o perfil local.",
+                index + 1,
+                sample_count
+            );
+        }
     }
 
     let profile = SpeakerProfile {
@@ -367,6 +403,35 @@ pub async fn enroll_speaker_profile(
     };
     save_speaker_profile(profile_path, &profile)?;
     Ok(profile)
+}
+
+fn speaker_enrollment_prompt(
+    index: usize,
+    sample_count: usize,
+    duration_ms: u64,
+    phrases: &[String],
+) -> String {
+    format!(
+        "Amostra {}/{} - frase sugerida: \"{}\" (ate {}s)",
+        index + 1,
+        sample_count,
+        enrollment_phrase(index, phrases),
+        enrollment_duration_seconds(duration_ms)
+    )
+}
+
+fn enrollment_phrase(index: usize, phrases: &[String]) -> &str {
+    phrases
+        .get(index)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|phrase| !phrase.is_empty())
+        .or_else(|| DEFAULT_SPEAKER_ENROLLMENT_PHRASES.get(index).copied())
+        .unwrap_or(DEFAULT_SPEAKER_ENROLLMENT_PHRASES[0])
+}
+
+fn enrollment_duration_seconds(duration_ms: u64) -> u64 {
+    duration_ms.saturating_add(999).max(1_000) / 1_000
 }
 
 fn normalize_voice_agent_invocation(transcript: &str) -> String {
@@ -2918,6 +2983,24 @@ mod tests {
             }
             other => panic!("unexpected wake activation: {other:?}"),
         }
+    }
+
+    #[test]
+    fn speaker_enrollment_prompt_uses_guided_phrases_and_rounded_duration() {
+        let phrases = vec![
+            "Key, abra o terminal".to_string(),
+            "Key, open YouTube".to_string(),
+        ];
+
+        assert_eq!(
+            speaker_enrollment_prompt(1, 10, 9_250, &phrases),
+            "Amostra 2/10 - frase sugerida: \"Key, open YouTube\" (ate 10s)"
+        );
+        assert_eq!(
+            enrollment_phrase(2, &phrases),
+            "Key, abra o livro Black Hat Python."
+        );
+        assert_eq!(enrollment_duration_seconds(10_000), 10);
     }
 
     #[test]
