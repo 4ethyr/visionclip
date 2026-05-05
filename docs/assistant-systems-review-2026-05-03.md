@@ -178,12 +178,26 @@ risco >= 3.
 - A seleção de contexto de documentos agora usa recuperação híbrida quando
   embeddings existem: ranking semântico e ranking lexical são combinados com
   Reciprocal Rank Fusion antes do corte de contexto.
+- O contexto recuperado agora é entregue ao modelo dentro de
+  `<retrieved_context>` com delimitadores por chunk, e a saída copiada inclui
+  uma lista determinística dos trechos usados.
+- O prompt de respostas grounded de busca agora usa `<search_context>` e
+  `<supporting_sources>` com instrução explícita para tratar resultados externos
+  como dados não confiáveis; a auditoria da busca registra se houve resposta
+  grounded e quantas fontes entraram no contexto.
+- Prompts que recebem texto extraído por OCR agora encapsulam o conteúdo em
+  `<ocr_text>` e instruem o modelo a tratar o texto da captura como dados não
+  confiáveis, inclusive quando o objetivo é traduzir, explicar ou gerar query de
+  busca.
 - Foram adicionados testes unitários para garantir idioma parametrizado e guarda
-  de grounding e cobertura lexical+semântica no RAG híbrido.
+  de grounding, cobertura lexical+semântica no RAG híbrido, delimitadores de
+  contexto, citações locais, metadados de grounding de busca e fronteiras de
+  dados em OCR.
 
 ## Próximas melhorias recomendadas
 
-1. Citações estruturadas em `JobResult` para respostas de documentos.
+1. Citações estruturadas em `JobResult` para respostas de documentos, além do
+   rodapé textual já copiado para o clipboard.
 2. `DocumentAskJob`/`DocumentSummarizeJob` com `input_language` opcional em uma
    evolução compatível do IPC.
 3. OCR layout-aware com regiões, confiança e bboxes.

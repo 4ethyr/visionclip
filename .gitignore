@@ -11,3 +11,5 @@ dist/
 apps/*/node_modules/
 apps/*/dist/
 prints/
+agent_docs/
+animation/
