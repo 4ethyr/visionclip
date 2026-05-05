@@ -6,10 +6,10 @@ O objetivo do projeto é evoluir para um assistente desktop multimodal no estilo
 
 ### Após a instalação, você conseguirá utilizar comandos:
 
-Alt+Space para abrir o buscador
-Windows+Space / Super+Space para abrir comando de voz
-Alt+1 Para captura de tela com explicação
-Alt+2 Para captura de tela e tradução de texto, e assim por diante.
+- Alt+Space para abrir o buscador
+- Windows+Space / Super+Space para abrir comando de voz
+- Alt+1 Para captura de tela com explicação
+- Alt+2 Para captura de tela e tradução de texto, e assim por diante.
 
 ## Estado Atual
 
